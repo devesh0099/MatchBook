@@ -26,6 +26,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/unfreeze", post(unfreeze))
         .route("/admin/bench/:state", post(set_bench_health))
         .route("/admin/leaderboard/rebuild", post(rebuild))
+        .route("/admin/rejudge", post(rejudge))
         .with_state(state)
 }
 
@@ -183,6 +184,47 @@ async fn rebuild(State(st): State<AppState>) -> R {
         }
     }
     Ok(Json(json!({ "rebuilt": entries.len() })))
+}
+
+#[derive(Deserialize)]
+pub struct RejudgeQuery {
+    /// One seed for the whole block. Omit and one is chosen for you.
+    pub seed: Option<i64>,
+}
+
+/// Queue every participant's final `done` submission for re-measurement on ONE
+/// shared seed.
+///
+/// This is what makes absolute scoring defensible without drift correction: all
+/// final numbers then come from the same short window on the same machine, so
+/// cross-time comparability stops being required. The live leaderboard during
+/// the event is indicative; this is the authoritative measurement.
+///
+/// Bracket it with a reference run on either side. If the two disagree, rerun
+/// the block before announcing.
+async fn rejudge(State(st): State<AppState>, Query(q): Query<RejudgeQuery>) -> R {
+    let seed = q.seed.unwrap_or_else(|| {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() & 0x7FFF_FFFF) as i64
+    });
+
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "WITH final AS (            SELECT DISTINCT ON (participant_id) id FROM submissions            WHERE state = 'done' ORDER BY participant_id, created_at DESC)          UPDATE submissions s SET state = 'bench_queued', claimed_by = NULL,            requeue_priority = 1, bench_seed_set = ARRAY[$1::bigint]          FROM final WHERE s.id = final.id RETURNING s.id",
+    )
+    .bind(seed)
+    .fetch_all(&st.db)
+    .await
+    .map_err(oops)?;
+
+    log(&st, None, "rejudge_started", json!({ "seed": seed, "submissions": rows.len() }))
+        .await
+        .map_err(oops)?;
+
+    Ok(Json(json!({
+        "seed": seed,
+        "queued": rows.len(),
+        "submissions": rows.into_iter().map(|r| r.0).collect::<Vec<_>>(),
+    })))
 }
 
 async fn set_flag(st: &AppState, key: &str, value: bool) -> anyhow::Result<()> {

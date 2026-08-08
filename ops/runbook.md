@@ -38,10 +38,18 @@ wrongly.
 
 ### Calibrate the bands
 
-The band thresholds in `platform/api/src/state.rs` (`BANDS`) must be calibrated
-against the reference on the **actual** bench node. Take the reference p50 from
-the noise-floor run and set thresholds relative to it. Shipping the defaults
-unchanged means the bands mean nothing.
+Thresholds live in the `settings` table, not in the binary, so this is done on
+the morning without a deploy:
+
+```sql
+INSERT INTO settings (key, value) VALUES ('bands',
+  '[{"name":"gold","max_ns":X},{"name":"silver","max_ns":Y},{"name":"bronze","max_ns":Z}]'::jsonb)
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+```
+
+Set them relative to the reference p50 measured on the **actual** bench node
+during the noise-floor run. Anything above the last threshold is `finisher`.
+Shipping the defaults unchanged means the bands mean nothing.
 
 ### Publish the kit
 
@@ -105,11 +113,17 @@ curl -s localhost:8081/admin/events | jq      # janitor actions, alerts
 **The discard rate is the earliest signal the bench node has become unstable.**
 A rising rate means look now, not later.
 
-Every ~20 minutes the bench worker re-runs the reference by itself and logs
-`reference_spot_check`. Compare against the morning baseline; **>2% deviation is
-an alert**, and it is contamination detection by measurement rather than by
-inference — throttling, frequency drift and a mystery daemon all show up here
-without any per-run classification logic.
+Every ~20 minutes the bench worker re-runs the reference by itself. The FIRST
+one after the node comes up records the morning baseline into
+`settings.bench_reference_baseline_ns`; every later one is compared against it,
+and **>2% deviation marks the node unhealthy and logs
+`reference_spot_check_alert`**. Jobs then park as `pending_benchmark` rather
+than being measured on a machine that has moved.
+
+This is contamination detection by measurement rather than by inference —
+throttling, frequency drift and a mystery daemon all show up here without any
+per-run classification logic. If you re-tune the node mid-event, delete the
+baseline row so the next check re-establishes it.
 
 ### When something goes wrong
 
@@ -131,12 +145,22 @@ urgent than the risk of changing the thing that is currently working.
 
 The live leaderboard is indicative. **The rejudge is authoritative.**
 
-1. Run the reference once, immediately before the block. Record it.
-2. Rejudge every participant's final submission in **one continuous block**, on
-   fresh seeds, using the **same seed set for everyone**.
-3. Run the reference again immediately after.
-4. **If the two reference runs disagree, rerun the block.** Two minutes of
-   insurance on the only measurement that decides ranking.
+1. Run the reference once, immediately before the block, and record it:
+   ```sh
+   /opt/mebench/bin/harness bench --seed 1 --profile cancel_heavy \
+     --events 10000000 --runs 3 --engine /opt/mebench/lib/libreference_engine.so
+   ```
+2. Queue the block. One seed, every participant's final `done` submission:
+   ```sh
+   curl -X POST 'localhost:8081/admin/rejudge?seed=<pick one>'
+   ```
+   It returns the seed and the submission ids it queued. They go to the front of
+   the queue and the bench worker measures them back to back, logging
+   `[rejudge]`. Watch `/admin/queue` until nothing is `bench_queued` or
+   `benchmarking`.
+3. Run the reference again, exactly as in step 1.
+4. **If the two reference runs disagree by more than ~2%, rerun the block.** Two
+   minutes of insurance on the only measurement that decides ranking.
 
 This is what makes absolute scoring defensible without drift normalisation: all
 final numbers come from the same short window on the same machine, so
@@ -152,6 +176,32 @@ Then:
 - [ ] `pg_dump` to S3 before tearing anything down
 
 ---
+
+## Known limitations — read before the event, not during
+
+These are real and deliberate. None of them stops the event; all of them are
+worse if discovered at 5:00 PM.
+
+- **Flamegraphs are not generated.** The `flamegraph_s3` column exists and
+  nothing writes it. The "publish per-participant flamegraphs" step above cannot
+  be done as written; drop it or capture `perf` by hand for the top finishers.
+- **Plagiarism checking is not wired in.** Run Dolos or MOSS manually over the
+  submitted sources, which are in S3 under `source/<sha256>.cpp`.
+- **The benchmark lane opening at 1:30 is not enforced by the platform.** The
+  `bench_lane_open` setting exists and nothing reads it. Either hold the bench
+  worker back (`systemctl stop mebench-bench` until 1:30) or accept that
+  benchmarking is available from the start.
+- **The bench node always recompiles**, rather than reusing the pool's cached
+  binary. Nothing embeds a build fingerprint into a submission `.so`, so the
+  match check had no evidence to work from; recompiling costs about a second
+  against a job of tens of seconds and is the branch that check existed to
+  guarantee.
+- **`mlockall` may fail silently inside the box** under default rlimits, for a
+  ~400MB decoded buffer. Confirm `"memory_locked": true` in a bench JSON result
+  during the noise-floor run; if false, raise `LimitMEMLOCK` in the worker unit.
+- **The Redis sorted set is not used for serving.** The leaderboard is computed
+  from Postgres per request — fine at 18 rows. Redis holds only the freeze
+  snapshot, which IS on the serving path.
 
 ## Things worth saying out loud at the kickoff
 

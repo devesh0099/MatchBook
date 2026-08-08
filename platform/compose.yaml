@@ -19,7 +19,10 @@ services:
 
   web:
     build:
-      context: ./web
+      # Repo root: the frontend's build step reads engine/ and spec/ to generate
+      # the editor's starting buffer and the header tabs.
+      context: ..
+      dockerfile: platform/web/Dockerfile
     restart: unless-stopped
     environment:
       NODE_ENV: production

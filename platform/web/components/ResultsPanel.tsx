@@ -104,6 +104,17 @@ export function SubmissionPanel({ sub }: { sub: Submission }) {
 
       {sub.state === 'compile_failed' && d?.stderr && <pre className="out">{d.stderr}</pre>}
 
+      {sub.state === 'verify_passed' && d?.bench_held && (
+        <pre className="out tone-warn">
+          {`Correct — but not queued for the benchmark.
+
+${d.bench_held}
+
+Your code passed. This is a queue rule, not a result: the benchmark node runs
+one job at a time and one per participant per 15 minutes.`}
+        </pre>
+      )}
+
       {sub.state === 'verify_timeout' && (
         <pre className="out tone-warn">
           {`The engine stopped making progress and was stopped at the wall-clock limit.

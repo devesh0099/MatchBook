@@ -80,6 +80,10 @@ export interface VerifyDetail {
   hint?: string;
   /// isolate's own verdict when the engine died on a signal (SG).
   status?: string;
+  /// Set when correctness passed but the benchmark lane declined the job.
+  /// Never left silent: a submission sitting at verify_passed with no
+  /// explanation is the failure this field exists to prevent.
+  bench_held?: string;
   events_processed?: number;
   total_events?: number;
 }

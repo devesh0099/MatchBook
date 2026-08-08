@@ -62,23 +62,7 @@ pub struct Config {
     pub harness_bin: String,
     pub gen_bin: String,
     pub reference_so: String,
-    pub fingerprint: String,
     pub storage: Arc<Storage>,
-}
-
-impl Config {
-    /// The harness embeds a build fingerprint; the benchmark node checks it
-    /// before running a cached binary, and recompiles locally on mismatch
-    /// rather than measuring something it cannot vouch for.
-    pub fn fingerprint_ok(&self, binary: &[u8]) -> bool {
-        // The fingerprint is a plain string in .rodata, so a substring scan is
-        // enough and avoids linking an ELF parser into the worker.
-        let needle = self.fingerprint.as_bytes();
-        if needle.is_empty() {
-            return true;
-        }
-        binary.windows(needle.len()).any(|w| w == needle)
-    }
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -127,7 +111,6 @@ async fn main() -> Result<()> {
         harness_bin: env_or("MEBENCH_HARNESS", "/opt/mebench/bin/harness"),
         gen_bin: env_or("MEBENCH_GEN", "/opt/mebench/bin/gen"),
         reference_so: env_or("MEBENCH_REFERENCE_SO", "/opt/mebench/lib/libreference_engine.so"),
-        fingerprint: env_or("MEBENCH_FINGERPRINT", ""),
         storage,
     };
 

@@ -259,7 +259,37 @@ async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<
     };
 
     if !eligible {
+        // Say so, on the submission.
+        //
+        // /submit answers the rate question at request time, but the slot is
+        // only TAKEN here, when verification passes. Between the two, an
+        // earlier submission can pass and claim it — so a participant told
+        // "will queue for the benchmark" can end up at verify_passed forever
+        // with nothing explaining why. That is exactly the silently-dropped
+        // job plan section 2 designs against, arriving by a different route.
+        let reason = match &slot {
+            Some((_, Some(pending))) => format!(
+                "held: submission #{pending} is already queued for the benchmark. \
+                 One pending benchmark job per participant."
+            ),
+            Some((Some(last), None)) => {
+                let wait = (15 * 60 - (now - *last).num_seconds()).max(0);
+                format!("held: rate limited, about {wait}s until your next benchmark slot")
+            }
+            _ => "held: not eligible for the benchmark lane".to_string(),
+        };
+        sqlx::query(
+            "UPDATE submissions SET verify_detail = \
+             COALESCE(verify_detail, '{}'::jsonb) || jsonb_build_object('bench_held', $2::text), \
+             updated_at = now() WHERE id = $1",
+        )
+        .bind(id)
+        .bind(&reason)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
+        log_event(db, Some(id), "bench_enqueue_declined", serde_json::json!({ "reason": reason }))
+            .await?;
         return Ok(());
     }
 
@@ -300,19 +330,24 @@ pub async fn run_bench(db: PgPool, cfg: Config) -> Result<()> {
 
     loop {
         // Steal-time discards requeue at the FRONT, so priority leads the sort.
-        let row: Option<(i64, i32, String, Option<String>)> = sqlx::query_as(
+        let row: Option<(i64, i32, String, Option<Vec<i64>>)> = sqlx::query_as(
             "UPDATE submissions SET state = 'benchmarking', claimed_by = $1, updated_at = now() \
              WHERE id = (SELECT id FROM submissions WHERE state = 'bench_queued' \
                          ORDER BY requeue_priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED) \
-             RETURNING id, participant_id, source_hash, verify_digest",
+             RETURNING id, participant_id, source_hash, bench_seed_set",
         )
         .bind(&cfg.worker_id)
         .fetch_optional(&db)
         .await?;
 
-        if let Some((id, participant_id, hash, _digest)) = row {
-            tracing::info!("bench job {id} ({hash})");
-            if let Err(e) = run_bench_job(&db, &cfg, &sandbox, id, participant_id, &hash).await {
+        if let Some((id, participant_id, hash, pinned)) = row {
+            // A pinned seed means this is a rejudge: every participant's final
+            // submission is measured on the SAME seed set, in one continuous
+            // block, so the numbers that decide ranking are comparable by
+            // construction rather than by assumption.
+            let pinned_seed = pinned.and_then(|v| v.first().copied()).map(|s| s as u64);
+            tracing::info!("bench job {id} ({hash}){}", if pinned_seed.is_some() { " [rejudge]" } else { "" });
+            if let Err(e) = run_bench_job(&db, &cfg, &sandbox, id, participant_id, &hash, pinned_seed).await {
                 tracing::error!("bench job {id} errored: {e}");
                 set_state(&db, id, SubState::Error).await?;
                 clear_pending(&db, participant_id).await?;
@@ -342,31 +377,30 @@ async fn run_bench_job(
     id: i64,
     participant_id: i32,
     hash: &str,
+    pinned_seed: Option<u64>,
 ) -> Result<()> {
     let b = sandbox.init(cfg.box_id).await?;
     let _guard = BoxGuard { sandbox, id: cfg.box_id };
 
-    // Prefer the cached binary, but only if its build fingerprint matches this
-    // node's. On mismatch, recompile locally rather than measuring a binary we
-    // cannot vouch for.
-    let binary = cfg.storage.get_binary(hash).await.ok();
-    match binary {
-        Some(so) if cfg.fingerprint_ok(&so) => {
-            sandbox::place(&b, "engine.so", &so).await?;
-        }
-        _ => {
-            let source = cfg.storage.get_source(hash).await?;
-            sandbox::place(&b, "engine.cpp", &source).await?;
-            let compile = compile_in_box(cfg, sandbox, &b, "engine.cpp", "engine").await?;
-            if compile.exit_code != 0 {
-                set_state(db, id, SubState::CompileFailed).await?;
-                clear_pending(db, participant_id).await?;
-                return Ok(());
-            }
-        }
+    // ALWAYS recompile on the benchmark node.
+    //
+    // The plan allows reusing the pool's cached binary when its build
+    // fingerprint matches this node's — but nothing embeds a fingerprint into a
+    // submission .so, so that check has no evidence to work from and would
+    // pass vacuously. Rather than keep a check that looks like it verifies
+    // something, take the branch it was there to guarantee: recompile locally
+    // rather than measuring a binary this node cannot vouch for. It costs about
+    // a second against a job of tens of seconds.
+    let source = cfg.storage.get_source(hash).await?;
+    sandbox::place(&b, "engine.cpp", &source).await?;
+    let compile = compile_in_box(cfg, sandbox, &b, "engine.cpp", "engine").await?;
+    if compile.exit_code != 0 {
+        set_state(db, id, SubState::CompileFailed).await?;
+        clear_pending(db, participant_id).await?;
+        return Ok(());
     }
 
-    let seed = rand_seed() as u64;
+    let seed = pinned_seed.unwrap_or_else(|| rand_seed() as u64);
     let stream = generate_stream(cfg, seed, BENCH_PROFILE, BENCH_EVENTS).await?;
 
     // The expected digest is the ORACLE's for this stream, computed outside the
@@ -454,6 +488,11 @@ async fn run_bench_job(
     Ok(())
 }
 
+/// Contamination detection by MEASUREMENT rather than inference: throttling,
+/// frequency drift and a mystery daemon all show up here without any per-run
+/// classification logic.
+const SPOT_CHECK_TOLERANCE: f64 = 0.02;
+
 async fn reference_spot_check(db: &PgPool, cfg: &Config, _sandbox: &Sandbox) -> Result<()> {
     let out = tokio::process::Command::new(&cfg.harness_bin)
         .args([
@@ -464,7 +503,61 @@ async fn reference_spot_check(db: &PgPool, cfg: &Config, _sandbox: &Sandbox) -> 
         .await?;
     let v: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap_or_default();
-    log_event(db, None, "reference_spot_check", v).await?;
+
+    let Some(p50) = v.get("p50_ns").and_then(|x| x.as_f64()) else {
+        log_event(db, None, "reference_spot_check_failed", v).await?;
+        return Ok(());
+    };
+
+    // The morning baseline, recorded by the first spot check after the node
+    // comes up. Every later one is compared against it — a measurement that is
+    // never compared is just a log line.
+    let baseline: Option<(serde_json::Value,)> =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'bench_reference_baseline_ns'")
+            .fetch_optional(db)
+            .await?;
+
+    let baseline = baseline.and_then(|b| b.0.as_f64());
+    let Some(base) = baseline else {
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES ('bench_reference_baseline_ns', $1) \
+             ON CONFLICT (key) DO UPDATE SET value = $1",
+        )
+        .bind(serde_json::json!(p50))
+        .execute(db)
+        .await?;
+        tracing::info!("recorded reference baseline: {p50:.1} ns");
+        log_event(db, None, "reference_baseline_set", serde_json::json!({ "p50_ns": p50 })).await?;
+        return Ok(());
+    };
+
+    let deviation = (p50 - base).abs() / base;
+    if deviation > SPOT_CHECK_TOLERANCE {
+        tracing::error!(
+            "reference spot check deviated {:.1}% from baseline ({p50:.1} vs {base:.1} ns); \
+             marking this node unhealthy",
+            deviation * 100.0
+        );
+        sqlx::query("UPDATE workers SET healthy = false WHERE id = $1")
+            .bind(&cfg.worker_id)
+            .execute(db)
+            .await?;
+        log_event(
+            db,
+            None,
+            "reference_spot_check_alert",
+            serde_json::json!({ "p50_ns": p50, "baseline_ns": base, "deviation": deviation }),
+        )
+        .await?;
+    } else {
+        log_event(
+            db,
+            None,
+            "reference_spot_check",
+            serde_json::json!({ "p50_ns": p50, "baseline_ns": base, "deviation": deviation }),
+        )
+        .await?;
+    }
     Ok(())
 }
 

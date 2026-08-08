@@ -36,26 +36,60 @@ impl Storage {
     }
 }
 
-/// Fixed band thresholds, calibrated against the reference implementation.
+/// Band thresholds, in nanoseconds, calibrated against the reference on the
+/// ACTUAL benchmark node.
 ///
-/// Positions are not published: the correctness gate compresses the surviving
+/// These live in the `settings` table, not in the binary. The runbook's
+/// calibration step happens on the morning of the event, after the deploy
+/// freeze — a threshold that could only be changed by shipping a new build
+/// would be a step the runbook forbids itself from taking.
+///
+/// Positions are never published: the correctness gate compresses the surviving
 /// cohort — everyone left wrote a working order book — so spreads are often
-/// under 2x and defending rank 7 against rank 9 is not honestly possible
+/// under 2x, and defending rank 7 against rank 9 is not honestly possible
 /// (plan section 8).
-pub const BANDS: &[(&str, f64)] = &[
+pub const DEFAULT_BANDS: &[(&str, f64)] = &[
     ("gold", 60.0),
     ("silver", 90.0),
     ("bronze", 140.0),
-    ("finisher", f64::INFINITY),
 ];
 
-pub fn band_for(p50_ns: f64) -> &'static str {
-    for (name, ceiling) in BANDS {
-        if p50_ns <= *ceiling {
-            return name;
+pub type Bands = Vec<(String, f64)>;
+
+pub async fn load_bands(db: &PgPool) -> Bands {
+    let row: Option<(serde_json::Value,)> =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'bands'")
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+
+    if let Some((v,)) = row {
+        if let Some(arr) = v.as_array() {
+            let parsed: Bands = arr
+                .iter()
+                .filter_map(|e| {
+                    Some((
+                        e.get("name")?.as_str()?.to_string(),
+                        e.get("max_ns")?.as_f64()?,
+                    ))
+                })
+                .collect();
+            if !parsed.is_empty() {
+                return parsed;
+            }
         }
     }
-    "finisher"
+    DEFAULT_BANDS.iter().map(|(n, v)| (n.to_string(), *v)).collect()
+}
+
+pub fn band_for(bands: &Bands, p50_ns: f64) -> String {
+    for (name, ceiling) in bands {
+        if p50_ns <= *ceiling {
+            return name.clone();
+        }
+    }
+    "finisher".to_string()
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -71,7 +105,7 @@ pub struct LeaderboardRow {
 #[derive(Debug, Serialize)]
 pub struct LeaderboardEntry {
     pub handle: String,
-    pub band: &'static str,
+    pub band: String,
     pub p50_ns: f64,
     pub p99_ns: Option<f64>,
     pub probe_cost_ns: Option<f64>,
@@ -86,6 +120,7 @@ pub struct LeaderboardEntry {
 /// rebuilding the Redis serving copy from it is always cheap enough to be the
 /// answer to any suspicion of drift.
 pub async fn leaderboard_from_db(db: &PgPool) -> Result<Vec<LeaderboardEntry>> {
+    let bands = load_bands(db).await;
     let rows: Vec<LeaderboardRow> = sqlx::query_as(
         "SELECT handle, submission_id, p50_ns, p99_ns, probe_cost_ns, run_p50s_ns \
          FROM leaderboard ORDER BY p50_ns ASC",
@@ -101,7 +136,7 @@ pub async fn leaderboard_from_db(db: &PgPool) -> Result<Vec<LeaderboardEntry>> {
             let (lo, hi) = bootstrap_ci(&runs, p50);
             Some(LeaderboardEntry {
                 handle: r.handle,
-                band: band_for(p50),
+                band: band_for(&bands, p50),
                 p50_ns: p50,
                 p99_ns: r.p99_ns,
                 probe_cost_ns: r.probe_cost_ns,
