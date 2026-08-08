@@ -2,20 +2,27 @@
   "name": "me-web",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "sync": "node scripts/sync-assets.mjs",
+    "predev": "npm run sync",
+    "dev": "next dev -p 3000",
+    "prebuild": "npm run sync",
     "build": "next build",
     "start": "next start -p 3000",
-    "lint": "next lint"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@monaco-editor/react": "4.6.0",
-    "next": "14.2.15",
-    "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "@monaco-editor/react": "^4.7.0",
+    "next": "^16.3.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@types/node": "20.14.10",
-    "@types/react": "18.3.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "typescript": "5.5.4"
+  },
+  "overrides": {
+    "dompurify": "^3.4.13"
   }
 }

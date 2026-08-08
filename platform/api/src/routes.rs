@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/participants", get(participants))
         .route("/draft", put(put_draft).get(get_draft))
         .route("/run", post(run))
+        .route("/runs/:id", get(run_result))
         .route("/submit", post(submit))
         .route("/submissions/:id", get(submission))
         .route("/me", get(me))
@@ -158,6 +159,28 @@ async fn run(
     .map_err(internal)?;
 
     Ok(Json(json!({ "run_id": id, "source_hash": hash })))
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct RunJobRow {
+    pub id: i64,
+    pub state: String,
+    pub result: Option<serde_json::Value>,
+}
+
+/// Polled by the editor until `state` is terminal. Run jobs are ephemeral and
+/// never become submissions.
+async fn run_result(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<serde_json::Value> {
+    let row: Option<RunJobRow> = sqlx::query_as("SELECT id, state, result FROM run_jobs WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&st.db)
+        .await
+        .map_err(internal)?;
+    let Some(row) = row else {
+        return Err(err(StatusCode::NOT_FOUND, "no such run"));
+    };
+    let terminal = row.state == "done" || row.state == "failed";
+    Ok(Json(json!({ "run": row, "terminal": terminal })))
 }
 
 // ---------------------------------------------------------------- submit
