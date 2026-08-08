@@ -9,3 +9,4 @@ node_modules/
 streams/
 .env
 .DS_Store
+target/

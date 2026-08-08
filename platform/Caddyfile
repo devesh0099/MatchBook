@@ -1,0 +1,18 @@
+# Caddy terminates TLS and puts the frontend and the API on one origin, so the
+# browser never makes a cross-origin request and there is no CORS to configure.
+#
+# The operator router is deliberately absent here: it listens on 127.0.0.1 and
+# is reached over an SSH tunnel to the web node. Do not proxy it.
+
+{$SITE_ADDRESS:localhost} {
+	encode gzip
+
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy api:8080
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+}
