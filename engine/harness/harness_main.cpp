@@ -3,9 +3,23 @@
 //   harness verify --stream F --engine ./sub.so [--oracle builtin] [--wall-time 45]
 //   harness verify --seed S --profile P --events N --engine ./sub.so
 //
-// A stream can be read from a file or generated in process from its seed. The
-// correctness pool uses the second form: the seed IS the stream, so there is no
-// reason to round-trip 240MB through a disk.
+// A stream can be read from a file, from an inherited file descriptor, or
+// generated in process from its seed.
+//
+// SEED HANDLING IS A SECURITY BOUNDARY. The submission is dlopen()ed into this
+// process, so it can read /proc/self/cmdline. The generator is published, so a
+// seed on the command line is complete knowledge of every future event —
+// enough to precompute output or prefetch the stream and post a latency that
+// measures nothing. That invalidates the leaderboard.
+//
+//   --seed      ONLY for visible lanes: Run, local iteration, published seeds.
+//   --stream-fd for hidden streams. The parent opens the stream, passes the fd,
+//               and drops privileges; the box UID never gets a readable path
+//               and the seed never appears in argv (plan section 10).
+//
+// The correctness lane is the softer case — its seed is fresh per submission
+// and knowing it does not make a wrong engine right — but the ranked lane must
+// always use --stream-fd.
 
 #include <signal.h>
 #include <unistd.h>
@@ -71,6 +85,9 @@ void usage() {
       "\n"
       "  stream options, either:\n"
       "    --stream FILE      a stream written by `gen`\n"
+      "    --stream-fd N      an inherited fd holding the stream. USE THIS for hidden\n"
+      "                       streams: --seed puts the seed in argv, and the loaded\n"
+      "                       submission can read /proc/self/cmdline\n"
       "  or:\n"
       "    --seed S --profile P --events N    generate it in process\n"
       "\n"
@@ -96,9 +113,14 @@ bool parse_u64(const char* s, uint64_t& out) {
   return true;
 }
 
+bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, uint64_t seed,
+                 const std::string& profile_name, uint64_t events,
+                 std::vector<mebench::WireEvent>& out);
+
 int run_verify(int argc, char** argv) {
   std::string engine_spec, oracle_spec = "builtin", stream_path, profile_name = "balanced";
   uint64_t seed = 0, events = 0;
+  int stream_fd = -1;
   bool have_seed = false;
   mebench::harness::VerifyOptions opts;
   bool as_json = false;
@@ -112,6 +134,8 @@ int run_verify(int argc, char** argv) {
       oracle_spec = argv[++i];
     } else if (a == "--stream" && has_next) {
       stream_path = argv[++i];
+    } else if (a == "--stream-fd" && has_next) {
+      stream_fd = std::atoi(argv[++i]);
     } else if (a == "--seed" && has_next) {
       if (!parse_u64(argv[++i], seed)) return usage(), kExitUsage;
       have_seed = true;
@@ -143,26 +167,8 @@ int run_verify(int argc, char** argv) {
   }
 
   std::vector<mebench::WireEvent> stream;
-  if (!stream_path.empty()) {
-    mebench::StreamHeader header{};
-    std::string err;
-    if (!mebench::generator::read_stream(stream_path, header, stream, err)) {
-      std::fprintf(stderr, "%s\n", err.c_str());
-      return 2;
-    }
-  } else if (have_seed && events > 0) {
-    mebench::Profile profile{};
-    if (!mebench::generator::parse_profile(profile_name, profile)) {
-      std::fprintf(stderr, "unknown profile: %s\n", profile_name.c_str());
-      return 2;
-    }
-    mebench::generator::Generator gen(seed, profile);
-    stream = gen.generate(events);
-  } else {
-    std::fprintf(stderr, "need either --stream FILE or --seed S --events N\n");
-    usage();
-    return 2;
-  }
+  if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream))
+    return kExitUsage;
 
   std::string err;
   auto submission = mebench::harness::EngineSource::open(engine_spec, err);
@@ -208,9 +214,20 @@ int run_verify(int argc, char** argv) {
 
 // Shared by both modes: a stream is either read from a file or generated in
 // process from its seed.
-bool load_stream(const std::string& stream_path, bool have_seed, uint64_t seed,
+bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, uint64_t seed,
                  const std::string& profile_name, uint64_t events,
                  std::vector<mebench::WireEvent>& out) {
+  if (stream_fd >= 0) {
+    // The hidden-stream path: the fd was inherited before privileges dropped,
+    // so the submission never sees a path it could open itself, and no seed
+    // ever reaches argv.
+    std::string err;
+    if (!mebench::generator::read_stream_fd(stream_fd, out, err)) {
+      std::fprintf(stderr, "%s\n", err.c_str());
+      return false;
+    }
+    return true;
+  }
   if (!stream_path.empty()) {
     mebench::StreamHeader header{};
     std::string err;
@@ -245,6 +262,7 @@ bool load_stream(const std::string& stream_path, bool have_seed, uint64_t seed,
 int run_digest(int argc, char** argv) {
   std::string engine_spec = "builtin", stream_path, profile_name = "cancel_heavy";
   uint64_t seed = 0, events = 0;
+  int stream_fd = -1;
   bool have_seed = false;
 
   for (int i = 0; i < argc; ++i) {
@@ -254,6 +272,8 @@ int run_digest(int argc, char** argv) {
       engine_spec = argv[++i];
     } else if (a == "--stream" && has_next) {
       stream_path = argv[++i];
+    } else if (a == "--stream-fd" && has_next) {
+      stream_fd = std::atoi(argv[++i]);
     } else if (a == "--seed" && has_next) {
       if (!parse_u64(argv[++i], seed)) return usage(), kExitUsage;
       have_seed = true;
@@ -268,7 +288,8 @@ int run_digest(int argc, char** argv) {
   }
 
   std::vector<mebench::WireEvent> stream;
-  if (!load_stream(stream_path, have_seed, seed, profile_name, events, stream)) return kExitUsage;
+  if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream))
+    return kExitUsage;
 
   std::string err;
   auto engine = mebench::harness::EngineSource::open(engine_spec, err);
@@ -290,6 +311,7 @@ int run_digest(int argc, char** argv) {
 int run_bench(int argc, char** argv) {
   std::string engine_spec, stream_path, profile_name = "cancel_heavy", json_path;
   uint64_t seed = 0, events = 0;
+  int stream_fd = -1;
   bool have_seed = false, as_json = false;
   mebench::harness::BenchOptions opts;
 
@@ -300,6 +322,8 @@ int run_bench(int argc, char** argv) {
       engine_spec = argv[++i];
     } else if (a == "--stream" && has_next) {
       stream_path = argv[++i];
+    } else if (a == "--stream-fd" && has_next) {
+      stream_fd = std::atoi(argv[++i]);
     } else if (a == "--seed" && has_next) {
       if (!parse_u64(argv[++i], seed)) return usage(), kExitUsage;
       have_seed = true;
@@ -335,7 +359,8 @@ int run_bench(int argc, char** argv) {
   }
 
   std::vector<mebench::WireEvent> stream;
-  if (!load_stream(stream_path, have_seed, seed, profile_name, events, stream)) return kExitUsage;
+  if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream))
+    return kExitUsage;
 
   std::string err;
   auto engine = mebench::harness::EngineSource::open(engine_spec, err);

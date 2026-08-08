@@ -178,4 +178,10 @@ bool write_stream(const std::string& path, uint64_t seed, Profile profile,
 bool read_stream(const std::string& path, StreamHeader& header, std::vector<WireEvent>& events,
                  std::string& err);
 
+// Read a stream from an already-open descriptor. Used for hidden streams: the
+// parent opens the file and passes the fd before dropping privileges, so the
+// sandboxed submission never sees a path it could open and no seed ever
+// appears on the command line (plan section 10).
+bool read_stream_fd(int fd, std::vector<WireEvent>& events, std::string& err);
+
 }  // namespace mebench::generator

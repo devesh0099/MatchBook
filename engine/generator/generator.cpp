@@ -508,6 +508,34 @@ bool write_stream(const std::string& path, uint64_t seed, Profile profile,
   return ok;
 }
 
+bool read_stream_fd(int fd, std::vector<WireEvent>& events, std::string& err) {
+  std::FILE* f = fdopen(fd, "rb");
+  if (!f) {
+    err = "cannot read stream from inherited fd";
+    return false;
+  }
+  StreamHeader header{};
+  if (std::fread(&header, sizeof(header), 1, f) != 1) {
+    err = "truncated header on inherited fd";
+    std::fclose(f);
+    return false;
+  }
+  if (std::memcmp(header.magic, kStreamMagic, sizeof(header.magic)) != 0) {
+    err = "inherited fd does not carry a MEBENCH1 stream";
+    std::fclose(f);
+    return false;
+  }
+  events.resize(header.event_count);
+  const size_t got =
+      header.event_count ? std::fread(events.data(), sizeof(WireEvent), header.event_count, f) : 0;
+  std::fclose(f);
+  if (got != header.event_count) {
+    err = "truncated stream body on inherited fd";
+    return false;
+  }
+  return true;
+}
+
 bool read_stream(const std::string& path, StreamHeader& header, std::vector<WireEvent>& events,
                  std::string& err) {
   std::FILE* f = std::fopen(path.c_str(), "rb");
