@@ -1,0 +1,623 @@
+//! The two worker roles. Both poll Postgres directly — same VPC, no broker.
+//!
+//! Claim-and-commit: the claim commits immediately (no transaction held across
+//! the job), the worker does the work, then commits the terminal state. The
+//! claim IS the state transition, which is what makes crash recovery a single
+//! janitor statement rather than a protocol.
+
+use anyhow::{Context, Result};
+use common::{harness_exit, SubState};
+use sqlx::PgPool;
+use std::time::Duration;
+
+use crate::sandbox::{self, RunOpts, Sandbox};
+use crate::Config;
+
+/// The correctness lane's stream. Short on purpose: it catches essentially
+/// every bug the 10M stream catches, in a fraction of the time, and lane
+/// throughput is what makes iteration feel fast.
+const VERIFY_EVENTS: u64 = 300_000;
+const VERIFY_PROFILE: &str = "balanced";
+const VERIFY_WALL_TIME_S: f64 = 45.0;
+
+/// The ranked stream.
+const BENCH_EVENTS: u64 = 10_000_000;
+const BENCH_PROFILE: &str = "cancel_heavy";
+const BENCH_RUNS: u32 = 9;
+
+// ---------------------------------------------------------------- pool role
+
+pub async fn run_pool(db: PgPool, cfg: Config) -> Result<()> {
+    let sandbox = Sandbox::new();
+    loop {
+        // Run jobs come first, always. Run turnaround IS the iteration loop and
+        // must feel instant; a Submit can wait three extra seconds.
+        if claim_run_job(&db, &cfg, &sandbox).await? {
+            continue;
+        }
+        if claim_submission(&db, &cfg, &sandbox).await? {
+            continue;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+}
+
+async fn claim_run_job(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Result<bool> {
+    let row: Option<(i64, String)> = sqlx::query_as(
+        "UPDATE run_jobs SET state = 'running', claimed_by = $1, updated_at = now() \
+         WHERE id = (SELECT id FROM run_jobs WHERE state = 'received' \
+                     ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) \
+         RETURNING id, source_hash",
+    )
+    .bind(&cfg.worker_id)
+    .fetch_optional(db)
+    .await?;
+
+    let Some((id, hash)) = row else { return Ok(false) };
+    tracing::info!("run job {id} ({hash})");
+
+    let result = match execute_run(cfg, sandbox, &hash).await {
+        Ok(v) => v,
+        Err(e) => serde_json::json!({ "error": e.to_string() }),
+    };
+    sqlx::query("UPDATE run_jobs SET state = 'done', result = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(result)
+        .execute(db)
+        .await?;
+    Ok(true)
+}
+
+/// Compile, then run the ~30 visible tests. These teach; they do not grade, so
+/// nothing here touches the submissions table.
+async fn execute_run(cfg: &Config, sandbox: &Sandbox, hash: &str) -> Result<serde_json::Value> {
+    let source = cfg.storage.get_source(hash).await?;
+    let b = sandbox.init(cfg.box_id).await?;
+    let _guard = BoxGuard { sandbox, id: cfg.box_id };
+
+    sandbox::place(&b, "engine.cpp", &source).await?;
+    let compile = compile_in_box(cfg, sandbox, &b, "engine.cpp", "tests").await?;
+    if compile.exit_code != 0 {
+        return Ok(serde_json::json!({
+            "compiled": false,
+            "stderr": first_lines(&compile.stderr, 100),
+        }));
+    }
+
+    let out = sandbox
+        .run(
+            &b,
+            &RunOpts::for_verify(30.0),
+            &["./run_tests", "--json"],
+        )
+        .await?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(out.stdout.trim()).unwrap_or_else(|_| serde_json::json!({}));
+    Ok(serde_json::json!({ "compiled": true, "tests": parsed }))
+}
+
+async fn claim_submission(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Result<bool> {
+    let row: Option<(i64, i32, String)> = sqlx::query_as(
+        "UPDATE submissions SET state = 'compiling', claimed_by = $1, updated_at = now() \
+         WHERE id = (SELECT id FROM submissions WHERE state = 'received' \
+                     ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) \
+         RETURNING id, participant_id, source_hash",
+    )
+    .bind(&cfg.worker_id)
+    .fetch_optional(db)
+    .await?;
+
+    let Some((id, participant_id, hash)) = row else { return Ok(false) };
+    tracing::info!("submission {id} ({hash})");
+
+    match process_submission(db, cfg, sandbox, id, participant_id, &hash).await {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::error!("submission {id} errored: {e}");
+            set_state(db, id, SubState::Error).await?;
+            log_event(db, Some(id), "worker_error", serde_json::json!({ "error": e.to_string() }))
+                .await?;
+        }
+    }
+    Ok(true)
+}
+
+async fn process_submission(
+    db: &PgPool,
+    cfg: &Config,
+    sandbox: &Sandbox,
+    id: i64,
+    participant_id: i32,
+    hash: &str,
+) -> Result<()> {
+    let source = cfg.storage.get_source(hash).await?;
+    let b = sandbox.init(cfg.box_id).await?;
+    let _guard = BoxGuard { sandbox, id: cfg.box_id };
+    sandbox::place(&b, "engine.cpp", &source).await?;
+
+    // ---- compile
+    let compile = compile_in_box(cfg, sandbox, &b, "engine.cpp", "engine").await?;
+    if compile.exit_code != 0 {
+        sqlx::query(
+            "UPDATE submissions SET state = 'compile_failed', verify_detail = $2, \
+             updated_at = now() WHERE id = $1",
+        )
+        .bind(id)
+        .bind(serde_json::json!({ "stderr": first_lines(&compile.stderr, 100) }))
+        .execute(db)
+        .await?;
+        return Ok(());
+    }
+
+    // The binary is cached on the source hash: participants resubmit unchanged
+    // code more often than expected, especially when chasing a fresh bench slot.
+    if let Ok(so) = sandbox::read_out(&b, "engine.so").await {
+        cfg.storage.put_binary(hash, so).await?;
+    }
+
+    // ---- verify, on a seed this submission has never seen
+    set_state(db, id, SubState::Verifying).await?;
+    let seed: i64 = rand_seed();
+
+    // The seed reaches the harness as a generated stream file passed by fd, not
+    // as --seed on argv: the submission is dlopen'ed into the harness process
+    // and can read /proc/self/cmdline.
+    let stream = generate_stream(cfg, seed as u64, VERIFY_PROFILE, VERIFY_EVENTS).await?;
+
+    let verify = sandbox
+        .run_with_stream(
+            &b,
+            &RunOpts::for_verify(VERIFY_WALL_TIME_S + 10.0),
+            &[
+                "./harness",
+                "verify",
+                "--stream-fd",
+                &sandbox::STREAM_FD.to_string(),
+                "--engine",
+                "./engine.so",
+                "--wall-time",
+                &VERIFY_WALL_TIME_S.to_string(),
+                "--json",
+            ],
+            Some(stream.dup_fd()?),
+        )
+        .await?;
+
+    let detail: serde_json::Value =
+        serde_json::from_str(verify.stdout.trim()).unwrap_or_else(|_| {
+            serde_json::json!({ "outcome": "error", "stderr": first_lines(&verify.stderr, 40) })
+        });
+
+    // A crashed engine is not a wrong answer either. Saying "segfault" beats
+    // showing a diff that never got produced.
+    let detail = if verify.killed() {
+        serde_json::json!({
+            "outcome": "crashed",
+            "status": verify.status,
+            "hint": "the engine died before finishing: signal or runtime error, not a diff",
+            "stderr": first_lines(&verify.stderr, 40),
+        })
+    } else {
+        detail
+    };
+
+    // A timeout is a liveness failure, reported distinctly from a wrong answer:
+    // they are different bugs and conflating them wastes participant time.
+    let state = if verify.timed_out() || verify.exit_code == harness_exit::TIMEOUT {
+        SubState::VerifyTimeout
+    } else if verify.exit_code == harness_exit::PASSED {
+        SubState::VerifyPassed
+    } else {
+        SubState::VerifyFailed
+    };
+
+    let digest = detail.get("digest").and_then(|d| d.as_str()).map(str::to_string);
+    sqlx::query(
+        "UPDATE submissions SET state = $2, verify_seed = $3, verify_detail = $4, \
+         verify_digest = $5, updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(state)
+    .bind(seed)
+    .bind(&detail)
+    .bind(digest)
+    .execute(db)
+    .await?;
+
+    if state != SubState::VerifyPassed {
+        return Ok(());
+    }
+
+    try_enqueue_bench(db, id, participant_id).await
+}
+
+/// Rate rules are applied here, at enqueue, in one transaction: one bench run
+/// per participant per 15 minutes, and at most one pending bench job each. The
+/// second rule is what makes the queue self-throttling — worst-case depth is 18.
+async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<()> {
+    let mut tx = db.begin().await?;
+
+    let slot: Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)> = sqlx::query_as(
+        "SELECT last_bench_at, pending_sub FROM bench_slots WHERE participant_id = $1 FOR UPDATE",
+    )
+    .bind(participant_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let now = chrono::Utc::now();
+    let eligible = match &slot {
+        Some((_, Some(_))) => false, // already has one pending
+        Some((Some(last), None)) => (now - *last).num_seconds() >= 15 * 60,
+        _ => true,
+    };
+
+    if !eligible {
+        tx.commit().await?;
+        return Ok(());
+    }
+
+    // If no bench worker is healthy, park rather than error: correctness keeps
+    // working and the queue is rejudged when the node returns.
+    let (healthy,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM workers WHERE role = 'bench' AND healthy = true")
+            .fetch_one(&mut *tx)
+            .await?;
+    let target = if healthy > 0 { SubState::BenchQueued } else { SubState::PendingBenchmark };
+
+    sqlx::query("UPDATE submissions SET state = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(target)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO bench_slots (participant_id, last_bench_at, pending_sub) \
+         VALUES ($1, $2, $3) ON CONFLICT (participant_id) \
+         DO UPDATE SET last_bench_at = $2, pending_sub = $3",
+    )
+    .bind(participant_id)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- bench role
+
+pub async fn run_bench(db: PgPool, cfg: Config) -> Result<()> {
+    let sandbox = Sandbox::new();
+    let mut last_spot_check = std::time::Instant::now();
+
+    loop {
+        // Steal-time discards requeue at the FRONT, so priority leads the sort.
+        let row: Option<(i64, i32, String, Option<String>)> = sqlx::query_as(
+            "UPDATE submissions SET state = 'benchmarking', claimed_by = $1, updated_at = now() \
+             WHERE id = (SELECT id FROM submissions WHERE state = 'bench_queued' \
+                         ORDER BY requeue_priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED) \
+             RETURNING id, participant_id, source_hash, verify_digest",
+        )
+        .bind(&cfg.worker_id)
+        .fetch_optional(&db)
+        .await?;
+
+        if let Some((id, participant_id, hash, _digest)) = row {
+            tracing::info!("bench job {id} ({hash})");
+            if let Err(e) = run_bench_job(&db, &cfg, &sandbox, id, participant_id, &hash).await {
+                tracing::error!("bench job {id} errored: {e}");
+                set_state(&db, id, SubState::Error).await?;
+                clear_pending(&db, participant_id).await?;
+            }
+            continue;
+        }
+
+        // Between jobs, roughly every 20 minutes, re-measure the reference.
+        // This is contamination detection by MEASUREMENT rather than inference:
+        // throttling, frequency drift or a mystery daemon all show up here
+        // without any per-run classification logic.
+        if last_spot_check.elapsed() > Duration::from_secs(20 * 60) {
+            last_spot_check = std::time::Instant::now();
+            if let Err(e) = reference_spot_check(&db, &cfg, &sandbox).await {
+                tracing::error!("reference spot check failed: {e}");
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn run_bench_job(
+    db: &PgPool,
+    cfg: &Config,
+    sandbox: &Sandbox,
+    id: i64,
+    participant_id: i32,
+    hash: &str,
+) -> Result<()> {
+    let b = sandbox.init(cfg.box_id).await?;
+    let _guard = BoxGuard { sandbox, id: cfg.box_id };
+
+    // Prefer the cached binary, but only if its build fingerprint matches this
+    // node's. On mismatch, recompile locally rather than measuring a binary we
+    // cannot vouch for.
+    let binary = cfg.storage.get_binary(hash).await.ok();
+    match binary {
+        Some(so) if cfg.fingerprint_ok(&so) => {
+            sandbox::place(&b, "engine.so", &so).await?;
+        }
+        _ => {
+            let source = cfg.storage.get_source(hash).await?;
+            sandbox::place(&b, "engine.cpp", &source).await?;
+            let compile = compile_in_box(cfg, sandbox, &b, "engine.cpp", "engine").await?;
+            if compile.exit_code != 0 {
+                set_state(db, id, SubState::CompileFailed).await?;
+                clear_pending(db, participant_id).await?;
+                return Ok(());
+            }
+        }
+    }
+
+    let seed = rand_seed() as u64;
+    let stream = generate_stream(cfg, seed, BENCH_PROFILE, BENCH_EVENTS).await?;
+
+    // The expected digest is the ORACLE's for this stream, computed outside the
+    // box. Verification inside the timed run is what stops anyone winning by
+    // doing less work.
+    let oracle_digest = oracle_digest(cfg, &stream.path).await?;
+
+    let out = sandbox
+        .run_with_stream(
+            &b,
+            &RunOpts::for_bench(600.0),
+            &[
+                "./harness",
+                "bench",
+                "--stream-fd",
+                &sandbox::STREAM_FD.to_string(),
+                "--engine",
+                "./engine.so",
+                "--runs",
+                &BENCH_RUNS.to_string(),
+                "--digest",
+                &oracle_digest,
+                "--json",
+            ],
+            Some(stream.dup_fd()?),
+        )
+        .await?;
+
+    let result: serde_json::Value =
+        serde_json::from_str(out.stdout.trim()).unwrap_or_else(|_| serde_json::json!({}));
+
+    if out.exit_code == harness_exit::UNHEALTHY {
+        // Three consecutive steal-time discards: stop requeueing and alert.
+        // The node is unhealthy and a human should look before the queue churns
+        // silently.
+        tracing::error!("bench node reports unhealthy; parking job {id}");
+        sqlx::query("UPDATE workers SET healthy = false WHERE id = $1")
+            .bind(&cfg.worker_id)
+            .execute(db)
+            .await?;
+        sqlx::query(
+            "UPDATE submissions SET state = 'pending_benchmark', requeue_priority = 1, \
+             updated_at = now() WHERE id = $1",
+        )
+        .bind(id)
+        .execute(db)
+        .await?;
+        log_event(db, Some(id), "bench_node_unhealthy", result).await?;
+        return Ok(());
+    }
+
+    let state = if out.exit_code == harness_exit::PASSED {
+        SubState::Done
+    } else {
+        // Passed correctness, diverged on the benchmark stream — its own
+        // outcome, not a generic failure.
+        SubState::BenchVerifyFailed
+    };
+
+    let f = |k: &str| result.get(k).and_then(|v| v.as_f64());
+    let runs: Vec<f64> = result
+        .get("run_p50s_ns")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
+        .unwrap_or_default();
+
+    sqlx::query(
+        "UPDATE submissions SET state = $2, bench_seed_set = ARRAY[$3::bigint], p50_ns = $4, \
+         p99_ns = $5, probe_cost_ns = $6, run_p50s_ns = $7, discard_count = $8, updated_at = now() \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(state)
+    .bind(seed as i64)
+    .bind(f("p50_ns"))
+    .bind(f("p99_ns"))
+    .bind(f("probe_cost_ns"))
+    .bind(&runs)
+    .bind(result.get("discard_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
+    .execute(db)
+    .await?;
+
+    clear_pending(db, participant_id).await?;
+    Ok(())
+}
+
+async fn reference_spot_check(db: &PgPool, cfg: &Config, _sandbox: &Sandbox) -> Result<()> {
+    let out = tokio::process::Command::new(&cfg.harness_bin)
+        .args([
+            "bench", "--seed", "1", "--profile", BENCH_PROFILE, "--events", "2000000", "--runs",
+            "3", "--engine", &cfg.reference_so, "--json",
+        ])
+        .output()
+        .await?;
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap_or_default();
+    log_event(db, None, "reference_spot_check", v).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- helpers
+
+struct BoxGuard<'a> {
+    sandbox: &'a Sandbox,
+    id: u32,
+}
+
+impl Drop for BoxGuard<'_> {
+    fn drop(&mut self) {
+        // A leaked box wedges that box id for the rest of the event, so this
+        // has to happen on every path out — including the error paths.
+        self.sandbox.cleanup_blocking(self.id);
+    }
+}
+
+async fn compile_in_box(
+    cfg: &Config,
+    sandbox: &Sandbox,
+    b: &sandbox::Box_,
+    src: &str,
+    kind: &str,
+) -> Result<sandbox::RunOutcome> {
+    // Pinned compiler, published flags, explicit -march. Never -march=native:
+    // the pool and the bench node are different instance families, and a binary
+    // verified on one must be the binary measured on the other.
+    let mut argv: Vec<String> = vec![
+        cfg.cxx.clone(),
+        "-std=c++20".into(),
+        "-O2".into(),
+        format!("-march={}", cfg.march),
+        "-fno-omit-frame-pointer".into(),
+        "-fPIC".into(),
+        format!("-I{}", cfg.include_dir),
+    ];
+    if kind == "tests" {
+        argv.extend([
+            "-o".into(),
+            "run_tests".into(),
+            src.into(),
+            format!("{}/spec_tests.cpp", cfg.tests_dir),
+            format!("{}/run_tests_main.cpp", cfg.tests_dir),
+        ]);
+    } else {
+        argv.extend(["-shared".into(), "-o".into(), "engine.so".into(), src.into()]);
+    }
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+
+    let mut opts = RunOpts::for_compile();
+    opts.binds = cfg.compile_binds();
+    sandbox.run(b, &opts, &refs).await
+}
+
+/// A generated stream, held open outside the box. Only the descriptor crosses
+/// in; the file itself is never readable by the box UID, and the seed never
+/// appears in argv.
+pub struct HiddenStream {
+    file: Option<std::fs::File>,
+    pub path: std::path::PathBuf,
+}
+
+impl HiddenStream {
+    /// Hand the descriptor to a sandboxed run. The file stays owned here, so
+    /// the temp file is still removed when this drops.
+    pub fn dup_fd(&self) -> std::io::Result<std::fs::File> {
+        self.file.as_ref().expect("stream file present").try_clone()
+    }
+}
+
+impl Drop for HiddenStream {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Generate a stream outside the sandbox. The seed never enters the box.
+async fn generate_stream(
+    cfg: &Config,
+    seed: u64,
+    profile: &str,
+    events: u64,
+) -> Result<HiddenStream> {
+    let path = std::env::temp_dir().join(format!("stream-{}-{}.bin", cfg.worker_id, seed));
+    let out = tokio::process::Command::new(&cfg.gen_bin)
+        .args([
+            "--seed",
+            &seed.to_string(),
+            "--profile",
+            profile,
+            "--events",
+            &events.to_string(),
+            "-o",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .await
+        .context("running gen")?;
+    if !out.status.success() {
+        anyhow::bail!("gen failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    // Readable only by the worker. The box runs as a different unprivileged
+    // UID, so even the path leaking would not be enough.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    let file = std::fs::File::open(&path)?;
+    Ok(HiddenStream { file: Some(file), path })
+}
+
+/// Computed OUTSIDE the box, by the reference, over the same stream.
+async fn oracle_digest(cfg: &Config, path: &std::path::Path) -> Result<String> {
+    let out = tokio::process::Command::new(&cfg.harness_bin)
+        .args(["digest", "--stream", path.to_str().unwrap(), "--engine", "builtin"])
+        .output()
+        .await?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+async fn set_state(db: &PgPool, id: i64, state: SubState) -> Result<()> {
+    sqlx::query("UPDATE submissions SET state = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(state)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+async fn clear_pending(db: &PgPool, participant_id: i32) -> Result<()> {
+    sqlx::query("UPDATE bench_slots SET pending_sub = NULL WHERE participant_id = $1")
+        .bind(participant_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+async fn log_event(
+    db: &PgPool,
+    submission_id: Option<i64>,
+    kind: &str,
+    detail: serde_json::Value,
+) -> Result<()> {
+    sqlx::query("INSERT INTO events_log (submission_id, kind, detail) VALUES ($1, $2, $3)")
+        .bind(submission_id)
+        .bind(kind)
+        .bind(detail)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+fn first_lines(s: &str, n: usize) -> String {
+    s.lines().take(n).collect::<Vec<_>>().join("\n")
+}
+
+/// A fresh seed per submission, so the hidden stream cannot be
+/// reverse-engineered across attempts.
+fn rand_seed() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as u64;
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    ((secs.wrapping_mul(1_000_000_007).wrapping_add(nanos as u64)) & 0x7FFF_FFFF_FFFF_FFFF) as i64
+}
