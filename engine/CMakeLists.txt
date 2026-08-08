@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(mebench LANGUAGES CXX)
+project(mebench LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,14 +46,37 @@ target_link_libraries(generator PUBLIC mebench_headers reference PRIVATE mebench
 add_executable(gen generator/gen_main.cpp)
 target_link_libraries(gen PRIVATE generator mebench_flags)
 
+# ---------------------------------------------------------------- HdrHistogram
+
+# Vendored rather than fetched at build time: the benchmark node is provisioned
+# to have nothing running on it and no reason to reach the network, and a
+# ranked measurement should not depend on GitHub being up. Pinned commit is
+# recorded in third_party/hdr/PINNED_COMMIT.
+add_library(hdr_histogram STATIC third_party/hdr/src/hdr_histogram.c)
+target_include_directories(hdr_histogram PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/hdr/include)
+target_include_directories(hdr_histogram PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/hdr/src)
+set_target_properties(hdr_histogram PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 99)
+find_library(MATH_LIBRARY m)
+if(MATH_LIBRARY)
+  target_link_libraries(hdr_histogram PUBLIC ${MATH_LIBRARY})
+endif()
+
 # ---------------------------------------------------------------- harness
+
+# The fingerprint the benchmark node checks before every ranked run. On mismatch
+# it recompiles locally rather than measuring a binary it cannot vouch for
+# (plan section 2).
+set(MEBENCH_FINGERPRINT "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} | -O2 -march=${MEBENCH_MARCH} -fno-omit-frame-pointer | c++20")
 
 add_library(harness_lib STATIC
   harness/engine_loader.cpp
   harness/invariants.cpp
-  harness/verify.cpp)
+  harness/verify.cpp
+  harness/bench.cpp
+  harness/timing.cpp)
 target_include_directories(harness_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(harness_lib PUBLIC mebench_headers reference PRIVATE mebench_flags ${CMAKE_DL_LIBS})
+target_compile_definitions(harness_lib PRIVATE MEBENCH_BUILD_FINGERPRINT="${MEBENCH_FINGERPRINT}")
+target_link_libraries(harness_lib PUBLIC mebench_headers reference hdr_histogram PRIVATE mebench_flags ${CMAKE_DL_LIBS})
 
 add_executable(harness harness/harness_main.cpp)
 target_link_libraries(harness PRIVATE harness_lib generator mebench_flags ${CMAKE_DL_LIBS})
@@ -86,6 +109,17 @@ add_test(NAME generator_validates_deep_book
 add_test(NAME reference_verifies_against_itself
          COMMAND harness verify --seed 5 --profile balanced --events 100000
                  --engine $<TARGET_FILE:reference_engine>)
+
+add_test(NAME bench_reference_runs
+         COMMAND harness bench --seed 2026 --profile cancel_heavy --events 300000 --runs 2
+                 --warmup 50000 --engine $<TARGET_FILE:reference_engine>)
+
+# A wrong digest must fail the ranked run: verification inside the timed loop is
+# what stops anyone winning by doing less work (SPEC 5.2).
+add_test(NAME bench_digest_mismatch_caught
+         COMMAND harness bench --seed 2026 --profile cancel_heavy --events 300000 --runs 2
+                 --warmup 50000 --digest deadbeef --engine $<TARGET_FILE:reference_engine>)
+set_tests_properties(bench_digest_mismatch_caught PROPERTIES WILL_FAIL TRUE)
 
 # Every mutation must be CAUGHT. A gate that only ever sees correct engines has
 # not been tested (plan section 13).

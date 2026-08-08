@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include "common/decode.h"
+#include "harness/hash_sink.h"
 #include "harness/invariants.h"
 
 namespace mebench::harness {
@@ -134,6 +135,7 @@ struct RunFailure {
   OutEvent actual{};
   std::string message;
   uint64_t events_processed = 0;
+  uint64_t digest = 0;
 };
 
 // Which rule areas this event exercised, judged from the ORACLE's output so a
@@ -190,6 +192,7 @@ RunFailure replay(const std::vector<WireEvent>& events, uint64_t begin, uint64_t
   CaptureSink sub_sink(sub_out), ref_sink(ref_out);
 
   InvariantChecker invariants;
+  HashSink digest_sink;
   uint64_t output_index = 0;
   Category cats[8];
   uint32_t n_cats = 0;
@@ -266,6 +269,7 @@ RunFailure replay(const std::vector<WireEvent>& events, uint64_t begin, uint64_t
       return fail;
     }
 
+    for (const auto& e : sub_out) digest_sink.emit(e);
     output_index += sub_out.size();
 
     const bool at_snapshot = opts.snapshot_every && ((i - begin + 1) % opts.snapshot_every == 0);
@@ -298,6 +302,7 @@ RunFailure replay(const std::vector<WireEvent>& events, uint64_t begin, uint64_t
   }
 
   fail.events_processed = end - begin;
+  fail.digest = digest_sink.digest();
   return fail;
 }
 
@@ -347,6 +352,7 @@ VerifyResult verify(const std::vector<WireEvent>& events, const EngineSource& su
                                           counters.exercised[c], counters.failed_in[c]});
   }
 
+  r.digest = f.digest;
   if (!f.failed) {
     r.elapsed_s = std::chrono::duration<double>(Clock::now() - started).count();
     return r;
@@ -509,6 +515,7 @@ void json_out_event(std::ostringstream& s, const OutEvent& e) {
 std::string format_json(const VerifyResult& r) {
   std::ostringstream s;
   s << "{\"outcome\":\"" << outcome_name(r.outcome) << "\",\"passed\":" << (r.passed() ? 1 : 0)
+    << ",\"digest\":\"" << std::hex << r.digest << std::dec << "\""
     << ",\"events_processed\":" << r.events_processed << ",\"total_events\":" << r.total_events
     << ",\"elapsed_s\":" << r.elapsed_s;
 

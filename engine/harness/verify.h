@@ -55,6 +55,11 @@ struct VerifyResult {
   uint64_t total_events = 0;
   double elapsed_s = 0.0;
 
+  // Field-wise digest of the submission's output over the whole stream. The
+  // ranked run must reproduce this exactly, which is what makes verification
+  // happen INSIDE the timed loop (SPEC 5.2).
+  uint64_t digest = 0;
+
   // Populated unless the run passed or timed out.
   uint64_t in_seq = 0;
   uint64_t output_index = 0;  // which output number, across the whole run

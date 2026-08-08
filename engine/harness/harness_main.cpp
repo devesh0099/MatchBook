@@ -20,6 +20,11 @@
 
 #include "generator/generator.h"
 #include "harness/engine_loader.h"
+#include <memory>
+
+#include "common/decode.h"
+#include "harness/bench.h"
+#include "harness/hash_sink.h"
 #include "harness/verify.h"
 #include "mebench/wire.h"
 
@@ -32,6 +37,7 @@ constexpr int kExitPassed = 0;
 constexpr int kExitFailed = 1;
 constexpr int kExitUsage = 2;
 constexpr int kExitTimeout = 3;
+constexpr int kExitUnhealthy = 4;  // the node, not the submission
 
 bool g_timeout_json = false;
 
@@ -56,6 +62,9 @@ void usage() {
       stderr,
       "usage:\n"
       "  harness verify --engine ENGINE [stream options] [--wall-time S] [--json]\n"
+      "  harness bench  --engine ENGINE [stream options] [--runs N] [--warmup N]\n"
+      "                 [--digest HEX] [-o FILE] [--json]\n"
+      "  harness digest --engine ENGINE [stream options]\n"
       "\n"
       "  --engine ENGINE      path to a submission .so, or 'builtin' for the reference\n"
       "  --oracle ENGINE      what to compare against (default: builtin)\n"
@@ -69,6 +78,13 @@ void usage() {
       "                       Hitting it is reported as a timeout, never as a wrong answer\n"
       "  --snapshot-every N   diff the two books every N events (default 10000, 0 disables)\n"
       "  --no-shrink          skip binary-searching the counterexample\n"
+      "\n"
+      "  bench only:\n"
+      "  --runs N             ranked runs; the score is the median of their p50s (default 9)\n"
+      "  --warmup N           untimed events before measuring (default 200000)\n"
+      "  --digest HEX         the correctness run's digest; a mismatch is its own outcome,\n"
+      "                       not a generic failure\n"
+      "  -o FILE              write the JSON result to FILE\n"
       "  --json               machine-readable result\n");
 }
 
@@ -190,6 +206,166 @@ int run_verify(int argc, char** argv) {
   return result.passed() ? kExitPassed : kExitFailed;
 }
 
+// Shared by both modes: a stream is either read from a file or generated in
+// process from its seed.
+bool load_stream(const std::string& stream_path, bool have_seed, uint64_t seed,
+                 const std::string& profile_name, uint64_t events,
+                 std::vector<mebench::WireEvent>& out) {
+  if (!stream_path.empty()) {
+    mebench::StreamHeader header{};
+    std::string err;
+    if (!mebench::generator::read_stream(stream_path, header, out, err)) {
+      std::fprintf(stderr, "%s\n", err.c_str());
+      return false;
+    }
+    return true;
+  }
+  if (have_seed && events > 0) {
+    mebench::Profile profile{};
+    if (!mebench::generator::parse_profile(profile_name, profile)) {
+      std::fprintf(stderr, "unknown profile: %s\n", profile_name.c_str());
+      return false;
+    }
+    mebench::generator::Generator gen(seed, profile);
+    out = gen.generate(events);
+    return true;
+  }
+  std::fprintf(stderr, "need either --stream FILE or --seed S --events N\n");
+  return false;
+}
+
+// `harness digest` — fold the field-wise hash over an engine's output for a
+// stream and print it.
+//
+// The benchmark node compares every ranked run against the ORACLE's digest for
+// that stream, computed once per seed and cached. That is what makes the check
+// meaningful across lanes: the correctness lane and the benchmark lane run
+// different streams, so a submission's own correctness-run digest could never
+// be the thing a 10M cancel_heavy run has to reproduce.
+int run_digest(int argc, char** argv) {
+  std::string engine_spec = "builtin", stream_path, profile_name = "cancel_heavy";
+  uint64_t seed = 0, events = 0;
+  bool have_seed = false;
+
+  for (int i = 0; i < argc; ++i) {
+    const std::string a = argv[i];
+    const bool has_next = (i + 1) < argc;
+    if (a == "--engine" && has_next) {
+      engine_spec = argv[++i];
+    } else if (a == "--stream" && has_next) {
+      stream_path = argv[++i];
+    } else if (a == "--seed" && has_next) {
+      if (!parse_u64(argv[++i], seed)) return usage(), kExitUsage;
+      have_seed = true;
+    } else if (a == "--events" && has_next) {
+      if (!parse_u64(argv[++i], events)) return usage(), kExitUsage;
+    } else if (a == "--profile" && has_next) {
+      profile_name = argv[++i];
+    } else {
+      std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
+      return kExitUsage;
+    }
+  }
+
+  std::vector<mebench::WireEvent> stream;
+  if (!load_stream(stream_path, have_seed, seed, profile_name, events, stream)) return kExitUsage;
+
+  std::string err;
+  auto engine = mebench::harness::EngineSource::open(engine_spec, err);
+  if (!engine) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return kExitUsage;
+  }
+
+  std::unique_ptr<mebench::IMatchingEngine> e(engine->create());
+  mebench::harness::HashSink sink;
+  for (uint64_t i = 0; i < stream.size(); ++i) {
+    const mebench::DecodedEvent d = mebench::decode(stream[i], i);
+    mebench::dispatch(*e, d, sink);
+  }
+  std::printf("%016llx\n", static_cast<unsigned long long>(sink.digest()));
+  return kExitPassed;
+}
+
+int run_bench(int argc, char** argv) {
+  std::string engine_spec, stream_path, profile_name = "cancel_heavy", json_path;
+  uint64_t seed = 0, events = 0;
+  bool have_seed = false, as_json = false;
+  mebench::harness::BenchOptions opts;
+
+  for (int i = 0; i < argc; ++i) {
+    const std::string a = argv[i];
+    const bool has_next = (i + 1) < argc;
+    if (a == "--engine" && has_next) {
+      engine_spec = argv[++i];
+    } else if (a == "--stream" && has_next) {
+      stream_path = argv[++i];
+    } else if (a == "--seed" && has_next) {
+      if (!parse_u64(argv[++i], seed)) return usage(), kExitUsage;
+      have_seed = true;
+    } else if (a == "--events" && has_next) {
+      if (!parse_u64(argv[++i], events)) return usage(), kExitUsage;
+    } else if (a == "--profile" && has_next) {
+      profile_name = argv[++i];
+    } else if (a == "--runs" && has_next) {
+      uint64_t n = 0;
+      if (!parse_u64(argv[++i], n)) return usage(), kExitUsage;
+      opts.runs = static_cast<uint32_t>(n);
+    } else if (a == "--warmup" && has_next) {
+      if (!parse_u64(argv[++i], opts.warmup)) return usage(), kExitUsage;
+    } else if (a == "--digest" && has_next) {
+      opts.expected_digest = std::strtoull(argv[++i], nullptr, 16);
+      opts.have_expected_digest = true;
+    } else if (a == "--no-mlock") {
+      opts.lock_memory = false;
+    } else if ((a == "--json" || a == "-o") && has_next && a == "-o") {
+      json_path = argv[++i];
+    } else if (a == "--json") {
+      as_json = true;
+    } else {
+      std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
+      usage();
+      return kExitUsage;
+    }
+  }
+
+  if (engine_spec.empty()) {
+    std::fprintf(stderr, "--engine is required\n");
+    return kExitUsage;
+  }
+
+  std::vector<mebench::WireEvent> stream;
+  if (!load_stream(stream_path, have_seed, seed, profile_name, events, stream)) return kExitUsage;
+
+  std::string err;
+  auto engine = mebench::harness::EngineSource::open(engine_spec, err);
+  if (!engine) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return kExitUsage;
+  }
+
+  const auto r = mebench::harness::bench(stream, *engine, opts);
+
+  if (!json_path.empty()) {
+    if (std::FILE* f = std::fopen(json_path.c_str(), "wb")) {
+      std::fprintf(f, "%s\n", mebench::harness::format_bench_json(r).c_str());
+      std::fclose(f);
+    }
+  }
+  if (as_json) {
+    std::printf("%s\n", mebench::harness::format_bench_json(r).c_str());
+  } else {
+    std::printf("%s", mebench::harness::format_bench_report(r).c_str());
+  }
+
+  switch (r.outcome) {
+    case mebench::harness::BenchOutcome::Ok: return kExitPassed;
+    case mebench::harness::BenchOutcome::DigestMismatch: return kExitFailed;
+    case mebench::harness::BenchOutcome::NodeUnhealthy: return kExitUnhealthy;
+  }
+  return kExitFailed;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -199,6 +375,8 @@ int main(int argc, char** argv) {
   }
   const std::string mode = argv[1];
   if (mode == "verify") return run_verify(argc - 2, argv + 2);
+  if (mode == "bench") return run_bench(argc - 2, argv + 2);
+  if (mode == "digest") return run_digest(argc - 2, argv + 2);
   if (mode == "-h" || mode == "--help") {
     usage();
     return 0;
