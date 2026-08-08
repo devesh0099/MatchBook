@@ -169,8 +169,16 @@ Check check_injection(const InjectionRecord& inj, const ValidatingSink& sink) {
 
 }  // namespace
 
+uint64_t warmup_events(Profile p) {
+  const ProfileParams& pp = profile_params(p);
+  // Each session fills its live list to live_target before back-pressure kicks
+  // in, and only a fraction of events are resting adds. The factor of 5 covers
+  // that fraction plus margin.
+  return static_cast<uint64_t>(pp.n_sessions) * pp.live_target * 5ull;
+}
+
 ValidationReport validate_stream(const std::vector<WireEvent>& events,
-                                 const std::vector<InjectionRecord>& injections) {
+                                 const std::vector<InjectionRecord>& injections, Profile profile) {
   ValidationReport rep;
   rep.event_count = events.size();
 
@@ -231,7 +239,13 @@ ValidationReport validate_stream(const std::vector<WireEvent>& events,
     rep.checks.push_back({"trade count above floor", share > kTradeShareFloor, s.str()});
   }
 
-  {
+  if (events.size() < warmup_events(profile)) {
+    std::ostringstream s;
+    s << "stream is shorter than the ~" << warmup_events(profile)
+      << " events this profile needs to reach steady state; depth is still filling up, so "
+         "growth here means nothing";
+    rep.checks.push_back({"book depth bounded", true, s.str(), /*skipped=*/true});
+  } else {
     // Depth must stay bounded, not grow monotonically. Compare the final decile
     // against the median of the settled deciles: a book that only ever grows
     // means the cancel path is not keeping up and the stream is drifting away

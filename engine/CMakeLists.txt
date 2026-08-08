@@ -46,6 +46,18 @@ target_link_libraries(generator PUBLIC mebench_headers reference PRIVATE mebench
 add_executable(gen generator/gen_main.cpp)
 target_link_libraries(gen PRIVATE generator mebench_flags)
 
+# ---------------------------------------------------------------- harness
+
+add_library(harness_lib STATIC
+  harness/engine_loader.cpp
+  harness/invariants.cpp
+  harness/verify.cpp)
+target_include_directories(harness_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(harness_lib PUBLIC mebench_headers reference PRIVATE mebench_flags ${CMAKE_DL_LIBS})
+
+add_executable(harness harness/harness_main.cpp)
+target_link_libraries(harness PRIVATE harness_lib generator mebench_flags ${CMAKE_DL_LIBS})
+
 # ---------------------------------------------------------------- visible tests
 
 add_library(spec_tests STATIC tests/spec_tests.cpp)
@@ -56,5 +68,33 @@ target_link_libraries(spec_tests PUBLIC mebench_headers PRIVATE mebench_flags)
 add_executable(run_tests_reference tests/run_tests_main.cpp reference/ref_plugin.cpp)
 target_link_libraries(run_tests_reference PRIVATE spec_tests reference mebench_flags)
 
+# Deliberately broken engines, used to prove the gate catches what it claims to
+# (plan section 13). Never shipped to participants.
+add_library(mutant_engine SHARED tests/mutants.cpp)
+target_link_libraries(mutant_engine PRIVATE reference mebench_flags)
+
 enable_testing()
 add_test(NAME visible_spec_tests COMMAND run_tests_reference)
+add_test(NAME generator_validates_balanced
+         COMMAND gen --seed 1 --profile balanced --events 200000 --validate)
+add_test(NAME generator_validates_cancel_heavy
+         COMMAND gen --seed 1 --profile cancel_heavy --events 2000000 --validate)
+add_test(NAME generator_validates_sweep_heavy
+         COMMAND gen --seed 1 --profile sweep_heavy --events 200000 --validate)
+add_test(NAME generator_validates_deep_book
+         COMMAND gen --seed 1 --profile deep_book --events 200000 --validate)
+add_test(NAME reference_verifies_against_itself
+         COMMAND harness verify --seed 5 --profile balanced --events 100000
+                 --engine $<TARGET_FILE:reference_engine>)
+
+# Every mutation must be CAUGHT. A gate that only ever sees correct engines has
+# not been tested (plan section 13).
+foreach(mutant trade_price swallow_expired self_trade lying_snapshot hang)
+  add_test(NAME mutant_caught_${mutant}
+           COMMAND harness verify --seed 5 --profile balanced --events 50000 --wall-time 5
+                   --engine $<TARGET_FILE:mutant_engine>)
+  set_tests_properties(mutant_caught_${mutant} PROPERTIES
+    ENVIRONMENT "MEBENCH_MUTANT=${mutant}"
+    WILL_FAIL TRUE
+    TIMEOUT 120)
+endforeach()

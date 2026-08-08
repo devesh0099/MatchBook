@@ -21,6 +21,10 @@ struct Check {
   std::string name;
   bool passed;
   std::string detail;
+  // A check that could not be run meaningfully — not a pass, and not a failure
+  // either. Reporting one as the other would be lying in a tool whose whole job
+  // is to say whether a stream can be trusted.
+  bool skipped = false;
 };
 
 struct ValidationReport {
@@ -45,13 +49,17 @@ struct ValidationReport {
 
   bool ok() const {
     for (const auto& c : checks) {
-      if (!c.passed) return false;
+      if (!c.passed && !c.skipped) return false;
     }
     return true;
   }
 };
 
+// How many events a profile needs before its book reaches steady state. Below
+// this the book is still filling up, and "depth is growing" says nothing.
+uint64_t warmup_events(Profile p);
+
 ValidationReport validate_stream(const std::vector<WireEvent>& events,
-                                 const std::vector<InjectionRecord>& injections);
+                                 const std::vector<InjectionRecord>& injections, Profile profile);
 
 }  // namespace mebench::generator

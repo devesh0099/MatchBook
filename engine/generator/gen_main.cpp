@@ -106,7 +106,7 @@ int main(int argc, char** argv) {
         events, mebench::generator::Generator::kMinEventsForInjections);
   }
 
-  const auto rep = mebench::generator::validate_stream(stream, gen.injections());
+  const auto rep = mebench::generator::validate_stream(stream, gen.injections(), profile);
 
   std::printf("\nstream: %" PRIu64 " events (%" PRIu64 " new, %" PRIu64 " cancel), profile=%s\n",
               rep.event_count, rep.new_count, rep.cancel_count,
@@ -120,7 +120,8 @@ int main(int argc, char** argv) {
   std::printf("fill:   %.1f%% of submitted quantity traded\n\n", rep.fill_rate * 100.0);
 
   for (const auto& c : rep.checks) {
-    std::printf("%s  %-46s  %s\n", c.passed ? "PASS" : "FAIL", c.name.c_str(), c.detail.c_str());
+    const char* tag = c.skipped ? "SKIP" : (c.passed ? "PASS" : "FAIL");
+    std::printf("%s  %-46s  %s\n", tag, c.name.c_str(), c.detail.c_str());
   }
 
   if (!rep.ok()) {
