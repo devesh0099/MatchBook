@@ -1,0 +1,11 @@
+build/
+target/
+node_modules/
+.next/
+*.o
+*.so
+*.a
+*.bin
+streams/
+.env
+.DS_Store
