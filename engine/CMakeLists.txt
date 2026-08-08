@@ -37,6 +37,15 @@ set_target_properties(reference PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(reference_engine SHARED reference/ref_plugin.cpp)
 target_link_libraries(reference_engine PRIVATE reference mebench_flags)
 
+# ---------------------------------------------------------------- generator
+
+add_library(generator STATIC generator/generator.cpp generator/validate.cpp)
+target_include_directories(generator PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(generator PUBLIC mebench_headers reference PRIVATE mebench_flags)
+
+add_executable(gen generator/gen_main.cpp)
+target_link_libraries(gen PRIVATE generator mebench_flags)
+
 # ---------------------------------------------------------------- visible tests
 
 add_library(spec_tests STATIC tests/spec_tests.cpp)
