@@ -190,7 +190,13 @@ async fn process_submission(
 
     // A crashed engine is not a wrong answer either. Saying "segfault" beats
     // showing a diff that never got produced.
-    let detail = if verify.killed() {
+    let known_codes = [
+        harness_exit::PASSED,
+        harness_exit::FAILED,
+        harness_exit::USAGE,
+        harness_exit::TIMEOUT,
+    ];
+    let detail = if verify.crashed() || verify.unexpected_exit(&known_codes) {
         serde_json::json!({
             "outcome": "crashed",
             "status": verify.status,
@@ -492,23 +498,29 @@ async fn compile_in_box(
         format!("-march={}", cfg.march),
         "-fno-omit-frame-pointer".into(),
         "-fPIC".into(),
-        format!("-I{}", cfg.include_dir),
+        "-Iinclude".into(),
     ];
     if kind == "tests" {
         argv.extend([
+            "-I.".into(),
             "-o".into(),
             "run_tests".into(),
             src.into(),
-            format!("{}/spec_tests.cpp", cfg.tests_dir),
-            format!("{}/run_tests_main.cpp", cfg.tests_dir),
+            "tests/spec_tests.cpp".into(),
+            "tests/run_tests_main.cpp".into(),
         ]);
     } else {
         argv.extend(["-shared".into(), "-o".into(), "engine.so".into(), src.into()]);
     }
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
 
-    let mut opts = RunOpts::for_compile();
-    opts.binds = cfg.compile_binds();
+    // Headers go INTO the box rather than being bind-mounted from the host.
+    // They are a few kilobytes, it removes a whole class of mount-path
+    // mistakes, and the compile is hermetic: -Iinclude resolves inside the box
+    // no matter where the platform is installed on the node.
+    stage_headers(cfg, b, kind).await?;
+
+    let opts = RunOpts::for_compile();
     sandbox.run(b, &opts, &refs).await
 }
 
@@ -532,6 +544,29 @@ impl Drop for HiddenStream {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Copy the frozen headers into the box, plus the visible tests for a Run job.
+async fn stage_headers(cfg: &Config, b: &sandbox::Box_, kind: &str) -> Result<()> {
+    let inc = b.root.join("include/mebench");
+    tokio::fs::create_dir_all(&inc).await?;
+    for name in ["wire.h", "order.h", "out.h", "engine.h"] {
+        let bytes = tokio::fs::read(std::path::Path::new(&cfg.include_dir).join("mebench").join(name))
+            .await
+            .with_context(|| format!("reading frozen header {name}"))?;
+        tokio::fs::write(inc.join(name), bytes).await?;
+    }
+    if kind == "tests" {
+        let tests = b.root.join("tests");
+        tokio::fs::create_dir_all(&tests).await?;
+        for name in ["spec_tests.h", "spec_tests.cpp", "run_tests_main.cpp"] {
+            let bytes = tokio::fs::read(std::path::Path::new(&cfg.tests_dir).join(name))
+                .await
+                .with_context(|| format!("reading visible test file {name}"))?;
+            tokio::fs::write(tests.join(name), bytes).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Generate a stream outside the sandbox. The seed never enters the box.

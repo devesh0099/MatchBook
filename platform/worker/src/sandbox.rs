@@ -43,8 +43,20 @@ impl RunOutcome {
     pub fn timed_out(&self) -> bool {
         matches!(self.status.as_deref(), Some("TO"))
     }
-    pub fn killed(&self) -> bool {
-        matches!(self.status.as_deref(), Some("SG") | Some("RE"))
+    /// Died on a signal — segfault, OOM kill, abort.
+    ///
+    /// Only SG counts. isolate reports RE for ANY non-zero exit status, and a
+    /// failed verification exits 1 by design, so treating RE as a crash would
+    /// tell every participant with a wrong answer that their engine had
+    /// segfaulted.
+    pub fn crashed(&self) -> bool {
+        matches!(self.status.as_deref(), Some("SG"))
+    }
+
+    /// isolate's RE covers ordinary non-zero exits too, so a crash is only
+    /// implied when the code is not one the harness defines.
+    pub fn unexpected_exit(&self, known: &[i32]) -> bool {
+        matches!(self.status.as_deref(), Some("RE")) && !known.contains(&self.exit_code)
     }
 }
 
@@ -116,20 +128,22 @@ impl Sandbox {
             .args(["--wall-time", &opts.wall_time_s.to_string()])
             .args(["--time", &opts.cpu_time_s.to_string()])
             .args(["--cg-mem", &opts.memory_kb.to_string()])
-            // Killing the process GROUP, not just the pid, is what stops an
-            // orphan holding the pinned core — the classic way a benchmark
-            // queue dies quietly.
-            .args(["--processes", &opts.max_processes.to_string()]);
+            // MUST use the attached form. --processes takes an OPTIONAL
+            // argument, so `--processes 1` leaves "1" unconsumed, getopt stops
+            // at the first non-option, and isolate tries to exec "1".
+            // Verified against isolate 2.6's option table: it is the only
+            // option declared with an optional argument.
+            .arg(format!("--processes={}", opts.max_processes));
 
         if !opts.network {
             // isolate gives no network by default; stated explicitly because
             // the compile step is the one that would otherwise be tempted.
         }
         for (k, v) in &opts.env {
-            cmd.args(["--env", &format!("{k}={v}")]);
+            cmd.arg(format!("--env={k}={v}"));
         }
         for dir in &opts.binds {
-            cmd.args(["--dir", dir]);
+            cmd.arg(format!("--dir={dir}"));
         }
         if opts.inherit_fds {
             cmd.arg("--inherit-fds");

@@ -79,17 +79,6 @@ impl Config {
         }
         binary.windows(needle.len()).any(|w| w == needle)
     }
-
-    /// Compiles get no network and read-only access to just the headers and
-    /// toolchain. The preprocessor is a capable interpreter and this is the
-    /// step most likely to be underestimated.
-    pub fn compile_binds(&self) -> Vec<String> {
-        vec![
-            format!("{}={}:rw", "box", "./box"),
-            format!("include={}", self.include_dir),
-            format!("tests={}", self.tests_dir),
-        ]
-    }
 }
 
 fn env_or(key: &str, default: &str) -> String {
