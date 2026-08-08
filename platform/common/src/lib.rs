@@ -63,3 +63,23 @@ pub mod harness_exit {
     /// The node, not the submission.
     pub const UNHEALTHY: i32 = 4;
 }
+
+/// Build the S3 client.
+///
+/// Credentials, region and endpoint all come from the environment, so the same
+/// binary talks to real S3 in the event and to any S3-compatible endpoint (a
+/// local MinIO, say) when the platform is being exercised end to end.
+///
+/// S3_ENDPOINT forces path-style addressing. Virtual-host style needs
+/// bucket.host DNS, which does not exist for a container on localhost, and the
+/// failure it produces is a confusing DNS error rather than an obvious
+/// misconfiguration.
+pub async fn s3_client() -> aws_sdk_s3::Client {
+    let base = aws_config::load_from_env().await;
+    let mut builder = aws_sdk_s3::config::Builder::from(&base);
+
+    if let Ok(endpoint) = std::env::var("S3_ENDPOINT") {
+        builder = builder.endpoint_url(endpoint).force_path_style(true);
+    }
+    aws_sdk_s3::Client::from_conf(builder.build())
+}

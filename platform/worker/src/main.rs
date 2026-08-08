@@ -108,9 +108,9 @@ async fn main() -> Result<()> {
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
     let db = PgPoolOptions::new().max_connections(8).connect(&database_url).await?;
 
-    let aws = aws_config::load_from_env().await;
+    let s3_client = common::s3_client().await;
     let storage = Arc::new(Storage {
-        client: aws_sdk_s3::Client::new(&aws),
+        client: s3_client,
         bucket: env_or("S3_BUCKET", "me-platform-artifacts"),
     });
 
@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
         worker_id: format!("{role}-{hostname}-{box_id}"),
         role: role.clone(),
         box_id,
-        cxx: env_or("MEBENCH_CXX", "g++"),
+        cxx: env_or("MEBENCH_CXX", "/usr/bin/g++"),
         march: env_or("MEBENCH_MARCH", "x86-64-v3"),
         include_dir: env_or("MEBENCH_INCLUDE", "/opt/mebench/include"),
         tests_dir: env_or("MEBENCH_TESTS", "/opt/mebench/tests"),

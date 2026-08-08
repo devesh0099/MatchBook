@@ -156,8 +156,6 @@ double measure_probe_cost_ns(const std::vector<WireEvent>& events, uint64_t samp
 
   EmptyEngine empty;
   HashSink sink;
-  Histogram hist;
-  if (!hist.valid()) return 0.0;
 
   std::vector<DecodedEvent> decoded;
   decoded.reserve(n);
@@ -167,13 +165,33 @@ double measure_probe_cost_ns(const std::vector<WireEvent>& events, uint64_t samp
   for (const auto& d : decoded) touch += d.o.px;
   (void)touch;
 
-  for (uint64_t i = 0; i < n; ++i) {
-    const uint64_t t0 = rdtscp();
-    dispatch(empty, decoded[i], sink);
-    const uint64_t t1 = rdtscp();
-    hdr_record_value(hist.raw(), static_cast<int64_t>(t1 - t0));
+  // Measured under the SAME discipline as a ranked run: warm up first, then
+  // take the median of several passes.
+  //
+  // Measuring it once, cold, reported a probe cost LARGER than the p50 of the
+  // engine it was supposed to be a component of — which is impossible, since
+  // the probe is inside every sample. The first ranked run shows the same cold
+  // inflation (110ns against a 40ns steady state); the median across runs
+  // absorbs it there, and this now does the equivalent here.
+  constexpr int kProbePasses = 5;
+  std::vector<double> passes;
+  passes.reserve(kProbePasses);
+
+  for (int pass = 0; pass < kProbePasses + 1; ++pass) {
+    Histogram hist;
+    if (!hist.valid()) return 0.0;
+    for (uint64_t i = 0; i < n; ++i) {
+      const uint64_t t0 = rdtscp();
+      dispatch(empty, decoded[i], sink);
+      const uint64_t t1 = rdtscp();
+      hdr_record_value(hist.raw(), static_cast<int64_t>(t1 - t0));
+    }
+    if (pass == 0) continue;  // discard the cold pass
+    passes.push_back(hist.at(50.0) / ticks_per_ns);
   }
-  return hist.at(50.0) / ticks_per_ns;
+
+  std::sort(passes.begin(), passes.end());
+  return passes[passes.size() / 2];
 }
 
 BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engine,

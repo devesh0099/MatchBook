@@ -6,3 +6,5 @@ edition.workspace = true
 [dependencies]
 serde.workspace = true
 sqlx.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true

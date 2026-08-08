@@ -71,6 +71,27 @@ async fn sweep(db: &PgPool) -> anyhow::Result<()> {
         }
     }
 
+    // Run jobs need the same treatment. A worker dying mid-Run leaves the row
+    // in 'running' forever, and the participant's Run button simply never
+    // returns — with no error to explain it.
+    let reset_runs = sqlx::query(&format!(
+        "UPDATE run_jobs SET state = 'received', claimed_by = NULL \
+         WHERE state = 'running' AND updated_at < now() - interval '{STUCK_POOL}' \
+         RETURNING id"
+    ))
+    .fetch_all(db)
+    .await?;
+    for row in reset_runs.iter() {
+        use sqlx::Row;
+        let id: i64 = row.get("id");
+        tracing::warn!("janitor reset run job {id}");
+        sqlx::query("INSERT INTO events_log (kind, detail) VALUES ($1, $2)")
+            .bind("janitor_reset_run_job")
+            .bind(serde_json::json!({ "run_job": id }))
+            .execute(db)
+            .await?;
+    }
+
     // Worker liveness.
     let newly_unhealthy = sqlx::query(&format!(
         "UPDATE workers SET healthy = false \

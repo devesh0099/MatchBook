@@ -62,9 +62,9 @@ async fn main() -> Result<()> {
         Err(_) => None,
     };
 
-    let aws = aws_config::load_from_env().await;
+    let s3_client = common::s3_client().await;
     let s3 = Arc::new(Storage {
-        client: aws_sdk_s3::Client::new(&aws),
+        client: s3_client,
         bucket: std::env::var("S3_BUCKET").unwrap_or_else(|_| "me-platform-artifacts".into()),
     });
 

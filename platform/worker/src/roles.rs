@@ -163,6 +163,7 @@ async fn process_submission(
     // as --seed on argv: the submission is dlopen'ed into the harness process
     // and can read /proc/self/cmdline.
     let stream = generate_stream(cfg, seed as u64, VERIFY_PROFILE, VERIFY_EVENTS).await?;
+    stage_harness(cfg, &b).await?;
 
     let verify = sandbox
         .run_with_stream(
@@ -372,6 +373,7 @@ async fn run_bench_job(
     // box. Verification inside the timed run is what stops anyone winning by
     // doing less work.
     let oracle_digest = oracle_digest(cfg, &stream.path).await?;
+    stage_harness(cfg, &b).await?;
 
     let out = sandbox
         .run_with_stream(
@@ -520,7 +522,11 @@ async fn compile_in_box(
     // no matter where the platform is installed on the node.
     stage_headers(cfg, b, kind).await?;
 
-    let opts = RunOpts::for_compile();
+    let mut opts = RunOpts::for_compile();
+    // isolate starts the box with a minimal environment and no PATH, so a bare
+    // "g++" cannot resolve. cfg.cxx is an absolute path for the same reason the
+    // spec pins the compiler: which g++ ran must not depend on the node's PATH.
+    opts.env.push(("PATH".into(), "/usr/bin:/bin".into()));
     sandbox.run(b, &opts, &refs).await
 }
 
@@ -544,6 +550,22 @@ impl Drop for HiddenStream {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// Copy the harness into the box. It runs as ./harness inside the sandbox, so
+/// it has to be there — the box sees almost nothing of the host filesystem.
+async fn stage_harness(cfg: &Config, b: &sandbox::Box_) -> Result<()> {
+    let bytes = tokio::fs::read(&cfg.harness_bin)
+        .await
+        .with_context(|| format!("reading harness from {}", cfg.harness_bin))?;
+    let dest = b.root.join("harness");
+    tokio::fs::write(&dest, bytes).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).await?;
+    }
+    Ok(())
 }
 
 /// Copy the frozen headers into the box, plus the visible tests for a Run job.
