@@ -63,6 +63,17 @@ function EditorInner() {
   const latest = useRef(source);
   latest.current = source;
 
+  // Belt and braces. The single-editor layout means onChange can only ever
+  // carry the engine.cpp buffer — but an earlier build wired the headers
+  // through the same editor, and its onChange quietly SAVED header content
+  // over people's drafts. The render bug was fixable in an afternoon; the
+  // saved drafts were not. A guard that can never legitimately fire is cheap
+  // next to that.
+  const isFrozenHeader = useCallback(
+    (text: string) => HEADER_NAMES.some((h) => HEADERS[h] === text),
+    [],
+  );
+
   // The server is the source of truth for the buffer, so a browser crash loses
   // nothing. A participant returning on another machine picks up where they
   // left off.
@@ -73,7 +84,11 @@ function EditorInner() {
       .getDraft(identity.id)
       .then((d) => {
         if (!alive) return;
-        if (d.source && d.source.trim().length > 0) setSource(d.source);
+        // A saved draft that is byte-identical to a frozen header is
+        // corruption from the earlier editor bug, not someone's work.
+        if (d.source && d.source.trim().length > 0 && !isFrozenHeader(d.source)) {
+          setSource(d.source);
+        }
         setLoaded(true);
       })
       .catch(() => alive && setLoaded(true));
@@ -85,6 +100,10 @@ function EditorInner() {
   const scheduleSave = useCallback(
     (next: string) => {
       if (!identity) return;
+      if (isFrozenHeader(next)) {
+        console.warn('refusing to save a frozen header as a draft');
+        return;
+      }
       setSaved('saving');
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
@@ -94,7 +113,7 @@ function EditorInner() {
           .catch(() => setSaved('error'));
       }, AUTOSAVE_MS);
     },
-    [identity],
+    [identity, isFrozenHeader],
   );
 
   // Poll while the submission is still moving. Plain JSON every 2s — no
@@ -259,6 +278,17 @@ function EditorInner() {
         >
           <button onClick={onRun} disabled={running || !loaded}>
             Run
+          </button>
+          <button
+            onClick={() => {
+              if (!window.confirm('Replace the editor with the original starting buffer? Your current code will be lost.')) return;
+              setSource(STARTING_BUFFER);
+              if (identity) void api.saveDraft(identity.id, STARTING_BUFFER);
+            }}
+            title="Restore the skeleton this challenge started from"
+            style={{ fontSize: 12, padding: '6px 10px' }}
+          >
+            Reset
           </button>
           <button className="primary" onClick={onSubmit} disabled={!loaded}>
             Submit
