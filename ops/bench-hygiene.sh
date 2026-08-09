@@ -97,11 +97,15 @@ echo
 echo "== memory =="
 swap=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)
 if [[ "${swap:-0}" -eq 0 ]]; then
-  pass "swap off"
+  pass "swap off (the only thing keeping ranked pages resident — see below)"
 else
-  # Memory limits do not affect swapped-out data, and a swap-in inside a timed
-  # region is a five-figure-nanosecond event.
-  fail "swap is on (${swap} kB) — turn it off"
+  # This is not tidiness, it is the guarantee. isolate sets RLIMIT_MEMLOCK to 0
+  # inside the box and offers no way to raise it, so the harness's mlockall
+  # ALWAYS fails in a ranked run. With swap off, anonymous pages cannot be
+  # reclaimed at all and the point is moot; with swap on, a ~700MB working set
+  # is evictable and a swap-in inside a timed region is a five-figure-nanosecond
+  # event that no memory limit prevents.
+  fail "swap is on (${swap} kB) — turn it off; mlockall cannot cover for it inside isolate"
 fi
 
 if [[ -r /sys/kernel/mm/transparent_hugepage/enabled ]]; then

@@ -33,8 +33,40 @@ set. One consequence worth knowing: a submission can `mmap` an enormous
 touched. It dies on first touch instead. Harmless, but not what a reader of the
 limits table might assume.
 
-Headroom: the bench event buffer is ~400 MB at 10M events against an 8 GB
-limit.
+Headroom: a ranked run measured **707 MB peak RSS** against the 8 GB limit — the
+240 MB decoded event buffer plus a ~300k-order book.
+
+### `RLIMIT_MEMLOCK` is 0, and cannot be raised
+
+isolate sets the memlock limit to **zero** inside the box:
+
+```
+$ isolate --cg --box-id 32 --run -- /bin/sh -c 'ulimit -l'
+0
+$ ulimit -l
+1953772
+```
+
+There is no option to change it — no `--memlock`, nothing in the option table.
+So `mlockall(MCL_CURRENT | MCL_FUTURE)` in the harness **always fails in a
+ranked run**, and every ranked result reports `memory_locked: false`.
+
+This matters because the mitigation previously written down — add
+`LimitMEMLOCK=infinity` to the systemd unit — **would not have worked**. rlimits
+are inherited across `fork`/`exec`, so it looks like it should; isolate
+overrides it afterwards.
+
+What actually keeps a page fault out of the timed region:
+
+- **swap is off**, so anonymous pages cannot be reclaimed at all — there is
+  nowhere to put them. This makes swap-off load-bearing rather than tidiness,
+  which is why `ops/bench-hygiene.sh` fails the node outright when it is on.
+- the harness **touches the whole buffer** in the untimed load phase, so every
+  page is already faulted in before measurement starts.
+
+`mlockall` was belt and braces on top of those two. It is still attempted, and
+still reported, because `no` *outside* the sandbox would mean something
+different and worth seeing.
 
 ### Processes
 

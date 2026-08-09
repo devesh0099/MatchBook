@@ -297,6 +297,15 @@ for (...) touch += buf.data()[i].o.px;   // fault every page in NOW
 r.memory_locked = mlockall(MCL_CURRENT | MCL_FUTURE) == 0;
 ```
 
+`mlockall` **always fails in a ranked run**, and the page-touch loop is what
+actually does the job. isolate sets `RLIMIT_MEMLOCK` to 0 inside the box and has
+no option to raise it (`ulimit -l` reads 0 inside, 1.9 GB outside), so every
+ranked result reports `memory_locked: false`. Together with the bench node
+running swap off — which makes anonymous pages unreclaimable, there being
+nowhere to put them — that is the whole guarantee. `mlockall` was belt and
+braces on top; it is still attempted because `no` *outside* the sandbox would
+mean something different.
+
 The page-touch loop exists so that no page fault lands inside the timed region.
 Huge pages keep TLB misses out of it; the fallback is reported rather than
 silently accepted, because measuring something else is worse than measuring

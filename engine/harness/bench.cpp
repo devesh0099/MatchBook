@@ -208,7 +208,22 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
   r.digest_checked = opts.have_expected_digest;
 
   if (opts.lock_memory) {
-    // Keep page faults out of the timed region entirely.
+    // Belt and braces, and it fails inside the sandbox by design.
+    //
+    // isolate sets RLIMIT_MEMLOCK to 0 in the box and offers no option to raise
+    // it — verified: `ulimit -l` reads 0 inside and 1.9 GB outside. So every
+    // ranked run reports memory_locked=false, and raising LimitMEMLOCK on the
+    // systemd unit does not change that.
+    //
+    // It does not need to. What actually keeps a page fault out of the timed
+    // region is that the bench node runs with **swap off** — anonymous pages
+    // cannot be reclaimed at all without somewhere to put them — plus the
+    // explicit page-touch loop below, which pre-faults the whole buffer. That
+    // makes swap being off load-bearing rather than tidiness, which is why
+    // ops/bench-hygiene.sh fails the node outright when it is on.
+    //
+    // The flag is still reported, because "no" outside the sandbox would mean
+    // something quite different.
     r.memory_locked = mlockall(MCL_CURRENT | MCL_FUTURE) == 0;
   }
 
@@ -455,8 +470,13 @@ std::string format_bench_report(const BenchResult& r) {
   if (r.discard_count) s << r.discard_count << " run(s) discarded on steal time\n";
   s << "\n" << r.events_timed << " events timed per run, " << r.run_p50s_ns.size() << " runs, digest "
     << std::hex << r.digest << std::dec << "\n";
-  s << "memory locked: " << (r.memory_locked ? "yes" : "no")
+  s << "memory locked: " << (r.memory_locked ? "yes" : "no (expected in the sandbox — see below)")
     << ", tsc " << r.tsc_ticks_per_ns << " ticks/ns\n";
+  if (!r.memory_locked) {
+    s << "  isolate sets RLIMIT_MEMLOCK to 0 and cannot be told otherwise, so mlockall never\n"
+         "  succeeds in a ranked run. Page faults are kept out of the timed region by the node\n"
+         "  running with swap off and by the buffer being touched in full beforehand.\n";
+  }
   if (!r.notes.empty()) s << "note: " << r.notes << "\n";
   return s.str();
 }

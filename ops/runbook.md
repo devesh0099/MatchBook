@@ -192,9 +192,16 @@ worse if discovered at 5:00 PM.
   match check had no evidence to work from; recompiling costs about a second
   against a job of tens of seconds and is the branch that check existed to
   guarantee.
-- **`mlockall` may fail silently inside the box** under default rlimits, for a
-  ~400MB decoded buffer. Confirm `"memory_locked": true` in a bench JSON result
-  during the noise-floor run; if false, raise `LimitMEMLOCK` in the worker unit.
+- **`mlockall` always fails inside the box, and that is expected.** isolate sets
+  `RLIMIT_MEMLOCK` to 0 and offers no option to raise it, so every ranked result
+  reports `"memory_locked": false`. Raising `LimitMEMLOCK` on the worker unit
+  does NOT fix it — the limit is inherited, then overridden.
+
+  Do not chase this. What keeps a page fault out of the timed region is that
+  **swap is off** (anonymous pages are then unreclaimable) plus the harness
+  touching the whole ~240MB buffer before measuring. That makes `swap off` the
+  load-bearing check in `bench-hygiene.sh`, not a nicety — if it ever fails,
+  stop and fix it before ranking anything.
 - **The Redis sorted set is not used for serving.** The leaderboard is computed
   from Postgres per request — fine at 18 rows. Redis holds only the freeze
   snapshot, which IS on the serving path.
