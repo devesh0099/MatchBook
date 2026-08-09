@@ -1,18 +1,26 @@
 'use client';
 
-// Inline SVG, no chart library.
+// Charts, on recharts.
 //
-// The event runs on three nodes we control and the editor must work if the
-// room's network does not, so nothing here loads from anywhere. It also keeps
-// every mark spec — stroke widths, marker sizes, the surface ring on
-// overlapping dots — under our control rather than a library's defaults.
+// Bundled, never fetched — the event runs on three nodes we control and the
+// editor has to work if the room's network does not.
 //
-// Palette: categorical slots 1-3 stepped for the dark surface (#12151a),
-// validated all-pairs — worst CVD deltaE 9.4, worst normal-vision 20.9, all
-// three above 3:1 contrast. Series identity is never carried by colour alone:
-// every series is directly labelled and the legend is always present.
+// Palette: categorical slots 1-3 stepped for this dark surface (#12151a) and
+// validated all-pairs rather than eyeballed — worst CVD deltaE 9.4, worst
+// normal-vision 20.9, all three above 3:1 contrast. Identity never rests on
+// colour alone: every series is in the legend and in the tooltip by name.
 
-import { useState } from 'react';
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 
 const SERIES = {
   p50: '#3987e5', // blue   — the ranked number
@@ -20,273 +28,234 @@ const SERIES = {
   p99: '#199e70', // aqua
 } as const;
 
-const INK = 'var(--text)';
-const MUTED = 'var(--muted)';
-const FAINT = 'var(--faint)';
-const GRID = 'var(--line)';
-const SURFACE = 'var(--panel)';
+const GRID = '#232932';
+const FAINT = '#5d6674';
+const MUTED = '#8b95a5';
+const SURFACE = '#12151a';
 
-function fmtNs(v: number): string {
-  if (v >= 10000) return `${(v / 1000).toFixed(0)}µs`;
+export function fmtNs(v: number): string {
+  if (!isFinite(v)) return '—';
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}ms`;
   if (v >= 1000) return `${(v / 1000).toFixed(1)}µs`;
   if (v >= 100) return `${v.toFixed(0)}ns`;
   return `${v.toFixed(1)}ns`;
 }
 
-function ChartFrame({
+const axis = { stroke: FAINT, fontSize: 10, tickLine: false } as const;
+
+function Frame({
   title,
   note,
+  height,
   children,
 }: {
   title: string;
   note?: string;
-  children: React.ReactNode;
+  height: number;
+  children: React.ReactElement;
 }) {
   return (
     <figure style={{ margin: 0 }}>
-      <figcaption style={{ marginBottom: 8 }}>
-        <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text)' }}>{title}</div>
+      <figcaption style={{ marginBottom: 6 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600 }}>{title}</div>
         {note && (
           <div style={{ fontSize: 11.5, color: FAINT, marginTop: 2, lineHeight: 1.45 }}>{note}</div>
         )}
       </figcaption>
-      {children}
+      <div style={{ width: '100%', height }}>
+        <ResponsiveContainer width="100%" height="100%">
+          {children}
+        </ResponsiveContainer>
+      </div>
     </figure>
   );
 }
 
-// ---------------------------------------------------------------- distribution
+const tooltipStyle = {
+  contentStyle: {
+    background: SURFACE,
+    border: `1px solid ${GRID}`,
+    borderRadius: 6,
+    fontSize: 11.5,
+    fontFamily: 'ui-monospace, Menlo, monospace',
+  },
+  labelStyle: { color: MUTED, marginBottom: 4 },
+} as const;
+
+// ---------------------------------------------------------------- HdrHistogram
+
+/// One row of the HdrHistogram CLASSIC distribution, straight from
+/// hdr_percentiles_print's columns.
+export interface Percentile {
+  p: number;       // Percentile, 0..100
+  ns: number;      // Value (highest_equivalent_value)
+  count?: number;  // TotalCount — cumulative samples at or below
+  inv?: number;    // 1/(1-Percentile) — the x axis of the standard plot
+}
 
 /**
- * The latency distribution, as a percentile curve.
+ * The canonical HdrHistogram percentile distribution.
  *
- * x is percentile on a tail-stretched scale — equal spacing between p50, p90,
- * p99, p99.9 — because that is where an order book's interesting behaviour
- * lives. A linear percentile axis squashes everything past p99 into the last
- * few pixels, which is exactly the part worth seeing.
+ * x is 1/(1-p) on a log scale, which is what makes this plot the standard one:
+ * p90, p99, p99.9 and p99.99 land at even spacing, so the tail gets as much
+ * room as the body. A linear percentile axis buries everything past p99 in the
+ * last few pixels, and the tail is where an order book's allocator and level
+ * cleanup actually show up.
  */
-export function DistributionChart({
+export function HdrHistogram({
   percentiles,
   probeCostNs,
 }: {
-  percentiles: { p: number; ns: number }[];
+  percentiles: Percentile[];
   probeCostNs?: number | null;
 }) {
-  const [hover, setHover] = useState<number | null>(null);
-  if (!percentiles || percentiles.length < 2) return null;
+  if (!percentiles || percentiles.length < 4) return null;
 
-  const W = 380;
-  const H = 190;
-  const M = { top: 10, right: 14, bottom: 26, left: 46 };
-  const iw = W - M.left - M.right;
-  const ih = H - M.top - M.bottom;
+  // x is 1/(1-Percentile), computed by the harness from the same column the
+  // library prints, so the frontend plots the library's numbers rather than
+  // re-deriving them.
+  const data = percentiles
+    .filter((d) => d.p < 100 && (d.inv ?? 0) > 0)
+    .map((d) => ({ x: d.inv as number, ns: d.ns, p: d.p, count: d.count ?? 0 }));
+  if (data.length < 4) return null;
 
-  // Tail-stretched: position by -log10(1 - p/100).
-  const tx = (p: number) => (p >= 100 ? 4.2 : -Math.log10(1 - p / 100));
-  const xs = percentiles.map((d) => tx(d.p));
-  const x0 = Math.min(...xs);
-  const x1 = Math.max(...xs);
-  const X = (p: number) => M.left + ((tx(p) - x0) / (x1 - x0)) * iw;
-
-  const maxNs = Math.max(...percentiles.map((d) => d.ns));
-  // Log y: a p50 of 120ns and a p100 of 194µs cannot share a linear axis.
-  const ly = (v: number) => Math.log10(Math.max(v, 1));
-  const y0 = ly(Math.min(...percentiles.map((d) => d.ns)) * 0.8);
-  const y1 = ly(maxNs * 1.15);
-  const Y = (v: number) => M.top + ih - ((ly(v) - y0) / (y1 - y0)) * ih;
-
-  const path = percentiles.map((d, i) => `${i ? 'L' : 'M'}${X(d.p)},${Y(d.ns)}`).join('');
-
-  const ticks = [50, 90, 99, 99.9, 100].filter((t) => t >= percentiles[0].p);
-  const yTicks: number[] = [];
-  for (let e = Math.floor(y0); e <= Math.ceil(y1); e++) yTicks.push(10 ** e);
+  const maxX = data[data.length - 1].x;
+  const ticks: number[] = [];
+  for (let t = 1; t <= maxX * 1.001; t *= 10) ticks.push(t);
 
   return (
-    <ChartFrame
-      title="Latency distribution"
-      note="From the run whose p50 is your score. Percentile axis is tail-stretched — p50 to p99.9 are equally spaced — because that is where the interesting behaviour is."
+    <Frame
+      title="Latency distribution (HdrHistogram)"
+      note="The percentile distribution from the run whose p50 is your score, plotted the standard way: x is 1/(1-percentile) on a log scale, so each step right is one more nine and the tail gets the same room as the body."
+      height={230}
     >
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} role="img" style={{ display: 'block' }}>
-        {yTicks.map((v) => (
-          <g key={v}>
-            <line x1={M.left} x2={W - M.right} y1={Y(v)} y2={Y(v)} stroke={GRID} strokeWidth="1" />
-            <text x={M.left - 6} y={Y(v) + 3} textAnchor="end" fontSize="9" fill={FAINT}>
-              {fmtNs(v)}
-            </text>
-          </g>
-        ))}
-        {ticks.map((t) => (
-          <text key={t} x={X(t)} y={H - 8} textAnchor="middle" fontSize="9" fill={FAINT}>
-            p{t}
-          </text>
-        ))}
-
-        {probeCostNs != null && probeCostNs > 0 && Y(probeCostNs) > M.top && (
-          <>
-            <line
-              x1={M.left}
-              x2={W - M.right}
-              y1={Y(probeCostNs)}
-              y2={Y(probeCostNs)}
-              stroke={MUTED}
-              strokeWidth="1"
-              strokeDasharray="3 3"
-            />
-            <text x={W - M.right} y={Y(probeCostNs) - 4} textAnchor="end" fontSize="9" fill={MUTED}>
-              probe {fmtNs(probeCostNs)}
-            </text>
-          </>
-        )}
-
-        <path d={path} fill="none" stroke={SERIES.p50} strokeWidth="2" strokeLinejoin="round" />
-
-        {percentiles.map((d, i) => (
-          <circle
-            key={d.p}
-            cx={X(d.p)}
-            cy={Y(d.ns)}
-            r={hover === i ? 5 : 3.5}
-            fill={SERIES.p50}
-            stroke={SURFACE}
-            strokeWidth="2"
-            onMouseEnter={() => setHover(i)}
-            onMouseLeave={() => setHover(null)}
-            style={{ cursor: 'pointer' }}
+      <LineChart data={data} margin={{ top: 6, right: 14, bottom: 22, left: 4 }}>
+        <CartesianGrid stroke={GRID} strokeDasharray="0" vertical={false} />
+        <XAxis
+          dataKey="x"
+          type="number"
+          scale="log"
+          domain={[1, 'dataMax']}
+          ticks={ticks}
+          tickFormatter={(v: number) => (v === 1 ? 'p0' : `p${(100 - 100 / v).toFixed(v >= 1000 ? 2 : v >= 100 ? 1 : 0)}`)}
+          {...axis}
+          label={{ value: 'percentile', position: 'insideBottom', offset: -12, fill: FAINT, fontSize: 10 }}
+        />
+        <YAxis
+          scale="log"
+          domain={['auto', 'auto']}
+          tickFormatter={fmtNs}
+          width={54}
+          {...axis}
+        />
+        <Tooltip
+          {...tooltipStyle}
+          formatter={((v: unknown) => [fmtNs(Number(v)), 'latency']) as never}
+          labelFormatter={((_l: unknown, p: readonly { payload?: Percentile }[]) => {
+            const d = p?.[0]?.payload;
+            if (!d) return '';
+            const pct = d.p >= 99.99 ? d.p.toFixed(4) : d.p.toFixed(2);
+            return `p${pct}  ·  ${(d.count ?? 0).toLocaleString()} samples at or below`;
+          }) as never}
+        />
+        {probeCostNs != null && probeCostNs > 0 && (
+          <ReferenceLine
+            y={probeCostNs}
+            stroke={MUTED}
+            strokeDasharray="3 3"
+            label={{
+              value: `probe ${fmtNs(probeCostNs)}`,
+              position: 'insideTopRight',
+              fill: MUTED,
+              fontSize: 10,
+            }}
           />
-        ))}
-
-        {hover != null && (
-          <text
-            x={Math.min(X(percentiles[hover].p) + 8, W - M.right - 60)}
-            y={Y(percentiles[hover].ns) - 8}
-            fontSize="10"
-            fill={INK}
-            fontWeight="600"
-          >
-            p{percentiles[hover].p} · {fmtNs(percentiles[hover].ns)}
-          </text>
         )}
-      </svg>
-    </ChartFrame>
+        <Line
+          type="monotone"
+          dataKey="ns"
+          stroke={SERIES.p50}
+          strokeWidth={2}
+          dot={false}
+          isAnimationActive={false}
+          name="latency"
+        />
+      </LineChart>
+    </Frame>
   );
 }
 
-// ---------------------------------------------------------------- per-run dots
+// ---------------------------------------------------------------- per-run
+
+export interface RunPoint {
+  p50_ns: number;
+  p95_ns?: number | null;
+  p99_ns?: number | null;
+  discarded?: boolean;
+}
 
 /**
- * The nine numbers the score is the median of.
+ * p50, p95 and p99 across the ranked runs of one submission.
  *
- * The headline p50 hides whether it is nine tight runs or seven tight ones
- * carrying a cold outlier — and those mean different things about an engine.
- * The CI band is what makes a tie legible: two submissions whose bands overlap
- * are genuinely indistinguishable, which is the claim the bands on the
- * leaderboard are making.
+ * The headline score is the median of the p50 line. Seeing all nine is what
+ * distinguishes a stable engine from one whose first run costs 3x — same
+ * reported number, different thing.
  */
-export function PerRunChart({
-  runs,
-  medianNs,
-  ciLowNs,
-  ciHighNs,
-}: {
-  runs: number[];
-  medianNs: number;
-  ciLowNs?: number;
-  ciHighNs?: number;
-}) {
-  const [hover, setHover] = useState<number | null>(null);
-  if (!runs || runs.length === 0) return null;
+export function PerRunSeries({ runs, medianNs }: { runs: RunPoint[]; medianNs?: number | null }) {
+  if (!runs || runs.length < 2) return null;
 
-  const W = 380;
-  const H = 150;
-  const M = { top: 12, right: 14, bottom: 24, left: 46 };
-  const iw = W - M.left - M.right;
-  const ih = H - M.top - M.bottom;
-
-  const lo = Math.min(...runs, ciLowNs ?? Infinity);
-  const hi = Math.max(...runs, ciHighNs ?? -Infinity);
-  const pad = Math.max((hi - lo) * 0.25, hi * 0.04, 1);
-  const Y = (v: number) => M.top + ih - ((v - (lo - pad)) / (hi - lo + 2 * pad)) * ih;
-  const X = (i: number) => M.left + ((i + 0.5) / runs.length) * iw;
-
-  const spread = lo > 0 ? ((hi - lo) / lo) * 100 : 0;
+  const data = runs
+    .filter((r) => !r.discarded)
+    .map((r, i) => ({
+      run: i + 1,
+      p50: r.p50_ns,
+      p95: r.p95_ns ?? null,
+      p99: r.p99_ns ?? null,
+    }));
+  if (data.length < 2) return null;
 
   return (
-    <ChartFrame
-      title={`The ${runs.length} runs behind the score`}
-      note={`Score is the median of these. Spread ${spread.toFixed(1)}%. A single high dot is usually a cold run — the median absorbs it, which is why the score is a median.`}
+    <Frame
+      title="Across the ranked runs"
+      note="The same stream, measured repeatedly. Your score is the median of the p50 line — a lone high point is usually a cold run, which the median absorbs."
+      height={220}
     >
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} role="img" style={{ display: 'block' }}>
-        {[lo, medianNs, hi].map((v, i) => (
-          <g key={i}>
-            <line x1={M.left} x2={W - M.right} y1={Y(v)} y2={Y(v)} stroke={GRID} strokeWidth="1" />
-            <text x={M.left - 6} y={Y(v) + 3} textAnchor="end" fontSize="9" fill={FAINT}>
-              {fmtNs(v)}
-            </text>
-          </g>
-        ))}
-
-        {ciLowNs != null && ciHighNs != null && ciHighNs > ciLowNs && (
-          <rect
-            x={M.left}
-            y={Y(ciHighNs)}
-            width={iw}
-            height={Math.max(Y(ciLowNs) - Y(ciHighNs), 1)}
-            fill={SERIES.p50}
-            opacity="0.12"
-          />
-        )}
-
-        <line
-          x1={M.left}
-          x2={W - M.right}
-          y1={Y(medianNs)}
-          y2={Y(medianNs)}
-          stroke={SERIES.p50}
-          strokeWidth="2"
+      <LineChart data={data} margin={{ top: 6, right: 14, bottom: 18, left: 4 }}>
+        <CartesianGrid stroke={GRID} vertical={false} />
+        <XAxis
+          dataKey="run"
+          {...axis}
+          label={{ value: 'run', position: 'insideBottom', offset: -8, fill: FAINT, fontSize: 10 }}
         />
-        <text x={W - M.right} y={Y(medianNs) - 5} textAnchor="end" fontSize="9.5" fill={INK} fontWeight="600">
-          median {fmtNs(medianNs)}
-        </text>
-
-        {runs.map((v, i) => (
-          <circle
-            key={i}
-            cx={X(i)}
-            cy={Y(v)}
-            r={hover === i ? 6 : 4.5}
-            fill={SERIES.p50}
-            stroke={SURFACE}
-            strokeWidth="2"
-            onMouseEnter={() => setHover(i)}
-            onMouseLeave={() => setHover(null)}
-            style={{ cursor: 'pointer' }}
+        <YAxis scale="log" domain={['auto', 'auto']} tickFormatter={fmtNs} width={54} {...axis} />
+        <Tooltip
+          {...tooltipStyle}
+          formatter={((v: unknown, n: unknown) => [fmtNs(Number(v)), String(n)]) as never}
+          labelFormatter={(l) => `run ${l}`}
+        />
+        <Legend wrapperStyle={{ fontSize: 11, color: MUTED }} />
+        {medianNs != null && (
+          <ReferenceLine
+            y={medianNs}
+            stroke={SERIES.p50}
+            strokeDasharray="4 4"
+            label={{
+              value: `score ${fmtNs(medianNs)}`,
+              position: 'insideTopLeft',
+              fill: SERIES.p50,
+              fontSize: 10,
+            }}
           />
-        ))}
-
-        {hover != null && (
-          <text
-            x={Math.min(X(hover) + 9, W - M.right - 70)}
-            y={Y(runs[hover]) - 9}
-            fontSize="10"
-            fill={INK}
-            fontWeight="600"
-          >
-            run {hover + 1} · {fmtNs(runs[hover])}
-          </text>
         )}
-
-        <text x={M.left} y={H - 7} fontSize="9" fill={FAINT}>
-          run 1
-        </text>
-        <text x={W - M.right} y={H - 7} textAnchor="end" fontSize="9" fill={FAINT}>
-          run {runs.length}
-        </text>
-      </svg>
-    </ChartFrame>
+        <Line type="monotone" dataKey="p50" name="p50 (ranked)" stroke={SERIES.p50} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+        <Line type="monotone" dataKey="p95" name="p95" stroke={SERIES.p95} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} connectNulls />
+        <Line type="monotone" dataKey="p99" name="p99" stroke={SERIES.p99} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} connectNulls />
+      </LineChart>
+    </Frame>
   );
 }
 
-// ---------------------------------------------------------------- time series
+// ---------------------------------------------------------------- history
 
 export interface HistoryPoint {
   id: number;
@@ -298,139 +267,38 @@ export interface HistoryPoint {
 /**
  * p50, p95 and p99 across a participant's own benchmarked submissions.
  *
- * One y-axis, never two: p50 and p99 are the same measure at different
- * percentiles, so they belong on one scale. It is log, because p99 sits an
- * order of magnitude above p50 and a linear axis would flatten the p50 line
- * into the floor — which is the line that actually decides the ranking.
+ * One log axis, never two. They are the same measure at different percentiles,
+ * so they belong on one scale — and p99 sits an order of magnitude above p50,
+ * which on a linear axis would flatten the ranked line into the floor.
  */
-export function HistoryChart({ points }: { points: HistoryPoint[] }) {
-  const [hover, setHover] = useState<number | null>(null);
+export function HistorySeries({ points }: { points: HistoryPoint[] }) {
   if (!points || points.length < 2) return null;
 
-  const W = 380;
-  const H = 200;
-  const M = { top: 12, right: 52, bottom: 28, left: 46 };
-  const iw = W - M.left - M.right;
-  const ih = H - M.top - M.bottom;
-
-  const all = points.flatMap((d) => [d.p50, d.p95, d.p99].filter((v): v is number => v != null));
-  const ly = (v: number) => Math.log10(Math.max(v, 1));
-  const y0 = ly(Math.min(...all) * 0.75);
-  const y1 = ly(Math.max(...all) * 1.3);
-  const Y = (v: number) => M.top + ih - ((ly(v) - y0) / (y1 - y0)) * ih;
-  const X = (i: number) => M.left + (points.length === 1 ? iw / 2 : (i / (points.length - 1)) * iw);
-
-  const yTicks: number[] = [];
-  for (let e = Math.floor(y0); e <= Math.ceil(y1); e++) yTicks.push(10 ** e);
-
-  const series: { key: keyof typeof SERIES; label: string; get: (d: HistoryPoint) => number | null }[] =
-    [
-      { key: 'p50', label: 'p50', get: (d) => d.p50 },
-      { key: 'p95', label: 'p95', get: (d) => d.p95 },
-      { key: 'p99', label: 'p99', get: (d) => d.p99 },
-    ];
-
   return (
-    <ChartFrame
+    <Frame
       title="Your latency across submissions"
-      note="Oldest to newest. p50 is the ranked number; p95 and p99 are colour only. One log axis — p99 sits an order of magnitude above p50, and a linear scale would flatten the line that decides the ranking."
+      note="Oldest to newest, benchmarked submissions only. p50 is the ranked number; p95 and p99 are reported colour."
+      height={240}
     >
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} role="img" style={{ display: 'block' }}>
-        {yTicks.map((v) => (
-          <g key={v}>
-            <line x1={M.left} x2={W - M.right} y1={Y(v)} y2={Y(v)} stroke={GRID} strokeWidth="1" />
-            <text x={M.left - 6} y={Y(v) + 3} textAnchor="end" fontSize="9" fill={FAINT}>
-              {fmtNs(v)}
-            </text>
-          </g>
-        ))}
-
-        {hover != null && (
-          <line
-            x1={X(hover)}
-            x2={X(hover)}
-            y1={M.top}
-            y2={M.top + ih}
-            stroke={MUTED}
-            strokeWidth="1"
-            strokeDasharray="3 3"
-          />
-        )}
-
-        {series.map((s) => {
-          const pts = points.map((d, i) => ({ i, v: s.get(d) })).filter((p) => p.v != null);
-          if (pts.length < 1) return null;
-          const path = pts.map((p, k) => `${k ? 'L' : 'M'}${X(p.i)},${Y(p.v as number)}`).join('');
-          const last = pts[pts.length - 1];
-          return (
-            <g key={s.key}>
-              <path d={path} fill="none" stroke={SERIES[s.key]} strokeWidth="2" strokeLinejoin="round" />
-              {pts.map((p) => (
-                <circle
-                  key={p.i}
-                  cx={X(p.i)}
-                  cy={Y(p.v as number)}
-                  r={hover === p.i ? 5 : 3}
-                  fill={SERIES[s.key]}
-                  stroke={SURFACE}
-                  strokeWidth="1.5"
-                />
-              ))}
-              {/* Direct label: identity is never carried by colour alone. */}
-              <text
-                x={X(last.i) + 6}
-                y={Y(last.v as number) + 3}
-                fontSize="9.5"
-                fill={SERIES[s.key]}
-                fontWeight="600"
-              >
-                {s.label}
-              </text>
-            </g>
-          );
-        })}
-
-        {points.map((d, i) => (
-          <rect
-            key={d.id}
-            x={X(i) - iw / (points.length * 2 || 1)}
-            y={M.top}
-            width={Math.max(iw / points.length, 10)}
-            height={ih}
-            fill="transparent"
-            onMouseEnter={() => setHover(i)}
-            onMouseLeave={() => setHover(null)}
-          />
-        ))}
-
-        <text x={M.left} y={H - 8} fontSize="9" fill={FAINT}>
-          oldest
-        </text>
-        <text x={W - M.right} y={H - 8} textAnchor="end" fontSize="9" fill={FAINT}>
-          newest
-        </text>
-      </svg>
-
-      {hover != null && (
-        <div className="mono" style={{ fontSize: 11, color: MUTED, marginTop: 4 }}>
-          #{points[hover].id} · p50 {fmtNs(points[hover].p50)}
-          {points[hover].p95 != null && ` · p95 ${fmtNs(points[hover].p95 as number)}`}
-          {points[hover].p99 != null && ` · p99 ${fmtNs(points[hover].p99 as number)}`}
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 14, marginTop: 6, fontSize: 11, color: MUTED }}>
-        {series.map((s) => (
-          <span key={s.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-            <span
-              style={{ width: 9, height: 2.5, background: SERIES[s.key], borderRadius: 1 }}
-              aria-hidden
-            />
-            {s.label}
-            {s.key === 'p50' && <span style={{ color: FAINT }}>(ranked)</span>}
-          </span>
-        ))}
-      </div>
-    </ChartFrame>
+      <LineChart data={points} margin={{ top: 6, right: 14, bottom: 18, left: 4 }}>
+        <CartesianGrid stroke={GRID} vertical={false} />
+        <XAxis
+          dataKey="id"
+          tickFormatter={(v: number) => `#${v}`}
+          {...axis}
+          label={{ value: 'submission', position: 'insideBottom', offset: -8, fill: FAINT, fontSize: 10 }}
+        />
+        <YAxis scale="log" domain={['auto', 'auto']} tickFormatter={fmtNs} width={54} {...axis} />
+        <Tooltip
+          {...tooltipStyle}
+          formatter={((v: unknown, n: unknown) => [fmtNs(Number(v)), String(n)]) as never}
+          labelFormatter={(l) => `submission #${l}`}
+        />
+        <Legend wrapperStyle={{ fontSize: 11, color: MUTED }} />
+        <Line type="monotone" dataKey="p50" name="p50 (ranked)" stroke={SERIES.p50} strokeWidth={2} dot={{ r: 3.5 }} isAnimationActive={false} />
+        <Line type="monotone" dataKey="p95" name="p95" stroke={SERIES.p95} strokeWidth={2} dot={{ r: 3.5 }} isAnimationActive={false} connectNulls />
+        <Line type="monotone" dataKey="p99" name="p99" stroke={SERIES.p99} strokeWidth={2} dot={{ r: 3.5 }} isAnimationActive={false} connectNulls />
+      </LineChart>
+    </Frame>
   );
 }

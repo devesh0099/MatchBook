@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { api, stateLabel, stateTone, type Submission } from '@/lib/api';
 import { HandleGate } from '@/components/HandleGate';
 import { SubmissionPanel } from '@/components/ResultsPanel';
-import { HistoryChart, type HistoryPoint } from '@/components/Charts';
+import { HistorySeries, type HistoryPoint } from '@/components/Charts';
 import { useIdentity } from '@/lib/identity';
 
 export default function SubmissionsPage() {
@@ -48,7 +48,7 @@ function Inner() {
           .map((s) => ({ id: s.id, p50: s.p50_ns as number, p95: s.p95_ns, p99: s.p99_ns }));
         return points.length > 1 ? (
           <div className="card" style={{ marginBottom: 22 }}>
-            <HistoryChart points={points} />
+            <HistorySeries points={points} />
           </div>
         ) : null;
       })()}

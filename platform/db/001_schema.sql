@@ -38,6 +38,9 @@ CREATE TABLE submissions (
   p99_ns            double precision,      -- reported, unranked
   probe_cost_ns     double precision,      -- published alongside
   run_p50s_ns       double precision[],    -- all 7-10 per-run p50s, for the bootstrap CI
+  -- Every kept run's own p50/p95/p99, so a submission can be plotted run by
+  -- run. run_p50s_ns stays as the array the bootstrap resamples.
+  runs              jsonb,
   discard_count     int DEFAULT 0,         -- steal-time discards (3 => operator alert)
   -- Percentile curve from the run whose p50 IS the score, so the published
   -- distribution and the published headline describe the same run.

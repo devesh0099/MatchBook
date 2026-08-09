@@ -294,8 +294,30 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
       continue;
     }
 
-    static const double kPcts[] = {50.0, 75.0, 90.0, 95.0, 99.0, 99.9, 99.99, 100.0};
-    for (double p : kPcts) run.percentiles.push_back({p, hist.at(p) / per_ns});
+    // The canonical HdrHistogram percentile distribution.
+    //
+    // This is exactly what hdr_percentiles_print emits in CLASSIC format — the
+    // four columns Gil Tene's plotter consumes (Value, Percentile, TotalCount,
+    // 1/(1-Percentile)) — produced by the same iterator that function uses.
+    // Read off the library rather than approximated:
+    //
+    //   - ticks_per_half_distance 5 matches the Java outputPercentileDistribution
+    //     default. Each step halves the remaining distance to 100%, which is
+    //     what gives the plot its detail in the tail.
+    //   - the plotted value is highest_equivalent_value, NOT iter.value: with 3
+    //     significant figures a bucket covers a range, and the upper bound is
+    //     the honest one to draw.
+    //   - cumulative_count is carried so the curve can say how many samples
+    //     stand behind each point.
+    hdr_iter iter;
+    hdr_iter_percentile_init(&iter, hist.raw(), /*ticks_per_half_distance=*/5);
+    while (hdr_iter_next(&iter)) {
+      run.percentiles.push_back(HdrPoint{
+          iter.specifics.percentiles.percentile,
+          static_cast<double>(iter.highest_equivalent_value) / per_ns,
+          static_cast<uint64_t>(iter.cumulative_count),
+      });
+    }
 
     consecutive_discards = 0;
     r.runs.push_back(run);
@@ -431,8 +453,11 @@ std::string format_bench_json(const BenchResult& r) {
   }
   s << "],\"median_run_index\":" << r.median_run_index << ",\"percentiles\":[";
   for (size_t i = 0; i < r.percentiles.size(); ++i) {
-    s << (i ? "," : "") << "{\"p\":" << r.percentiles[i].first
-      << ",\"ns\":" << r.percentiles[i].second << "}";
+    const auto& p = r.percentiles[i];
+    // The CLASSIC columns, named. 1/(1-p) is the x axis of the standard plot.
+    s << (i ? "," : "") << "{\"p\":" << p.percentile << ",\"ns\":" << p.value_ns
+      << ",\"count\":" << p.cumulative_count << ",\"inv\":"
+      << (p.percentile >= 100.0 ? 0.0 : 1.0 / (1.0 - p.percentile / 100.0)) << "}";
   }
   s << "]";
   if (!r.notes.empty()) s << ",\"notes\":\"" << r.notes << "\"";

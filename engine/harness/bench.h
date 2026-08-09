@@ -26,6 +26,14 @@ enum class BenchOutcome {
 
 const char* bench_outcome_name(BenchOutcome o);
 
+/// One row of the HdrHistogram percentile distribution — the CLASSIC columns
+/// that hdr_percentiles_print emits and that Gil Tene's plotter consumes.
+struct HdrPoint {
+  double percentile;         // 0..100
+  double value_ns;           // highest_equivalent_value, converted
+  uint64_t cumulative_count; // samples at or below this value
+};
+
 struct RunResult {
   double p50_ns = 0.0;
   double p95_ns = 0.0;
@@ -37,9 +45,9 @@ struct RunResult {
   uint64_t steal_delta = 0;
   bool discarded = false;
   uint64_t digest = 0;
-  /// This run's own percentile table. Kept per run so the published curve can
-  /// come from the run that actually decided the score.
-  std::vector<std::pair<double, double>> percentiles;
+  /// This run's own percentile distribution. Kept per run so the published
+  /// curve can come from the run that actually decided the score.
+  std::vector<HdrPoint> percentiles;
 };
 
 struct BenchResult {
@@ -76,7 +84,7 @@ struct BenchResult {
   // Percentile table for the published curve, taken from the MEDIAN run — the
   // one whose p50 is the score. The last run's table would describe a run that
   // decided nothing.
-  std::vector<std::pair<double, double>> percentiles;  // (percentile, ns)
+  std::vector<HdrPoint> percentiles;
   uint32_t median_run_index = 0;
 };
 

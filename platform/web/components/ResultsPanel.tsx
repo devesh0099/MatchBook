@@ -12,7 +12,7 @@ import {
   type RunResult,
   type Submission,
 } from '@/lib/api';
-import { DistributionChart, PerRunChart } from './Charts';
+import { HdrHistogram, PerRunSeries } from './Charts';
 
 export function StatePill({ state }: { state: Submission['state'] }) {
   const tone = stateTone(state);
@@ -198,20 +198,15 @@ ${d.stderr ?? ''}`}
               <Metric label="discarded" value={String(sub.discard_count)} />
             )}
           </div>
-          {(sub.run_p50s_ns?.length ?? 0) > 1 && (
+          {sub.runs && sub.runs.length > 1 && (
             <div style={{ marginTop: 18 }}>
-              <PerRunChart
-                runs={sub.run_p50s_ns as number[]}
-                medianNs={sub.p50_ns}
-                ciLowNs={Math.min(...(sub.run_p50s_ns as number[]))}
-                ciHighNs={Math.max(...(sub.run_p50s_ns as number[]))}
-              />
+              <PerRunSeries runs={sub.runs} medianNs={sub.p50_ns} />
             </div>
           )}
 
-          {sub.percentiles && sub.percentiles.length > 1 && (
+          {sub.percentiles && sub.percentiles.length > 3 && (
             <div style={{ marginTop: 22 }}>
-              <DistributionChart percentiles={sub.percentiles} probeCostNs={sub.probe_cost_ns} />
+              <HdrHistogram percentiles={sub.percentiles} probeCostNs={sub.probe_cost_ns} />
             </div>
           )}
 

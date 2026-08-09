@@ -35,7 +35,9 @@ export interface Submission {
   p95_ns: number | null;
   p99_ns: number | null;
   /// Percentile curve from the run whose p50 IS the score.
-  percentiles: { p: number; ns: number }[] | null;
+  percentiles: { p: number; ns: number; count?: number; inv?: number }[] | null;
+  /// Every kept run's own p50/p95/p99.
+  runs: { p50_ns: number; p95_ns?: number | null; p99_ns?: number | null; discarded?: boolean }[] | null;
   probe_cost_ns: number | null;
   run_p50s_ns: number[] | null;
   discard_count: number | null;
