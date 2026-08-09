@@ -17,7 +17,6 @@ use common::SubState;
 use crate::state::{leaderboard_from_db, AppState, Storage};
 
 /// One benchmark run per participant per 15 minutes, checked at enqueue.
-const BENCH_RATE_LIMIT_SECS: i64 = 15 * 60;
 
 /// Rough seconds per benchmark job, used only for the queue ETA. Measured
 /// against the reference; the bench worker writes back real per-run wall times,
@@ -264,30 +263,30 @@ async fn submit(
     }))
 }
 
-/// The two bench rate rules, in one place.
+/// The bench queue rule, in one place.
 ///
-/// Both `submit` (which enforces them) and `queue` (which lets the editor show
-/// a live countdown) call this. They used to be one inline block inside
-/// `submit`, which meant the only way to learn the remaining wait was to spend
-/// a submission finding out — and a countdown computed separately in the
-/// browser would eventually disagree with the rule that actually decides.
+/// ONE rule, not two: at most one pending benchmark job per participant. There
+/// used to also be a fixed fifteen-minute cooldown; it was removed because it
+/// throttled the wrong thing. The benchmark node is serialised, so the resource
+/// is protected by the pending rule alone — worst-case queue depth is the
+/// number of participants, whatever anyone does — and the cooldown only added
+/// a wait for people who were already waiting behind their own job.
+///
+/// Both `submit` (which enforces this) and `queue` (which reports it, so the
+/// editor can grey the button before the click rather than after) call here. A
+/// second copy in the browser would eventually disagree with the rule that
+/// actually decides.
 fn bench_eligibility(
     slot: Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)>,
 ) -> (bool, String, i64) {
-    let now = chrono::Utc::now();
-    if let Some((last_at, pending)) = slot {
-        if pending.is_some() {
-            return (false, "you already have a benchmark job pending".into(), 0);
-        }
-        if let Some(last) = last_at {
-            let elapsed = (now - last).num_seconds();
-            if elapsed < BENCH_RATE_LIMIT_SECS {
-                let wait = BENCH_RATE_LIMIT_SECS - elapsed;
-                return (false, format!("rate limited, {wait}s remaining"), wait);
-            }
-        }
+    match slot {
+        Some((_, Some(pending))) => (
+            false,
+            format!("submission #{pending} is already queued for the benchmark"),
+            0,
+        ),
+        _ => (true, "eligible".to_string(), 0),
     }
-    (true, "eligible".to_string(), 0)
 }
 
 // ---------------------------------------------------------------- results

@@ -55,9 +55,13 @@ CREATE TABLE submissions (
 CREATE INDEX ON submissions (participant_id, created_at DESC);
 CREATE INDEX ON submissions (state) WHERE state IN ('received','verify_passed','bench_queued');
 
-CREATE TABLE bench_slots (                  -- rate limiting, one row per participant
+-- One row per participant. `pending_sub` is the whole queue rule: at most one
+-- benchmark of yours queued at a time, which bounds the queue at the number of
+-- participants no matter how often anyone submits. `last_bench_at` used to also
+-- enforce a fifteen-minute cooldown; it is now recorded but never checked.
+CREATE TABLE bench_slots (
   participant_id int PRIMARY KEY REFERENCES participants(id),
-  last_bench_at  timestamptz,
+  last_bench_at  timestamptz,                        -- audit only; gates nothing
   pending_sub    bigint REFERENCES submissions(id)   -- max one pending bench job
 );
 

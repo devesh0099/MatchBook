@@ -521,7 +521,7 @@ requeue loop.
 |---|---|---|---|
 | **Run** (visible tests) | ~100k events | seconds | unlimited |
 | **Submit** → correctness | 100k–500k events, fresh seed | seconds | unlimited |
-| **Submit** → benchmark | 10M events, `cancel_heavy` (3.9M warm-up, 6.1M timed) | ~60 s | 1 per participant per 15 min, max 1 pending |
+| **Submit** → benchmark | 10M events, `cancel_heavy` (3.9M warm-up, 6.1M timed) | ~60 s | unlimited; at most 1 of yours queued at a time |
 
 Rate limiting is checked **at enqueue**: correctness is always accepted, and the submit
 response tells you immediately whether the benchmark will auto-queue and how long the

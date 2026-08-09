@@ -114,7 +114,7 @@ sequenceDiagram
     P->>DB: 'bench_queued' + take bench_slot
   else no bench worker healthy
     P->>DB: 'pending_benchmark' (held, not lost)
-  else rate limited / already pending
+  else a benchmark of theirs is already queued
     P->>DB: verify_detail.bench_held = why
   end
 
@@ -241,7 +241,7 @@ me-platform/
 |---|--:|---|
 | `db/001_schema.sql` | 112 | The whole data model. The queue is the `submissions` table. |
 | `common/src/lib.rs` | 85 | `SubState` + the harness exit codes — both cross a process boundary, so they are defined once. |
-| `api/src/routes.rs` | 395 | Participant routes. The rate limit is answered **at enqueue** and returned in the response. |
+| `api/src/routes.rs` | 395 | Participant routes. The one-pending-benchmark rule is answered **at enqueue** and returned in the response, and reported by `/queue` so the editor can grey Submit before the click. |
 | `api/src/admin.rs` | 255 | Operator router: freeze, requeue, bench health, rebuild, **rejudge** (one shared seed for everyone). |
 | `api/src/janitor.rs` | 139 | Crash recovery. Timeouts sit *above* each isolate wall-time, so it can only catch a dead worker. Every action → `events_log`. |
 | `api/src/state.rs` | 185 | Leaderboard view, runtime-loaded bands, bootstrap CI. |

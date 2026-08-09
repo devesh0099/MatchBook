@@ -311,7 +311,7 @@ Ordered by what would hurt most on the day.
   harness and sandbox paths are re-verified; the DB-mediated flow is not. Needs
   a running stack, so it pairs with the item above.
 - **Handle claim collision.** Two people can both pick `ada` and silently share a
-  draft, history and rate limit. ~30 lines to make it loud rather than silent.
+  draft, history and benchmark slot. ~30 lines to make it loud rather than silent.
   Offered, never approved.
 - **`market_order_never_rests` is a weak test.** It asserts only that the book is
   empty afterwards, so it would also pass an engine that does nothing. M2/M3 are

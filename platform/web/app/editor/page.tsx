@@ -58,11 +58,6 @@ const LockIcon = ({ size = 10 }: { size?: number }) => (
   </svg>
 );
 
-function mmss(total: number) {
-  const s = Math.max(0, Math.round(total));
-  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-}
-
 export default function EditorPage() {
   const { identity, ready } = useIdentity();
   const router = useRouter();
@@ -134,15 +129,10 @@ export default function EditorPage() {
 
   useEffect(refreshMine, [refreshMine]);
 
-  // Poll while anything of mine is still moving, and tick the cooldown down in
-  // between so the countdown reads like a clock rather than a step function.
+  // Poll while anything of mine is still moving. Submit is blocked only while a
+  // benchmark of mine is already queued, and that clears through this poll, so
+  // there is no clock to tick between refreshes.
   const anyMoving = useMemo(() => mine.some((s) => !isTerminal(s.state)), [mine]);
-  useEffect(() => {
-    const t = setInterval(() => {
-      setGate((g) => (g && !g.ready ? { ...g, wait: Math.max(0, g.wait - 1) } : g));
-    }, 1000);
-    return () => clearInterval(t);
-  }, []);
   useEffect(() => {
     if (!identity) return;
     const t = setInterval(refreshMine, anyMoving ? POLL_MS : 15000);
@@ -526,20 +516,18 @@ export default function EditorPage() {
               opacity: gate?.ready ? 1 : 0.75,
             }}
           >
-            <span>{gate?.ready ? 'Submit' : 'Submit locked'}</span>
+            <span>{gate?.ready ? 'Submit' : 'Benchmark queued'}</span>
             <span className="mono" style={{ fontWeight: 700, fontSize: 13 }}>
-              {gate == null ? '…' : gate.ready ? '1 per 15 min' : mmss(gate.wait)}
+              {gate == null ? '…' : gate.ready ? 'unlimited' : 'one at a time'}
             </span>
           </button>
 
           <div style={{ fontSize: 11, color: 'var(--app-ink-2)', lineHeight: 1.5 }}>
             {gate?.ready
-              ? 'Runs the hidden correctness check, then queues a ranked benchmark. One per 15 minutes — the clock starts on submit, not on result.'
+              ? 'Runs the hidden correctness check, then queues a ranked benchmark. Submit as often as you like — the only limit is one benchmark of yours in the queue at a time.'
               : gate == null
                 ? 'Checking your benchmark slot…'
-                : gate.wait > 0
-                  ? `Locked for another ${mmss(gate.wait)}. Keep iterating with Run; it is unlimited.`
-                  : gate.reason}
+                : `${gate.reason}. It unlocks by itself when that one finishes; correctness still runs on anything you submit meanwhile.`}
           </div>
 
           {error && (

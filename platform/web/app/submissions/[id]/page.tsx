@@ -576,8 +576,8 @@ function Held({ sub }: { sub: Submission }) {
         >
           Correctness passed at {hhmmss(sub.updated_at)} and is recorded. The benchmark node is
           unavailable, so the timing run is queued and will execute automatically when it returns —
-          you do not need to resubmit, and resubmitting will not move you up the queue. Your
-          15-minute cooldown is running normally.
+          you do not need to resubmit, and resubmitting will not move you up the queue. Keep
+          iterating; correctness still runs on anything you submit meanwhile.
         </div>
       </div>
     </div>

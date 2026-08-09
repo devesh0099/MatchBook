@@ -238,9 +238,13 @@ async fn process_submission(
     try_enqueue_bench(db, id, participant_id).await
 }
 
-/// Rate rules are applied here, at enqueue, in one transaction: one bench run
-/// per participant per 15 minutes, and at most one pending bench job each. The
-/// second rule is what makes the queue self-throttling — worst-case depth is 18.
+/// The queue rule is applied here, at enqueue, in one transaction: at most one
+/// pending bench job per participant. That alone makes the queue
+/// self-throttling — worst-case depth is the number of participants, whatever
+/// anyone does — which is why the fifteen-minute cooldown that used to sit
+/// beside it was removed. It throttled people who were already blocked behind
+/// their own job, and protected nothing the pending rule was not already
+/// protecting.
 async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<()> {
     let mut tx = db.begin().await?;
 
@@ -251,12 +255,7 @@ async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<
     .fetch_optional(&mut *tx)
     .await?;
 
-    let now = chrono::Utc::now();
-    let eligible = match &slot {
-        Some((_, Some(_))) => false, // already has one pending
-        Some((Some(last), None)) => (now - *last).num_seconds() >= 15 * 60,
-        _ => true,
-    };
+    let eligible = !matches!(&slot, Some((_, Some(_))));
 
     if !eligible {
         // Say so, on the submission.
@@ -272,10 +271,6 @@ async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<
                 "held: submission #{pending} is already queued for the benchmark. \
                  One pending benchmark job per participant."
             ),
-            Some((Some(last), None)) => {
-                let wait = (15 * 60 - (now - *last).num_seconds()).max(0);
-                format!("held: rate limited, about {wait}s until your next benchmark slot")
-            }
             _ => "held: not eligible for the benchmark lane".to_string(),
         };
         sqlx::query(
@@ -307,13 +302,15 @@ async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<
         .execute(&mut *tx)
         .await?;
 
+    // last_bench_at no longer gates anything — it is kept as a record of when a
+    // participant last took the bench slot, which is worth having in the
+    // events log's company when a queue question comes up on the day.
     sqlx::query(
         "INSERT INTO bench_slots (participant_id, last_bench_at, pending_sub) \
-         VALUES ($1, $2, $3) ON CONFLICT (participant_id) \
-         DO UPDATE SET last_bench_at = $2, pending_sub = $3",
+         VALUES ($1, now(), $2) ON CONFLICT (participant_id) \
+         DO UPDATE SET last_bench_at = now(), pending_sub = $2",
     )
     .bind(participant_id)
-    .bind(now)
     .bind(id)
     .execute(&mut *tx)
     .await?;

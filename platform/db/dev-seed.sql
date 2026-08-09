@@ -142,8 +142,9 @@ CROSS JOIN LATERAL (SELECT 341 + round(power(p.id, 1.9) * 4)::double precision A
 WHERE p.handle IN ('r.venkatesh','m.oduya','k.lindqvist','t.becker','s.roychoudhury',
                    'j.park','n.almeida','p.ibarra','l.novak');
 
--- Participant 1 is mid-cooldown, so the editor shows a live countdown rather
--- than an unlocked Submit button.
+-- last_bench_at is recorded but gates nothing; Submit is blocked only while a
+-- benchmark of yours is still queued, which submission 7 is not (it is held on
+-- the bench node being down, which is a different thing).
 INSERT INTO bench_slots (participant_id, last_bench_at)
 VALUES (1, now() - interval '6 minutes')
 ON CONFLICT (participant_id) DO UPDATE SET last_bench_at = EXCLUDED.last_bench_at;
