@@ -4,6 +4,7 @@
 #include <unordered_map>
 
 #include "common/decode.h"
+#include "harness/invariants.h"
 #include "mebench/out.h"
 #include "reference/reference.h"
 
@@ -23,7 +24,13 @@ class ValidatingSink final : public OutSink {
     for (const auto& i : injections) watched_[i.payoff_seq] = {};
   }
 
+  /// Start collecting a new event's outputs, so the invariant layer can be fed
+  /// per event exactly as the harness feeds it.
+  void begin_event() { current_.clear(); }
+  const std::vector<OutEvent>& last_event() const { return current_; }
+
   void emit(const OutEvent& e) noexcept override {
+    current_.push_back(e);
     // Injected traffic is synthetic — a clearing sweep alone submits a billion
     // units. Counting it would drown the statistics that say whether the
     // ORGANIC stream is worth trusting.
@@ -66,6 +73,7 @@ class ValidatingSink final : public OutSink {
 
   uint64_t trades = 0, acks = 0, reject_unknown = 0, reject_fok = 0;
   uint64_t cancel_acks = 0, stp_cancels = 0, expired = 0, traded_qty = 0;
+  std::vector<OutEvent> current_;
 
  private:
   std::unordered_map<uint64_t, std::vector<OutEvent>> watched_;
@@ -186,6 +194,14 @@ ValidationReport validate_stream(const std::vector<WireEvent>& events,
   ValidatingSink sink(injections);
   uint64_t organic_events = 0;
 
+  // The reference is held to the same laws a submission is. Plan section 13
+  // lists "reference passes all invariants on all four profiles" as a
+  // pre-event check; running it here is what makes that a fact rather than an
+  // assumption, and a stream is only worth trusting if the oracle behaved on it.
+  harness::InvariantChecker invariants;
+  std::string invariant_error;
+  uint64_t invariant_failed_at = 0;
+
   const uint64_t sample_every = events.empty() ? 1 : (events.size() + 9) / 10;
 
   for (uint64_t i = 0; i < events.size(); ++i) {
@@ -200,12 +216,20 @@ ValidationReport validate_stream(const std::vector<WireEvent>& events,
     if (organic) ++organic_events;
 
     const DecodedEvent d = decode(w, i);
+    sink.begin_event();
     dispatch(engine, d, sink);
+
+    if (invariant_error.empty() && !invariants.on_event(d, sink.last_event(), invariant_error)) {
+      invariant_failed_at = i;
+    }
 
     if ((i + 1) % sample_every == 0) {
       BookSnapshot snap{};
       engine.snapshot(snap);
       rep.depth_samples.push_back(snap.resting_order_count);
+      if (invariant_error.empty() && !invariants.on_snapshot(snap, invariant_error)) {
+        invariant_failed_at = i;
+      }
     }
   }
 
@@ -220,6 +244,16 @@ ValidationReport validate_stream(const std::vector<WireEvent>& events,
   rep.fill_rate = rep.submitted_qty ? static_cast<double>(rep.traded_qty) /
                                           static_cast<double>(rep.submitted_qty)
                                     : 0.0;
+
+  {
+    std::ostringstream s;
+    if (invariant_error.empty()) {
+      s << "the reference obeyed every invariant across all " << rep.event_count << " events";
+    } else {
+      s << "at event " << invariant_failed_at << ": " << invariant_error;
+    }
+    rep.checks.push_back({"reference passes the invariant layer", invariant_error.empty(), s.str()});
+  }
 
   {
     std::ostringstream s;

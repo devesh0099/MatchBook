@@ -25,6 +25,9 @@ enum class VerifyOutcome {
   SnapshotDiverged,   // books disagreed even though output matched so far
   InvariantViolated,  // submission's output is not self-consistent
   Timeout,            // liveness limit hit; reported distinctly from a wrong answer
+  /// The REFERENCE broke one of its own laws. A platform bug, never the
+  /// participant's — reported separately so it can never be scored as theirs.
+  OracleViolatedInvariant,
 };
 
 const char* outcome_name(VerifyOutcome o);

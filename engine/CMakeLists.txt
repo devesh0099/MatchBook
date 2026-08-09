@@ -37,30 +37,6 @@ set_target_properties(reference PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(reference_engine SHARED reference/ref_plugin.cpp)
 target_link_libraries(reference_engine PRIVATE reference mebench_flags)
 
-# ---------------------------------------------------------------- generator
-
-add_library(generator STATIC generator/generator.cpp generator/validate.cpp)
-target_include_directories(generator PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(generator PUBLIC mebench_headers reference PRIVATE mebench_flags)
-
-add_executable(gen generator/gen_main.cpp)
-target_link_libraries(gen PRIVATE generator mebench_flags)
-
-# ---------------------------------------------------------------- HdrHistogram
-
-# Vendored rather than fetched at build time: the benchmark node is provisioned
-# to have nothing running on it and no reason to reach the network, and a
-# ranked measurement should not depend on GitHub being up. Pinned commit is
-# recorded in third_party/hdr/PINNED_COMMIT.
-add_library(hdr_histogram STATIC third_party/hdr/src/hdr_histogram.c)
-target_include_directories(hdr_histogram PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/hdr/include)
-target_include_directories(hdr_histogram PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/hdr/src)
-set_target_properties(hdr_histogram PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 99)
-find_library(MATH_LIBRARY m)
-if(MATH_LIBRARY)
-  target_link_libraries(hdr_histogram PUBLIC ${MATH_LIBRARY})
-endif()
-
 # ---------------------------------------------------------------- harness
 
 # The fingerprint the benchmark node checks before every ranked run. On mismatch
@@ -80,6 +56,30 @@ target_link_libraries(harness_lib PUBLIC mebench_headers reference hdr_histogram
 
 add_executable(harness harness/harness_main.cpp)
 target_link_libraries(harness PRIVATE harness_lib generator mebench_flags ${CMAKE_DL_LIBS})
+
+# ---------------------------------------------------------------- generator
+
+add_library(generator STATIC generator/generator.cpp generator/validate.cpp)
+target_include_directories(generator PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(generator PUBLIC mebench_headers reference harness_lib PRIVATE mebench_flags)
+
+add_executable(gen generator/gen_main.cpp)
+target_link_libraries(gen PRIVATE generator mebench_flags)
+
+# ---------------------------------------------------------------- HdrHistogram
+
+# Vendored rather than fetched at build time: the benchmark node is provisioned
+# to have nothing running on it and no reason to reach the network, and a
+# ranked measurement should not depend on GitHub being up. Pinned commit is
+# recorded in third_party/hdr/PINNED_COMMIT.
+add_library(hdr_histogram STATIC third_party/hdr/src/hdr_histogram.c)
+target_include_directories(hdr_histogram PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/hdr/include)
+target_include_directories(hdr_histogram PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/hdr/src)
+set_target_properties(hdr_histogram PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 99)
+find_library(MATH_LIBRARY m)
+if(MATH_LIBRARY)
+  target_link_libraries(hdr_histogram PUBLIC ${MATH_LIBRARY})
+endif()
 
 # ---------------------------------------------------------------- visible tests
 

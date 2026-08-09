@@ -192,6 +192,12 @@ RunFailure replay(const std::vector<WireEvent>& events, uint64_t begin, uint64_t
   CaptureSink sub_sink(sub_out), ref_sink(ref_out);
 
   InvariantChecker invariants;
+  // The oracle is held to the same laws as the submission. If the reference
+  // ever violates one, that is a PLATFORM bug and must be shouted about — the
+  // alternative is reporting it as the participant's failure, or not at all.
+  // This is also what makes "layer 3 catches bugs the reference shares" a claim
+  // rather than an aspiration.
+  InvariantChecker oracle_invariants;
   HashSink digest_sink;
   uint64_t output_index = 0;
   Category cats[8];
@@ -252,6 +258,17 @@ RunFailure replay(const std::vector<WireEvent>& events, uint64_t begin, uint64_t
       return fail;
     }
 
+    if (std::string err; !oracle_invariants.on_event(d, ref_out, err)) {
+      fail.failed = true;
+      fail.outcome = VerifyOutcome::OracleViolatedInvariant;
+      fail.event_index = i;
+      fail.in_seq = d.o.seq;
+      fail.message = "THE REFERENCE violated an invariant: " + err +
+                     " — this is a platform bug, not a submission bug";
+      fail.events_processed = i - begin;
+      return fail;
+    }
+
     // Layer 3 runs on the submission's own output, independent of the oracle.
     if (std::string err; !invariants.on_event(d, sub_out, err)) {
       fail.failed = true;
@@ -285,6 +302,15 @@ RunFailure replay(const std::vector<WireEvent>& events, uint64_t begin, uint64_t
         fail.output_index = output_index;
         fail.message = "book snapshots disagree on " + what +
                        " — trades matched, but the books behind them did not";
+        fail.events_processed = i - begin;
+        return fail;
+      }
+      if (std::string err; !oracle_invariants.on_snapshot(a, err)) {
+        fail.failed = true;
+        fail.outcome = VerifyOutcome::OracleViolatedInvariant;
+        fail.event_index = i;
+        fail.in_seq = d.o.seq;
+        fail.message = "THE REFERENCE's book disagrees with its own output: " + err;
         fail.events_processed = i - begin;
         return fail;
       }
@@ -329,6 +355,7 @@ const char* outcome_name(VerifyOutcome o) {
     case VerifyOutcome::SnapshotDiverged: return "snapshot_diverged";
     case VerifyOutcome::InvariantViolated: return "invariant_violated";
     case VerifyOutcome::Timeout: return "timeout";
+    case VerifyOutcome::OracleViolatedInvariant: return "oracle_violated_invariant";
   }
   return "?";
 }

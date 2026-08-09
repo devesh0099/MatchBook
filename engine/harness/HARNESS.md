@@ -200,6 +200,26 @@ The one part of the gate that **never consults the reference**. It rebuilds a
 shadow book purely from the engine's *own* output and cross-checks it against
 the engine's *own* snapshot — so it survives the reference being wrong.
 
+Worth being precise about what this adds, because against a correct reference
+and a submission that matches it exactly, it adds nothing — it is a function of
+the same data. It earns its place in three specific ways:
+
+1. **Bugs the reference shares.** The diff asks "do these two agree?". If the
+   reference is wrong and the submission is wrong identically, they agree and
+   the gate passes. An invariant encodes a LAW, so it fires regardless of what
+   agrees with what.
+2. **Output versus its own book.** The oracle diff compares snapshot to
+   snapshot. This compares the submission's snapshot against the submission's
+   own OUTPUT. An engine that emits a correct trade but forgets to remove the
+   consumed order shows a wrong book with right output — and if the reference
+   had the same bug, snapshot-to-snapshot agrees and the diff is silent.
+3. **Frequency.** The snapshot diff runs every 10,000 events. `on_event` runs on
+   every event, so the per-event laws are checked four orders of magnitude more
+   often.
+
+The oracle is held to the same laws, and a violation there is reported as
+`OracleViolatedInvariant` — a platform bug, never scored as the participant's.
+
 Straight from output, no book state needed:
 
 ```cpp
