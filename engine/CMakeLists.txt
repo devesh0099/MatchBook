@@ -96,6 +96,12 @@ target_link_libraries(run_tests_reference PRIVATE spec_tests reference mebench_f
 add_library(mutant_engine SHARED tests/mutants.cpp)
 target_link_libraries(mutant_engine PRIVATE reference mebench_flags)
 
+# Comparison engines. NOT shipped: they exist to measure whether the ranked
+# profile separates a good data structure from a naive one — a question the
+# platform cannot answer by measuring only the reference.
+add_library(optimized_engine SHARED tests/engines/optimized.cpp)
+target_link_libraries(optimized_engine PRIVATE mebench_headers mebench_flags)
+
 enable_testing()
 add_test(NAME visible_spec_tests COMMAND run_tests_reference)
 add_test(NAME generator_validates_balanced

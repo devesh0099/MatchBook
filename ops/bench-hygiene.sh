@@ -112,6 +112,32 @@ hp=$(awk '/^HugePages_Total:/ {print $2}' /proc/meminfo)
 [[ "${hp:-0}" -gt 0 ]] && pass "explicit hugepages reserved: $hp" || warn "no explicit hugepages reserved"
 
 echo
+echo "== CPU pinning reaches inside the sandbox =="
+# isolate has no cpuset option: every CPU guarantee this platform makes is
+# applied OUTSIDE it and inherited across fork/exec. That inheritance is an
+# assumption, so it is asserted rather than trusted — anything landing between
+# the unit and the worker that resets affinity would leave the limits looking
+# correct while ranked runs quietly spread across cores.
+BENCH_CPU="${BENCH_CPU:-4}"
+if command -v isolate >/dev/null 2>&1; then
+  isolate --cg --box-id 30 --cleanup >/dev/null 2>&1 || true
+  if isolate --cg --box-id 30 --init >/dev/null 2>&1; then
+    inside=$(taskset -c "$BENCH_CPU" isolate --cg --box-id 30 --processes=2 \
+             --run -- /bin/sh -c 'grep Cpus_allowed_list /proc/self/status' 2>/dev/null \
+             | awk '{print $2}')
+    if [[ "$inside" == "$BENCH_CPU" ]]; then
+      pass "sandboxed process inherits the pinned core ($inside)"
+    else
+      fail "pinned to CPU $BENCH_CPU outside, box reports '${inside:-none}' — affinity is NOT reaching the submission"
+    fi
+    isolate --cg --box-id 30 --cleanup >/dev/null 2>&1 || true
+  else
+    warn "could not init a box to check affinity inheritance"
+  fi
+else
+  warn "isolate not installed; cannot check affinity inheritance"
+fi
+
 echo "== steal time =="
 # On dedicated tenancy this should always read zero, which makes it a free
 # tripwire for the co-tenant problem.
