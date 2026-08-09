@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
@@ -33,6 +34,7 @@
 #include <vector>
 
 #include "generator/generator.h"
+#include "generator/validate.h"
 #include "harness/engine_loader.h"
 #include <memory>
 
@@ -98,7 +100,8 @@ void usage() {
       "\n"
       "  bench only:\n"
       "  --runs N             ranked runs; the score is the median of their p50s (default 9)\n"
-      "  --warmup N           untimed events before measuring (default 200000)\n"
+      "  --warmup N           untimed events before measuring; defaults to what the\n"
+      "                       stream's own profile needs to fill its book\n"
       "  --digest HEX         the correctness run's digest; a mismatch is its own outcome,\n"
       "                       not a generic failure\n"
       "  -o FILE              write the JSON result to FILE\n"
@@ -115,7 +118,7 @@ bool parse_u64(const char* s, uint64_t& out) {
 
 bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, uint64_t seed,
                  const std::string& profile_name, uint64_t events,
-                 std::vector<mebench::WireEvent>& out);
+                 std::vector<mebench::WireEvent>& out, mebench::Profile& profile_out);
 
 int run_verify(int argc, char** argv) {
   std::string engine_spec, oracle_spec = "builtin", stream_path, profile_name = "balanced";
@@ -167,7 +170,10 @@ int run_verify(int argc, char** argv) {
   }
 
   std::vector<mebench::WireEvent> stream;
-  if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream))
+  mebench::Profile stream_profile{};
+  (void)stream_profile;  // only bench derives anything from it
+  if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream,
+                   stream_profile))
     return kExitUsage;
 
   std::string err;
@@ -216,25 +222,30 @@ int run_verify(int argc, char** argv) {
 // process from its seed.
 bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, uint64_t seed,
                  const std::string& profile_name, uint64_t events,
-                 std::vector<mebench::WireEvent>& out) {
+                 std::vector<mebench::WireEvent>& out, mebench::Profile& profile_out) {
+  // The profile comes back out because bench derives its default warm-up from
+  // it. Reading it off the stream rather than taking it as a flag is what stops
+  // the caller's idea of the profile drifting from the stream's.
+  mebench::StreamHeader header{};
   if (stream_fd >= 0) {
     // The hidden-stream path: the fd was inherited before privileges dropped,
     // so the submission never sees a path it could open itself, and no seed
     // ever reaches argv.
     std::string err;
-    if (!mebench::generator::read_stream_fd(stream_fd, out, err)) {
+    if (!mebench::generator::read_stream_fd(stream_fd, header, out, err)) {
       std::fprintf(stderr, "%s\n", err.c_str());
       return false;
     }
+    profile_out = static_cast<mebench::Profile>(header.profile_id);
     return true;
   }
   if (!stream_path.empty()) {
-    mebench::StreamHeader header{};
     std::string err;
     if (!mebench::generator::read_stream(stream_path, header, out, err)) {
       std::fprintf(stderr, "%s\n", err.c_str());
       return false;
     }
+    profile_out = static_cast<mebench::Profile>(header.profile_id);
     return true;
   }
   if (have_seed && events > 0) {
@@ -245,6 +256,7 @@ bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, 
     }
     mebench::generator::Generator gen(seed, profile);
     out = gen.generate(events);
+    profile_out = profile;
     return true;
   }
   std::fprintf(stderr, "need either --stream FILE or --seed S --events N\n");
@@ -288,7 +300,10 @@ int run_digest(int argc, char** argv) {
   }
 
   std::vector<mebench::WireEvent> stream;
-  if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream))
+  mebench::Profile stream_profile{};
+  (void)stream_profile;  // only bench derives anything from it
+  if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream,
+                   stream_profile))
     return kExitUsage;
 
   std::string err;
@@ -312,7 +327,7 @@ int run_bench(int argc, char** argv) {
   std::string engine_spec, stream_path, profile_name = "cancel_heavy", json_path;
   uint64_t seed = 0, events = 0;
   int stream_fd = -1;
-  bool have_seed = false, as_json = false;
+  bool have_seed = false, as_json = false, warmup_given = false;
   mebench::harness::BenchOptions opts;
 
   for (int i = 0; i < argc; ++i) {
@@ -337,6 +352,7 @@ int run_bench(int argc, char** argv) {
       opts.runs = static_cast<uint32_t>(n);
     } else if (a == "--warmup" && has_next) {
       if (!parse_u64(argv[++i], opts.warmup)) return usage(), kExitUsage;
+      warmup_given = true;
     } else if (a == "--digest" && has_next) {
       opts.expected_digest = std::strtoull(argv[++i], nullptr, 16);
       opts.have_expected_digest = true;
@@ -359,8 +375,24 @@ int run_bench(int argc, char** argv) {
   }
 
   std::vector<mebench::WireEvent> stream;
-  if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream))
+  mebench::Profile stream_profile{};
+  if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream,
+                   stream_profile))
     return kExitUsage;
+  // Warm-up defaults to whatever THIS stream's profile needs to fill its book,
+  // read from the stream header rather than passed in.
+  //
+  // A fixed default is wrong by construction: warm-up scales with depth, and
+  // cancel_heavy now builds ~300k resting orders, which takes ~3.9M events. Any
+  // caller carrying its own constant would silently time several million events
+  // of book-filling in every ranked run and report the average of a shallow
+  // book and a deep one. Deriving it here means the profile and the warm-up
+  // cannot drift apart, because there is only one of them.
+  if (!warmup_given) {
+    opts.warmup = std::min<uint64_t>(mebench::generator::warmup_events(stream_profile),
+                                     stream.size() / 2);
+  }
+
 
   std::string err;
   auto engine = mebench::harness::EngineSource::open(engine_spec, err);

@@ -28,11 +28,35 @@ constexpr ProfileParams kProfiles[] = {
     // clean up the level — becomes the common case, which is the work the
     // cancel index was chosen to expose.
     //
-    // live_target is large and sessions are many so the book carries ~23k
-    // resting orders (~3MB of index and level nodes). A few thousand fit in L2
-    // and every layout measures the same; past L2 the cache behaviour that this
-    // contest is supposed to reward starts to show.
-    {"cancel_heavy", 320, 90, 200, 12, 78, 30, 42, 2, 20, 33, 45, 3, 2, 1, 3000, 500},
+    // Depth is set to ~300k resting orders (320 sessions x 1520, times the
+    // controller's ~0.62 settling ratio). That is the point of the profile.
+    //
+    // A reference-shaped book costs ~136 B/order, so 300k is ~41 MB — well past
+    // any current L3, and past the TLB's 4K-page reach by several times. A
+    // pool-allocated engine at ~48 B/order is ~14 MB and still fits. That gap is
+    // the only thing that makes a cache-conscious layout measurably different
+    // from a naive one; at the 23k this profile used to carry, both books sat
+    // inside L3 and 23k and 49k measured byte-identically.
+    //
+    // Measured on a Zen 4 box (16 MB L3), reference against a pool/flat-array
+    // engine over 6M timed events:
+    //
+    //     depth    reference   optimized   ratio
+    //      23k       130 ns       40 ns    3.25x
+    //      50k       220 ns       50 ns    4.40x
+    //     150k       281 ns       60 ns    4.67x
+    //     300k       341 ns       70 ns    4.86x
+    //
+    // Two honest caveats. Most of the discrimination is already present by
+    // ~50-100k; and that box's rdtscp advances in 38-tick (10 ns) steps, so the
+    // optimized column is 5, 6 and 7 quanta and the 150k->300k increment is
+    // below its resolution. The bench node settles the exact figure.
+    //
+    // deep_ticks cannot grow much further to keep pace: asks rest at
+    // mid + offset, so a band beyond ~9,900 ticks collides with the injection
+    // price base at 20,000. Past ~100k the book therefore thickens levels
+    // rather than adding them (3 orders/level at 12k, 49 at 291k).
+    {"cancel_heavy", 320, 90, 200, 12, 78, 30, 42, 2, 20, 33, 45, 3, 2, 1, 3000, 1520},
     // Heavy on takers, but liquidity providers still have to outnumber them:
     // takers with nothing to sweep leave a book a handful of orders deep, which
     // stresses nothing at all.
@@ -705,13 +729,13 @@ bool write_stream(const std::string& path, uint64_t seed, Profile profile,
   return ok;
 }
 
-bool read_stream_fd(int fd, std::vector<WireEvent>& events, std::string& err) {
+bool read_stream_fd(int fd, StreamHeader& header, std::vector<WireEvent>& events,
+                    std::string& err) {
   std::FILE* f = fdopen(fd, "rb");
   if (!f) {
     err = "cannot read stream from inherited fd";
     return false;
   }
-  StreamHeader header{};
   if (std::fread(&header, sizeof(header), 1, f) != 1) {
     err = "truncated header on inherited fd";
     std::fclose(f);

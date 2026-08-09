@@ -106,8 +106,24 @@ enable_testing()
 add_test(NAME visible_spec_tests COMMAND run_tests_reference)
 add_test(NAME generator_validates_balanced
          COMMAND gen --seed 1 --profile balanced --events 200000 --validate)
+# The ranked profile's machinery, at a depth that reaches steady state quickly.
+#
+# `--live-target 100` gives ~20k resting orders and ~256k events of warm-up, so
+# every check is live inside 2M events. The shipped setting builds ~300k orders
+# and needs ~3.9M events of warm-up before depth means anything — at which point
+# the checks would silently SKIP, which is worse than not running them.
 add_test(NAME generator_validates_cancel_heavy
-         COMMAND gen --seed 1 --profile cancel_heavy --events 2000000 --validate)
+         COMMAND gen --seed 1 --profile cancel_heavy --events 2000000 --live-target 100 --validate)
+
+# The shipped ranked profile at its real depth, which is the thing the event
+# actually runs. Registered only for optimised builds: under the dev preset's
+# sanitizers this is minutes rather than seconds, and a test slow enough to be
+# skipped by hand is a test that does not run.
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+  add_test(NAME generator_validates_cancel_heavy_at_depth
+           COMMAND gen --seed 1 --profile cancel_heavy --events 6000000 --validate)
+  set_tests_properties(generator_validates_cancel_heavy_at_depth PROPERTIES TIMEOUT 600)
+endif()
 add_test(NAME generator_validates_sweep_heavy
          COMMAND gen --seed 1 --profile sweep_heavy --events 200000 --validate)
 add_test(NAME generator_validates_deep_book

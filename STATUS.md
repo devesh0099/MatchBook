@@ -62,12 +62,32 @@ firm**.
 one `below()` helper. Same seed, same bytes, verified.
 
 Four profiles differ by agent mix, cancel share, TIF mix, and book depth.
-`cancel_heavy` is the ranked one and deliberately carries ~2,600 resting orders:
-a few hundred fit in L1 and every data structure measures identically, which
-would quietly defeat ranking on per-order latency.
+`cancel_heavy` is the ranked one and carries **~300k resting orders across
+~5,900 price levels**.
+
+The generator runs its own `ReferenceEngine` and drives each session's live set
+from what that book emits, rather than guessing which of its orders are still
+resting. That guess used to drift 96% stale, with two consequences: 93% of
+cancels named orders that were already gone — so the median ranked event was a
+*failed index lookup*, the cheapest operation in an engine — and depth came out
+at 23k where the parameters implied 512k. At 23k the book never leaves L3, and
+23k and 49k measured **byte-identically** on both a naive and a cache-conscious
+engine. Depth was decorative.
+
+It is not now. Measured against `tests/engines/optimized.cpp`, 6M timed events:
+
+| depth | reference | optimized | ratio |
+|---|--:|--:|--:|
+| 23k *(old)* | 130 ns | 40 ns | 3.25× |
+| 50k | 220 ns | 50 ns | 4.40× |
+| 150k | 281 ns | 60 ns | 4.67× |
+| **300k** | **341 ns** | **70 ns** | **4.86×** |
+
+Full detail, including why most of the gain lands by ~100k and why this box
+cannot resolve the last step, is in `PLAN-book-depth.md`.
 
 Seven adversarial injections, each asserted to fire **and to have its intended
-effect**. Two non-obvious things were needed to make them fire at all:
+effect**. Three non-obvious things were needed:
 
 - A far price band isolates injected *resting* orders from organic aggressors
   but cannot isolate an injected *aggressor* from organic liquidity — an
@@ -75,11 +95,15 @@ effect**. Two non-obvious things were needed to make them fire at all:
   now opens with a sweep that clears the side it needs empty. Without it the FOK
   case counted organic liquidity and **committed instead of rejecting**,
   silently destroying the one case that separates rule F1 from the naive check.
-- Book depth grew without bound from two independent causes: orders placed
-  through the touch were tracked as "believed resting" although they fill almost
-  at once, and each session's live list hit its cap and evicted entries — an
-  evicted order being one nobody can ever cancel again. Depth is now flat over
-  10M events on every profile.
+- That sweep is a market order, and a market order accepts every price, so it
+  takes the *entire* organic ask side. Invisible at 3k resting orders; half the
+  book at 300k. Injections are now scheduled across the stream's first third,
+  where the book is filling anyway.
+- Cancel share stopped being a free parameter once tracking became exact. In
+  steady state every resting order leaves by cancel or by fill, so cancel share
+  is pinned near 37%; the profiles asked for 55% and drained every live set to
+  empty. Cancel pressure now ramps with how full a session's set is, making
+  depth the controlled variable and cancel share the emergent one.
 
 ### `harness/` — how submissions are run
 
@@ -189,7 +213,7 @@ advisories with no fix inside the 14.x line. This deviates from the impl spec's
 
 | Suite | Result |
 |---|---|
-| `ctest` (C++) | **13/13** |
+| `ctest` (C++) | **13/13** dev · **14/14** contest |
 | Sandbox integration vs real isolate | **4/4** |
 | Rust workspace | 0 errors, 0 warnings |
 | Frontend | typecheck clean, builds, image serves |
@@ -202,6 +226,10 @@ submitted #6
   t+5s   received
   t+10s  benchmarking
   t+25s  done      p50 40.1 ns · probe 20 ns · 9 runs · 0 discards
+```
+
+(that run predates the depth change; a ranked job now looks like the numbers in
+§5 below)
 ```
 
 Submit lane, Run lane (`2/41` for the skeleton) and the rejudge block have all
@@ -219,15 +247,27 @@ cap, and no process outlives the box.
 
 ## 5. Measured
 
-- **Reference engine: ~60 ns/event mean**, ~0.8 s per timed run. Nine runs ≈ 8 s,
-  not the 30–60 s the plan budgeted — the queue has far more headroom than
-  projected. Bench mode records per-run wall time so the real node measures this
-  rather than us estimating it.
-- **Probe cost is a large fraction of the ranked number.** On this box, 20 ns
-  against a 40 ns p50. It is a constant added to every sample, so ordering holds,
-  but a 2× engine improvement moves p50 by much less than 2×. Reported alongside
-  every result, with a warning above 25%. **Left as-is by decision**; the §9
-  noise-floor run on real hardware is the designated place to settle it.
+A full ranked job on this box, at the shipped 300k-order profile:
+
+| stage | cost |
+|---|--:|
+| generate the 10M-event stream | 16 s |
+| bench, 9 runs (3.9M warm-up + 6.1M timed each) | 40 s |
+| peak RSS | 710 MB (against an 8 GB cgroup limit) |
+
+- **Reference engine: p50 341 ns** at 300k resting orders, against 40 ns at the
+  23k the profile used to carry. Most of that is the book leaving cache, which is
+  the point. Warm-up is derived from the stream's own profile inside the harness,
+  so a caller cannot silently time the book-filling phase.
+- **Probe cost is no longer a large fraction of the ranked number.** 10 ns
+  against a 341 ns p50 — 3%, where it used to be 50%. The depth change fixed this
+  as a side effect; it was previously the largest known distortion in the score.
+- **This box's `rdtscp` advances in 38-tick steps — exactly 10 ns.** Every p50 it
+  reports is a whole number of quanta. That is a property of the hardware, not
+  the harness, and it caps how finely any two engines can be separated here.
+  Whether the bench node does the same is a question for the noise-floor run, and
+  it also settles the ranking-presentation question, which has been open on
+  preference and should be settled on resolution.
 
 ---
 
@@ -236,6 +276,8 @@ cap, and no process outlives the box.
 - **Noise floor + soak** → settles §16 q1 (drift correction) and q2 (metal vs
   dedicated). Scripts exist; `analyze.py` maps spread and drift onto the plan's
   decision table and was validated against synthetic tight and noisy machines.
+- **The ranked depth.** 300k is chosen against *this* box's 16 MB L3. Re-run the
+  sweep in `PLAN-book-depth.md` §7 on the bench node and confirm or move it.
 - **Band calibration.** Thresholds live in the `settings` table, so this is a SQL
   statement on the morning, not a deploy. The defaults are invented numbers and
   mean nothing until calibrated against the reference on the actual bench node.

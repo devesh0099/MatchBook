@@ -361,6 +361,26 @@ The probe is reported with every result, and warned about above 25%, because a
 constant added to every sample preserves ordering but **compresses gaps** — a
 2× faster engine moves the ranked number by much less than 2×.
 
+At 50% that compression was the largest known distortion in the score. It is now
+3%: the ranked profile carries ~300k resting orders instead of ~2.6k, so p50 is
+341 ns rather than 40 ns while the probe is unchanged. Deepening the book to make
+cache behaviour measurable fixed the probe-share problem as a side effect, which
+is worth stating because it was previously an open item with no plan attached.
+
+### Warm-up
+
+`--warmup N` runs the first N events untimed. They still go through the engine,
+and the digest still covers them, so nothing about verification changes — they
+are simply not measured.
+
+The default is not a constant. It is `warmup_events()` for **the profile named in
+the stream's own header**, capped at half the stream. Warm-up scales with depth,
+and the ranked profile takes ~3.9M events to build its book; a caller carrying
+its own number would have timed several million events of book-filling in every
+ranked run and reported the average of a shallow book and a deep one. Reading it
+off the stream means the profile and the warm-up cannot drift apart, because
+there is only one of them.
+
 ### Scoring
 
 ```cpp
