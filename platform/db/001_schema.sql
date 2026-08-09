@@ -47,10 +47,10 @@ CREATE TABLE submissions (
   discard_count     int DEFAULT 0,         -- steal-time discards (3 => operator alert)
   -- Percentile curve from the run whose p50 IS the score, so the published
   -- distribution and the published headline describe the same run.
-  percentiles       jsonb,
   -- No histogram_s3 / flamegraph_s3: the percentile distribution and the
   -- within-run timeline are stored inline above, and flamegraphs are not
   -- produced. A column nothing writes is a promise nothing keeps.
+  percentiles       jsonb
 );
 CREATE INDEX ON submissions (participant_id, created_at DESC);
 CREATE INDEX ON submissions (state) WHERE state IN ('received','verify_passed','bench_queued');

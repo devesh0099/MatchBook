@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/modernist-cc7da6fd-4716-4b45-8a1c-0ecd1adbbf08/styles.css">
+<script src="_ds/modernist-cc7da6fd-4716-4b45-8a1c-0ecd1adbbf08/_ds_bundle.js"></script>
+<style>
+  html,body{margin:0;padding:0;background:var(--app-bg);color:var(--app-ink);}
+  *{box-sizing:border-box;}
+  :root{
+    --app-bg:var(--color-bg); --app-panel:var(--color-surface); --app-ink:var(--color-text);
+    --app-ink-2:var(--color-neutral-700); --app-ink-3:var(--color-neutral-600);
+    --app-line:var(--color-neutral-300); --app-rule:var(--color-text); --app-code:#ffffff;
+    --s-pass:#0a6d5b; --s-fail:var(--color-accent); --s-slow:#8a5a00; --s-bench:#1f4f8f; --s-idle:var(--color-neutral-600);
+    --s-pass-bg:#e2efeb; --s-fail-bg:#ffe0d9; --s-slow-bg:#f4e9d2; --s-bench-bg:#e0e8f4; --s-idle-bg:#eae7e7;
+  }
+  [data-theme="dark"]{
+    --color-bg:#141313; --color-surface:#1c1b1b; --color-text:#ece9e9; --color-accent:#ff5a3c;
+    --color-divider:#4a4545;
+    --app-bg:#141313; --app-panel:#1c1b1b; --app-ink:#ece9e9; --app-ink-2:#a5a1a1; --app-ink-3:#807c7c;
+    --app-line:#332f2f; --app-rule:#5c5757; --app-code:#0e0d0d;
+    --s-pass:#4fc9ae; --s-fail:#ff7156; --s-slow:#d9a441; --s-bench:#7fb0ee; --s-idle:#8a8585;
+    --s-pass-bg:#12302a; --s-fail-bg:#3a1710; --s-slow-bg:#31280f; --s-bench-bg:#15243a; --s-idle-bg:#262323;
+  }
+  ::selection{background:var(--color-accent);color:#fff;}
+  textarea:focus-visible,button:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--color-accent);outline-offset:2px;}
+</style>
+</helmet>
+<div style="min-height:100vh;background:var(--app-bg);color:var(--app-ink);font-family:Archivo,system-ui,sans-serif;font-size:13px;-webkit-font-smoothing:antialiased">
+
+  <div style="display:flex;align-items:stretch;height:46px;border-bottom:2px solid var(--app-rule);background:var(--app-bg);position:sticky;top:0;z-index:40">
+    <div style="display:flex;align-items:center;gap:10px;padding:0 16px;border-right:1px solid var(--app-line)">
+      <div style="width:12px;height:12px;background:var(--color-accent)"></div>
+      <div style="font-weight:800;letter-spacing:0.14em;font-size:12px;text-transform:uppercase">Matcher</div>
+      <div style="font-size:10px;letter-spacing:0.12em;color:var(--app-ink-3);text-transform:uppercase">p50 · ns/event</div>
+    </div>
+    <div style="display:flex;align-items:stretch">
+      <button onClick="{{ goEditor }}" style="appearance:none;border:0;border-right:1px solid var(--app-line);background:{{ navBgEditor }};color:var(--app-ink);font:inherit;font-weight:700;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;padding:0 18px;cursor:pointer;text-align:left">/editor</button>
+      <button onClick="{{ goSub }}" style="appearance:none;border:0;border-right:1px solid var(--app-line);background:{{ navBgSub }};color:var(--app-ink);font:inherit;font-weight:700;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;padding:0 18px;cursor:pointer;text-align:left">/submissions</button>
+      <button onClick="{{ goBoard }}" style="appearance:none;border:0;border-right:1px solid var(--app-line);background:{{ navBgBoard }};color:var(--app-ink);font:inherit;font-weight:700;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;padding:0 18px;cursor:pointer;text-align:left">/leaderboard</button>
+      <button onClick="{{ goSpec }}" style="appearance:none;border:0;border-right:1px solid var(--app-line);background:{{ navBgSpec }};color:var(--app-ink);font:inherit;font-weight:700;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;padding:0 18px;cursor:pointer;text-align:left">/spec</button>
+    </div>
+    <div style="flex:1"></div>
+    <div style="display:flex;align-items:center;gap:14px;padding:0 14px;border-left:1px solid var(--app-line)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-3)">Clock</span>
+        <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums">{{ eventClock }}</span>
+      </div>
+      <div style="width:1px;height:20px;background:var(--app-line)"></div>
+      <div style="display:flex;align-items:center;gap:7px">
+        <span style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-3)">Handle</span>
+        <select value="{{ handle }}" onChange="{{ onHandle }}" style="appearance:none;border:1px solid var(--app-rule);background:var(--app-bg);color:var(--app-ink);font:inherit;font-weight:700;font-size:12px;padding:4px 22px 4px 8px;border-radius:0;cursor:pointer">
+          <sc-for list="{{ roster }}" as="p" hint-placeholder-count="3">
+            <option value="{{ p }}">{{ p }}</option>
+          </sc-for>
+        </select>
+      </div>
+      <span style="font-size:10px;letter-spacing:0.06em;color:var(--app-ink-3);border:1px dashed var(--app-line);padding:2px 6px">no login · local only</span>
+      <div style="display:flex;border:1px solid var(--app-rule)">
+        <button onClick="{{ setLight }}" style="appearance:none;border:0;background:{{ lightBg }};color:{{ lightInk }};font:inherit;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:5px 9px;cursor:pointer">Light</button>
+        <button onClick="{{ setDark }}" style="appearance:none;border:0;border-left:1px solid var(--app-rule);background:{{ darkBg }};color:{{ darkInk }};font:inherit;font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;padding:5px 9px;cursor:pointer">Dark</button>
+      </div>
+    </div>
+  </div>
+
+  <sc-if value="{{ isEditor }}" hint-placeholder-val="{{ true }}">
+  <div style="display:grid;grid-template-columns:minmax(0,1fr) 336px;height:calc(100vh - 46px)">
+
+    <div style="display:flex;flex-direction:column;min-width:0;border-right:2px solid var(--app-rule)">
+      <div style="display:flex;align-items:stretch;height:38px;border-bottom:1px solid var(--app-line);background:var(--app-panel)">
+        <button onClick="{{ tabEngine }}" style="appearance:none;border:0;border-right:1px solid var(--app-line);border-bottom:3px solid {{ tabMarkEngine }};background:{{ tabBgEngine }};color:var(--app-ink);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;font-weight:700;padding:0 16px;cursor:pointer;display:flex;align-items:center;gap:8px">
+          <span style="width:7px;height:7px;background:var(--color-accent);display:inline-block"></span>engine.cpp
+        </button>
+        <sc-for list="{{ headers }}" as="h" hint-placeholder-count="4">
+          <button onClick="{{ h.open }}" style="appearance:none;border:0;border-right:1px solid var(--app-line);border-bottom:3px solid {{ h.mark }};background:{{ h.bg }};color:var(--app-ink-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;padding:0 14px;cursor:pointer;display:flex;align-items:center;gap:7px">
+            <svg width="10" height="12" viewBox="0 0 10 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1" y="5" width="8" height="6"></rect><path d="M3 5V3a2 2 0 0 1 4 0v2"></path></svg>{{ h.name }}
+          </button>
+        </sc-for>
+        <div style="flex:1;border-right:1px solid var(--app-line)"></div>
+        <div style="display:flex;align-items:center;gap:8px;padding:0 14px">
+          <span style="width:7px;height:7px;border-radius:50%;background:{{ saveDot }}"></span>
+          <span style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;font-weight:700;color:var(--app-ink-2)">{{ saveLabel }}</span>
+        </div>
+      </div>
+
+      <sc-if value="{{ readOnly }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;align-items:center;gap:12px;padding:9px 16px;background:repeating-linear-gradient(135deg,var(--s-idle-bg),var(--s-idle-bg) 8px,transparent 8px,transparent 16px);border-bottom:1px solid var(--app-line)">
+          <svg width="13" height="15" viewBox="0 0 10 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1" y="5" width="8" height="6"></rect><path d="M3 5V3a2 2 0 0 1 4 0v2"></path></svg>
+          <span style="font-weight:800;font-size:11px;letter-spacing:0.12em;text-transform:uppercase">Frozen contract · read-only</span>
+          <span style="color:var(--app-ink-2);font-size:12px">{{ roLine }}</span>
+        </div>
+      </sc-if>
+
+      <div style="flex:1;min-height:0;display:flex;background:var(--app-code);position:relative">
+        <div style="width:52px;flex:none;padding:12px 10px 12px 0;text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:19px;color:var(--app-ink-3);background:var(--app-panel);border-right:1px solid var(--app-line);overflow:hidden;user-select:none">
+          <sc-for list="{{ lines }}" as="n" hint-placeholder-count="24"><div>{{ n }}</div></sc-for>
+        </div>
+        <textarea value="{{ buffer }}" onChange="{{ onEdit }}" readOnly="{{ readOnly }}" spellCheck="{{ false }}" style="flex:1;min-width:0;border:0;resize:none;padding:12px 16px;background:{{ bufferBg }};color:{{ bufferInk }};font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:19px;tab-size:2;outline:none"></textarea>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;height:30px;padding:0 14px;border-top:1px solid var(--app-line);background:var(--app-panel);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--app-ink-2)">
+        <span>C++20 · -O2 -march=native</span>
+        <span>{{ bufferStat }}</span>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;min-width:0;overflow-y:auto">
+
+      <div style="padding:14px;border-bottom:1px solid var(--app-line);display:flex;flex-direction:column;gap:10px">
+        <button onClick="{{ doRun }}" disabled="{{ running }}" style="appearance:none;width:100%;border:1px solid var(--app-rule);background:transparent;color:var(--app-ink);font:inherit;font-weight:800;font-size:13px;letter-spacing:0.06em;text-transform:uppercase;padding:11px 14px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;text-align:left">
+          <span>{{ runLabel }}</span>
+          <span style="font-weight:500;font-size:11px;color:var(--app-ink-2);letter-spacing:0.04em;text-transform:none">41 visible tests · ⌘↵</span>
+        </button>
+
+        <button onClick="{{ doSubmit }}" disabled="{{ submitBlocked }}" style="appearance:none;width:100%;border:2px solid {{ submitBorder }};background:{{ submitBg }};color:{{ submitInk }};font:inherit;font-weight:800;font-size:13px;letter-spacing:0.06em;text-transform:uppercase;padding:13px 14px;cursor:{{ submitCursor }};display:flex;align-items:center;justify-content:space-between;text-align:left;opacity:{{ submitOpacity }}">
+          <span>{{ submitLabel }}</span>
+          <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;font-size:13px;font-variant-numeric:tabular-nums">{{ submitRight }}</span>
+        </button>
+        <div style="font-size:11px;color:var(--app-ink-2);line-height:1.5">{{ submitNote }}</div>
+      </div>
+
+      <div style="padding:14px;border-bottom:1px solid var(--app-line)">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px">
+          <span style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--app-ink-3)">Last run</span>
+          <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--app-ink-3)">{{ runAgo }}</span>
+        </div>
+        <div style="display:flex;align-items:baseline;gap:10px">
+          <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:34px;font-weight:700;line-height:1;color:{{ runInk }};font-variant-numeric:tabular-nums">{{ runScore }}</span>
+          <span style="font-weight:800;font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:{{ runInk }}">{{ runState }}</span>
+        </div>
+        <div style="display:flex;height:6px;gap:2px;margin-top:12px">
+          <sc-for list="{{ testBars }}" as="t" hint-placeholder-count="41">
+            <div style="flex:1;background:{{ t }}"></div>
+          </sc-for>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:1px;margin-top:14px">
+          <sc-for list="{{ categories }}" as="c" hint-placeholder-count="6">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;background:{{ c.bg }}">
+              <span style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600"><span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:700;color:{{ c.ink }}">{{ c.glyph }}</span>{{ c.name }}</span>
+              <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--app-ink-2)">{{ c.count }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="padding:14px;border-bottom:1px solid var(--app-line)">
+        <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--app-ink-3);margin-bottom:10px">Your submissions</div>
+        <div style="display:flex;flex-direction:column;gap:1px">
+          <sc-for list="{{ mySubs }}" as="s" hint-placeholder-count="4">
+            <button onClick="{{ s.open }}" style="appearance:none;border:0;border-left:3px solid {{ s.ink }};background:var(--app-panel);color:var(--app-ink);font:inherit;padding:8px 10px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left">
+              <span style="display:flex;flex-direction:column;gap:2px">
+                <span style="font-weight:700;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:{{ s.ink }}">{{ s.state }}</span>
+                <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--app-ink-3)">{{ s.id }} · {{ s.at }}</span>
+              </span>
+              <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;font-weight:700;font-variant-numeric:tabular-nums">{{ s.p50 }}</span>
+            </button>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="padding:14px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--app-ink-3)">Buffer</div>
+        <button class="btn btn-secondary" onClick="{{ askReset }}" style="width:100%">Reset to skeleton</button>
+        <div style="font-size:11px;color:var(--app-ink-3);line-height:1.5">Drafts save to the server 800ms after you stop typing. Closing the lid is safe.</div>
+      </div>
+    </div>
+  </div>
+
+  <sc-if value="{{ confirmReset }}" hint-placeholder-val="{{ false }}">
+    <div class="dialog-backdrop" style="position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center">
+      <div class="dialog" style="width:420px">
+        <div class="dialog-title">Reset engine.cpp?</div>
+        <div class="dialog-body">Your current buffer ({{ bufferStat }}) is replaced by the original skeleton. The draft on the server is overwritten. This cannot be undone.</div>
+        <div class="dialog-actions">
+          <button class="btn btn-secondary" onClick="{{ cancelReset }}">Keep editing</button>
+          <button class="btn btn-primary" onClick="{{ doReset }}">Reset</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+  </sc-if>
+
+  <sc-if value="{{ isSub }}" hint-placeholder-val="{{ false }}">
+  <div style="max-width:1180px;margin:0 auto;padding:0 24px 64px">
+
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px dashed var(--app-line);flex-wrap:wrap">
+      <span style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--app-ink-3)">Prototype · inspect state</span>
+      <sc-for list="{{ stateChips }}" as="c" hint-placeholder-count="7">
+        <button onClick="{{ c.pick }}" style="appearance:none;border:1px solid {{ c.border }};background:{{ c.bg }};color:{{ c.ink }};font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:600;padding:3px 8px;cursor:pointer">{{ c.name }}</button>
+      </sc-for>
+    </div>
+
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding:26px 0 20px;border-bottom:2px solid var(--app-rule)">
+      <div style="min-width:0">
+        <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--app-ink-3);letter-spacing:0.04em">{{ subId }} · {{ handle }} · submitted {{ subAt }}</div>
+        <div style="display:flex;align-items:center;gap:14px;margin-top:10px">
+          <span style="width:16px;height:16px;background:{{ stInk }}"></span>
+          <span style="font-family:Archivo,system-ui,sans-serif;font-weight:800;font-size:34px;line-height:1;letter-spacing:-0.02em">{{ stTitle }}</span>
+        </div>
+        <div style="font-size:14px;color:var(--app-ink-2);margin-top:10px;max-width:62ch;line-height:1.5;text-wrap:pretty">{{ stBlurb }}</div>
+      </div>
+      <div style="flex:none;text-align:right">
+        <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--app-ink-3)">{{ headMetricLabel }}</div>
+        <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:44px;font-weight:700;line-height:1.05;font-variant-numeric:tabular-nums;color:{{ stInk }}">{{ headMetric }}</div>
+        <div style="font-size:11px;color:var(--app-ink-3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace">{{ headMetricSub }}</div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:2px;margin-top:16px">
+      <sc-for list="{{ stageRail }}" as="s" hint-placeholder-count="4">
+        <div style="flex:1;border-top:4px solid {{ s.bar }};padding-top:8px">
+          <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:{{ s.ink }}">{{ s.name }}</div>
+          <div style="font-size:11px;color:var(--app-ink-3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:3px">{{ s.note }}</div>
+        </div>
+      </sc-for>
+    </div>
+
+    <sc-if value="{{ showCompile }}" hint-placeholder-val="{{ false }}">
+      <div style="margin-top:28px;border:2px solid var(--s-fail)">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px;background:var(--s-fail-bg);border-bottom:1px solid var(--s-fail)">
+          <span style="font-weight:800;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--s-fail)">stderr · first 100 lines</span>
+          <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--app-ink-2)">g++ 13.2 · exit 1</span>
+        </div>
+        <pre style="margin:0;padding:14px;background:var(--app-code);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.65;overflow-x:auto;color:var(--app-ink)">{{ stderrText }}</pre>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showDiverge }}" hint-placeholder-val="{{ false }}">
+      <div style="margin-top:28px">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px">
+          <span style="font-weight:800;font-size:13px;letter-spacing:0.1em;text-transform:uppercase">First divergence</span>
+          <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--app-ink-3)">minimised from 300,000 events → {{ reproCount }}</span>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;border:2px solid var(--app-rule)">
+          <div style="grid-column:1 / -1;padding:12px 14px;border-bottom:2px solid var(--app-rule);background:var(--app-panel)">
+            <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--app-ink-3);margin-bottom:6px">Input event #{{ divIndex }}</div>
+            <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;font-weight:600">{{ divInput }}</div>
+          </div>
+          <div style="padding:12px 14px;border-right:1px solid var(--app-line)">
+            <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--app-ink-3);margin-bottom:8px">Reference emitted</div>
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <sc-for list="{{ refOut }}" as="r" hint-placeholder-count="2">
+                <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;padding:5px 8px;background:{{ r.bg }};border-left:3px solid {{ r.mark }}">{{ r.text }}</div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="padding:12px 14px">
+            <div style="font-size:10px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--s-fail);margin-bottom:8px">Yours emitted</div>
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <sc-for list="{{ yourOut }}" as="r" hint-placeholder-count="2">
+                <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;padding:5px 8px;background:{{ r.bg }};border-left:3px solid {{ r.mark }}">{{ r.text }}</div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="grid-column:1 / -1;padding:12px 14px;border-top:1px solid var(--app-line);background:var(--s-fail-bg);color:var(--app-ink);font-size:13px;line-height:1.5">{{ divRead }}</div>
+        </div>
+
+        <div style="margin-top:20px;border:1px solid var(--app-line)">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px;border-bottom:1px solid var(--app-line);background:var(--app-panel)">
+            <span style="font-weight:800;font-size:11px;letter-spacing:0.12em;text-transform:uppercase">Minimised reproducer</span>
+            <button class="btn btn-secondary" style="font-size:11px;padding:4px 9px">Copy as stdin</button>
+          </div>
+          <div style="display:flex;flex-direction:column">
+            <sc-for list="{{ repro }}" as="e" hint-placeholder-count="7">
+              <div style="display:grid;grid-template-columns:44px 1fr auto;gap:12px;align-items:center;padding:6px 14px;background:{{ e.bg }};border-bottom:1px solid var(--app-line);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px">
+                <span style="color:var(--app-ink-3)">{{ e.n }}</span>
+                <span style="font-weight:{{ e.weight }}">{{ e.text }}</span>
+                <span style="color:{{ e.ink }};font-weight:700;font-size:11px">{{ e.tag }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showTimeoutBox }}" hint-placeholder-val="{{ false }}">
+      <div style="margin-top:28px;border:2px solid var(--s-slow);padding:18px">
+        <div style="font-weight:800;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:var(--s-slow);margin-bottom:10px">Liveness, not correctness</div>
+        <div style="font-size:14px;line-height:1.6;max-width:70ch;color:var(--app-ink);text-wrap:pretty">The harness stopped your engine after 30s with 213,447 of 300,000 events consumed. Output matched the reference up to that point, so this is not a wrong answer — it is a stall or an unbounded loop. Look at what happens on a cancel for an order that is no longer resting.</div>
+        <div style="display:flex;gap:32px;margin-top:16px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+          <div><div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-3);font-family:Archivo,system-ui,sans-serif;font-weight:800">Consumed</div><div style="font-size:22px;font-weight:700">213,447</div></div>
+          <div><div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-3);font-family:Archivo,system-ui,sans-serif;font-weight:800">Wall limit</div><div style="font-size:22px;font-weight:700">30.000s</div></div>
+          <div><div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-3);font-family:Archivo,system-ui,sans-serif;font-weight:800">Last event</div><div style="font-size:22px;font-weight:700">CANCEL 88412</div></div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showHeld }}" hint-placeholder-val="{{ false }}">
+      <div style="margin-top:28px;border:2px dashed var(--app-rule);padding:22px;display:flex;gap:22px;align-items:flex-start">
+        <div style="width:10px;height:10px;background:var(--app-ink-3);margin-top:7px"></div>
+        <div>
+          <div style="font-weight:800;font-size:18px;margin-bottom:8px">Your submission is held, not lost.</div>
+          <div style="font-size:14px;line-height:1.6;max-width:66ch;color:var(--app-ink-2);text-wrap:pretty">Correctness passed at {{ subAt }} and is recorded. The benchmark node is offline, so the timing run is queued and will execute automatically when it returns — you do not need to resubmit, and resubmitting will not move you up the queue. Your 15-minute cooldown is running normally.</div>
+          <div style="display:flex;gap:32px;margin-top:18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+            <div><div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-3);font-family:Archivo,system-ui,sans-serif;font-weight:800">Queue position</div><div style="font-size:22px;font-weight:700">3 of 7</div></div>
+            <div><div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-3);font-family:Archivo,system-ui,sans-serif;font-weight:800">Node</div><div style="font-size:22px;font-weight:700">bench-01 · down</div></div>
+            <div><div style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-3);font-family:Archivo,system-ui,sans-serif;font-weight:800">Held for</div><div style="font-size:22px;font-weight:700">04:12</div></div>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showBenching }}" hint-placeholder-val="{{ false }}">
+      <div style="margin-top:28px;border:2px solid var(--s-bench);padding:22px">
+        <div style="display:flex;align-items:baseline;justify-content:space-between">
+          <div style="font-weight:800;font-size:18px;color:var(--s-bench)">Benchmarking — run 6 of 9</div>
+          <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--app-ink-2)">polling /submissions/{{ subIdShort }} every 2s</div>
+        </div>
+        <div style="display:flex;gap:3px;margin-top:16px;height:26px">
+          <sc-for list="{{ benchRuns }}" as="b" hint-placeholder-count="9">
+            <div style="flex:1;background:{{ b.bg }};display:flex;align-items:center;justify-content:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:700;color:{{ b.ink }}">{{ b.label }}</div>
+          </sc-for>
+        </div>
+        <div style="font-size:13px;color:var(--app-ink-2);margin-top:14px">Two warm-up runs discarded. Median-of-runs is taken once all nine complete; partial results are not shown because they would be wrong.</div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showDone }}" hint-placeholder-val="{{ false }}">
+      <div style="margin-top:26px;display:grid;grid-template-columns:repeat(6,1fr);border-top:1px solid var(--app-line);border-bottom:1px solid var(--app-line)">
+        <sc-for list="{{ metrics }}" as="m" hint-placeholder-count="6">
+          <div style="padding:14px 14px 14px 0">
+            <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-3)">{{ m.k }}</div>
+            <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:19px;font-weight:700;margin-top:5px;font-variant-numeric:tabular-nums">{{ m.v }}</div>
+            <div style="font-size:11px;color:var(--app-ink-3);margin-top:2px">{{ m.sub }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="margin-top:32px">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:4px">
+          <span style="font-weight:800;font-size:15px">Latency distribution</span>
+          <span style="font-size:11px;color:var(--app-ink-3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace">HdrHistogram · x = 1/(1−p), log scale</span>
+        </div>
+        <div style="font-size:12px;color:var(--app-ink-2);margin-bottom:12px">Every point is a percentile. The right-hand half of the plot is the tail — one event in a hundred thousand.</div>
+        <div style="border:1px solid var(--app-line);background:var(--app-panel);padding:10px">
+          <svg viewBox="0 0 900 300" style="width:100%;height:300px;display:block">
+            <sc-for list="{{ hdrGrid }}" as="g" hint-placeholder-count="6">
+              <g><line x1="{{ g.x }}" y1="18" x2="{{ g.x }}" y2="252" stroke="var(--app-line)" stroke-width="1"></line><text x="{{ g.x }}" y="272" fill="var(--app-ink-3)" font-size="12" font-family="ui-monospace,Menlo,monospace" text-anchor="middle">{{ g.label }}</text></g>
+            </sc-for>
+            <sc-for list="{{ hdrY }}" as="g" hint-placeholder-count="5">
+              <g><line x1="56" y1="{{ g.y }}" x2="884" y2="{{ g.y }}" stroke="var(--app-line)" stroke-width="1"></line><text x="50" y="{{ g.ty }}" fill="var(--app-ink-3)" font-size="12" font-family="ui-monospace,Menlo,monospace" text-anchor="end">{{ g.label }}</text></g>
+            </sc-for>
+            <path d="{{ hdrPath }}" fill="none" stroke="var(--app-ink)" stroke-width="2.5"></path>
+            <path d="{{ hdrRefPath }}" fill="none" stroke="var(--s-idle)" stroke-width="1.5" stroke-dasharray="5 4"></path>
+            <sc-for list="{{ hdrDots }}" as="d" hint-placeholder-count="6">
+              <g><circle cx="{{ d.x }}" cy="{{ d.y }}" r="4" style="fill:var(--color-accent)"></circle><text x="{{ d.tx }}" y="{{ d.ty }}" fill="var(--app-ink)" font-size="12" font-weight="700" font-family="ui-monospace,Menlo,monospace" text-anchor="{{ d.anchor }}">{{ d.label }}</text></g>
+            </sc-for>
+            <text x="884" y="292" fill="var(--app-ink-3)" font-size="11" font-family="Archivo,sans-serif" text-anchor="end">dashed = field median</text>
+          </svg>
+        </div>
+      </div>
+
+      <div style="margin-top:32px;display:grid;grid-template-columns:1fr 1fr;gap:24px">
+        <div>
+          <div style="font-weight:800;font-size:15px;margin-bottom:4px">Through the median run</div>
+          <div style="font-size:12px;color:var(--app-ink-2);margin-bottom:12px">60 windows. Flat is what you want; a rising p99 is a cache or allocation problem.</div>
+          <div style="border:1px solid var(--app-line);background:var(--app-panel);padding:10px">
+            <svg viewBox="0 0 440 230" style="width:100%;height:230px;display:block">
+              <sc-for list="{{ tlY }}" as="g" hint-placeholder-count="4">
+                <g><line x1="44" y1="{{ g.y }}" x2="430" y2="{{ g.y }}" stroke="var(--app-line)"></line><text x="38" y="{{ g.ty }}" fill="var(--app-ink-3)" font-size="11" font-family="ui-monospace,Menlo,monospace" text-anchor="end">{{ g.label }}</text></g>
+              </sc-for>
+              <path d="{{ tl99 }}" fill="none" style="stroke:var(--color-accent)" stroke-width="1.8"></path>
+              <path d="{{ tl95 }}" fill="none" stroke="var(--s-bench)" stroke-width="1.8"></path>
+              <path d="{{ tl50 }}" fill="none" stroke="var(--app-ink)" stroke-width="2.2"></path>
+              <text x="44" y="222" fill="var(--app-ink-3)" font-size="11" font-family="ui-monospace,Menlo,monospace">window 1</text>
+              <text x="430" y="222" fill="var(--app-ink-3)" font-size="11" font-family="ui-monospace,Menlo,monospace" text-anchor="end">60</text>
+            </svg>
+          </div>
+        </div>
+        <div>
+          <div style="font-weight:800;font-size:15px;margin-bottom:4px">Across your submissions</div>
+          <div style="font-size:12px;color:var(--app-ink-2);margin-bottom:12px">Am I getting better. Each point is a completed benchmark today.</div>
+          <div style="border:1px solid var(--app-line);background:var(--app-panel);padding:10px">
+            <svg viewBox="0 0 440 230" style="width:100%;height:230px;display:block">
+              <sc-for list="{{ tlY }}" as="g" hint-placeholder-count="4">
+                <g><line x1="44" y1="{{ g.y }}" x2="430" y2="{{ g.y }}" stroke="var(--app-line)"></line><text x="38" y="{{ g.ty }}" fill="var(--app-ink-3)" font-size="11" font-family="ui-monospace,Menlo,monospace" text-anchor="end">{{ g.label }}</text></g>
+              </sc-for>
+              <path d="{{ pg99 }}" fill="none" style="stroke:var(--color-accent)" stroke-width="1.8"></path>
+              <path d="{{ pg95 }}" fill="none" stroke="var(--s-bench)" stroke-width="1.8"></path>
+              <path d="{{ pg50 }}" fill="none" stroke="var(--app-ink)" stroke-width="2.2"></path>
+              <sc-for list="{{ pgDots }}" as="d" hint-placeholder-count="5">
+                <circle cx="{{ d.x }}" cy="{{ d.y }}" r="3.5" fill="var(--app-ink)"></circle>
+              </sc-for>
+              <text x="44" y="222" fill="var(--app-ink-3)" font-size="11" font-family="ui-monospace,Menlo,monospace">09:41</text>
+              <text x="430" y="222" fill="var(--app-ink-3)" font-size="11" font-family="ui-monospace,Menlo,monospace" text-anchor="end">13:08</text>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:20px;margin-top:14px;font-size:11px;color:var(--app-ink-2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+        <span style="display:flex;align-items:center;gap:6px"><span style="width:16px;height:3px;background:var(--app-ink)"></span>p50</span>
+        <span style="display:flex;align-items:center;gap:6px"><span style="width:16px;height:3px;background:var(--s-bench)"></span>p95</span>
+        <span style="display:flex;align-items:center;gap:6px"><span style="width:16px;height:3px;background:var(--color-accent)"></span>p99</span>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showCatBreak }}" hint-placeholder-val="{{ false }}">
+      <div style="margin-top:28px">
+        <div style="font-weight:800;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:10px">Category progress · hidden suite</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--app-line);border:1px solid var(--app-line)">
+          <sc-for list="{{ categories }}" as="c" hint-placeholder-count="6">
+            <div style="background:{{ c.bg }};padding:12px 14px">
+              <div style="display:flex;align-items:center;gap:9px"><span style="font-family:ui-monospace,Menlo,monospace;font-weight:700;font-size:15px;color:{{ c.ink }}">{{ c.glyph }}</span><span style="font-weight:700;font-size:13px">{{ c.name }}</span></div>
+              <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--app-ink-2);margin-top:5px">{{ c.count }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ isBoard }}" hint-placeholder-val="{{ false }}">
+  <div style="max-width:1180px;margin:0 auto;padding:0 24px 64px">
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;padding:28px 0 16px;border-bottom:2px solid var(--app-rule)">
+      <div>
+        <div style="font-weight:800;font-size:38px;letter-spacing:-0.02em;line-height:1">Leaderboard</div>
+        <div style="font-size:13px;color:var(--app-ink-2);margin-top:8px">Ranked on p50 nanoseconds per event, ascending. Correctness is a gate, not a tiebreak.</div>
+      </div>
+      <button onClick="{{ toggleFreeze }}" style="appearance:none;border:1px dashed var(--app-line);background:transparent;color:var(--app-ink-3);font:inherit;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;padding:5px 9px;cursor:pointer">Prototype · toggle freeze</button>
+    </div>
+
+    <sc-if value="{{ frozen }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:16px;margin-top:18px;padding:16px 18px;background:var(--color-accent);color:#fff">
+        <span style="font-weight:800;font-size:22px;letter-spacing:-0.01em;white-space:nowrap">Standings frozen</span>
+        <span style="width:2px;align-self:stretch;background:rgba(255,255,255,0.5)"></span>
+        <span style="font-size:14px;line-height:1.45;text-wrap:pretty">This is a snapshot taken at 15:00. Submissions still run and still count — you are just not being shown where they land. What you see below is not the final result.</span>
+        <span style="margin-left:auto;text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap"><span style="display:block;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.8">Reveal in</span><span style="display:block;font-size:26px;font-weight:700">{{ revealIn }}</span></span>
+      </div>
+    </sc-if>
+
+    <div style="margin-top:{{ boardGap }};border:1px solid var(--app-line);opacity:{{ boardOpacity }}">
+      <div style="display:grid;grid-template-columns:56px minmax(0,1fr) 120px 120px 96px 110px;gap:0;padding:10px 16px;background:var(--app-panel);border-bottom:2px solid var(--app-rule);font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-2)">
+        <span>Rank</span><span>Participant</span><span style="text-align:right">p50 ns</span><span style="text-align:right">p99 ns</span><span style="text-align:right">Subs</span><span style="text-align:right">Best at</span>
+      </div>
+      <sc-for list="{{ board }}" as="r" hint-placeholder-count="18">
+        <div style="display:grid;grid-template-columns:56px minmax(0,1fr) 120px 120px 96px 110px;align-items:center;padding:9px 16px;border-bottom:1px solid var(--app-line);background:{{ r.bg }};font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;font-variant-numeric:tabular-nums">
+          <span style="font-weight:700;color:{{ r.rankInk }}">{{ r.rank }}</span>
+          <span style="display:flex;align-items:center;gap:9px;min-width:0"><span style="font-family:Archivo,system-ui,sans-serif;font-weight:{{ r.weight }};font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.name }}</span><span style="font-size:10px;color:var(--app-ink-3)">{{ r.you }}</span></span>
+          <span style="text-align:right;font-weight:700;font-size:15px">{{ r.p50 }}</span>
+          <span style="text-align:right;color:var(--app-ink-2)">{{ r.p99 }}</span>
+          <span style="text-align:right;color:var(--app-ink-2)">{{ r.subs }}</span>
+          <span style="text-align:right;color:var(--app-ink-3)">{{ r.at }}</span>
+        </div>
+      </sc-for>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:10px;font-size:11px;color:var(--app-ink-3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace">
+      <span>{{ boardFoot }}</span><span>18 participants · 4 not yet passing correctness</span>
+    </div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ isSpec }}" hint-placeholder-val="{{ false }}">
+  <div style="max-width:820px;margin:0 auto;padding:34px 24px 80px">
+    <div style="font-weight:800;font-size:38px;letter-spacing:-0.02em;line-height:1">The contract</div>
+    <div style="height:2px;background:var(--app-rule);margin:18px 0 26px"></div>
+    <div style="font-size:15px;line-height:1.65;color:var(--app-ink);max-width:66ch;text-wrap:pretty">You implement the order-matching logic of a single-symbol exchange. Events arrive on stdin as fixed-width binary records; your engine emits fills and acknowledgements on stdout in the same encoding. Everything in the four header tabs is frozen and compiled as-is on the server — you cannot change it and your local copy is displayed read-only for that reason.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--app-line);border:1px solid var(--app-line);margin-top:28px">
+      <sc-for list="{{ specRules }}" as="s" hint-placeholder-count="6">
+        <div style="background:var(--app-bg);padding:16px">
+          <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:var(--app-ink-3)">{{ s.k }}</div>
+          <div style="font-size:14px;line-height:1.55;margin-top:7px">{{ s.v }}</div>
+        </div>
+      </sc-for>
+    </div>
+    <div style="margin-top:32px;border-left:3px solid var(--color-accent);padding:4px 0 4px 16px;font-size:15px;line-height:1.6;max-width:64ch">Ranking is p50 latency per event, measured over nine runs with the two fastest and two slowest discarded. Correctness is binary and comes first: an engine that is wrong is not ranked at all, however fast it is.</div>
+  </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{}">
+const SKELETON = `#include "wire.h"
+#include "order.h"
+#include "out.h"
+#include "engine.h"
+
+// Your matching engine. Everything above is frozen.
+// Ranked on p50 nanoseconds per event. Correctness first.
+
+namespace {
+
+struct Book {
+  // TODO: resting orders, price-time priority.
+};
+
+Book book;
+
+} // namespace
+
+void engine_init() {
+  // Called once before the first event. Preallocate here.
+}
+
+void engine_on_event(const wire::Event& ev, out::Sink& sink) {
+  switch (ev.kind) {
+    case wire::Kind::New:
+      // TODO: match against the opposite side, then rest the remainder.
+      break;
+    case wire::Kind::Cancel:
+      // TODO: remove if still resting; silently ignore if not.
+      break;
+    case wire::Kind::Replace:
+      // TODO: cancel-and-new; loses time priority on size increase.
+      break;
+  }
+  (void)sink;
+}
+`;
+
+const STATES = {
+  compile_failed:  {t:"Compile failed",     ink:"var(--s-fail)",  blurb:"The submission did not build, so nothing ran. Your cooldown was not consumed — fix it and submit again immediately."},
+  verify_failed:   {t:"Wrong output",       ink:"var(--s-fail)",  blurb:"Your engine built and ran, but diverged from the reference on event 4,182 of 300,000. The divergence has been minimised to a 7-event reproducer below."},
+  verify_timeout:  {t:"Timed out",          ink:"var(--s-slow)",  blurb:"Your engine stopped producing output before the stream ended. This is a liveness bug, not a wrong answer — the output was correct up to the point it stalled."},
+  verify_passed:   {t:"Correct",            ink:"var(--s-pass)",  blurb:"All hidden categories passed. You are eligible for ranking and the timing run has been queued."},
+  pending_benchmark:{t:"Held for benchmark",ink:"var(--s-idle)",  blurb:"Correctness passed and is recorded. The bench node is offline; your timing run is queued and will start on its own."},
+  benchmarking:    {t:"Benchmarking",       ink:"var(--s-bench)", blurb:"Nine timed runs on an isolated core. This takes about ninety seconds; the page updates itself."},
+  done:            {t:"Ranked",             ink:"var(--s-pass)",  blurb:"Median of the five kept runs. The interval below is the spread across those runs, not a confidence bound."}
+};
+
+const ROSTER = ["a.mehra","b.kulkarni","c.natarajan","d.oyelaran","e.fischer","f.qureshi","g.tanaka","h.silva"];
+
+const NAMES = ["r.venkatesh","m.oduya","k.lindqvist","a.mehra","t.becker","s.roychoudhury","j.park","n.almeida","c.natarajan","p.ibarra","l.novak","d.oyelaran","y.hasegawa","f.qureshi","b.kulkarni","e.fischer","g.tanaka","h.silva"];
+
+class Component extends DCLogic {
+  state = {
+    view: "editor", tab: "engine.cpp", buffer: SKELETON, save: "saved",
+    running: false, cooldown: 512, theme: "light", confirm: false,
+    subState: "verify_failed", frozen: true, clock: 0
+  };
+
+  componentDidMount() {
+    document.documentElement.setAttribute("data-theme", "light");
+    this.t = setInterval(() => this.setState(s => ({
+      cooldown: Math.max(0, s.cooldown - 1), clock: s.clock + 1
+    })), 1000);
+  }
+  componentWillUnmount() { clearInterval(this.t); if (this.saveT) clearTimeout(this.saveT); }
+
+  mmss(n) { return String(Math.floor(n/60)).padStart(2,"0") + ":" + String(n%60).padStart(2,"0"); }
+
+  edit = (e) => {
+    const v = e.target.value;
+    this.setState({ buffer: v, save: "unsaved" });
+    if (this.saveT) clearTimeout(this.saveT);
+    this.saveT = setTimeout(() => {
+      this.setState({ save: "saving" });
+      setTimeout(() => this.setState({ save: "saved" }), 550);
+    }, 800);
+  };
+
+  headerBody(n) {
+    const b = {
+      "wire.h": "namespace wire {\n\nenum class Kind : uint8_t { New = 0, Cancel = 1, Replace = 2 };\nenum class Side : uint8_t { Buy = 0, Sell = 1 };\n\nstruct Event {\n  uint64_t seq;\n  uint64_t order_id;\n  int64_t  price;      // ticks, not currency\n  uint32_t qty;\n  Kind     kind;\n  Side     side;\n  uint8_t  tif;        // 0 = DAY, 1 = IOC, 2 = FOK\n};\n\nstatic_assert(sizeof(Event) == 40, \"wire format is frozen\");\n\n} // namespace wire",
+      "order.h": "namespace book {\n\nstruct Order {\n  uint64_t id;\n  int64_t  price;\n  uint32_t qty_open;\n  uint32_t qty_filled;\n  uint64_t arrival;    // monotonic sequence, decides time priority\n  wire::Side side;\n};\n\n// Price-time priority: better price first, then lower arrival.\nconstexpr bool ahead_of(const Order& a, const Order& b, wire::Side s) noexcept {\n  if (a.price != b.price)\n    return s == wire::Side::Buy ? a.price > b.price : a.price < b.price;\n  return a.arrival < b.arrival;\n}\n\n} // namespace book",
+      "out.h": "namespace out {\n\nstruct Fill {\n  uint64_t taker_id;\n  uint64_t maker_id;\n  int64_t  price;      // always the resting order's price\n  uint32_t qty;\n};\n\nclass Sink {\n public:\n  void fill(const Fill&) noexcept;\n  void ack(uint64_t order_id) noexcept;\n  void reject(uint64_t order_id, uint8_t reason) noexcept;\n  // Ordering of emissions is part of correctness.\n};\n\n} // namespace out",
+      "engine.h": "#pragma once\n#include \"wire.h\"\n#include \"order.h\"\n#include \"out.h\"\n\n// The two functions you implement in engine.cpp.\n// engine_init() is called once; engine_on_event() is called 300,000 times\n// and is the only thing that is timed.\n\nvoid engine_init();\nvoid engine_on_event(const wire::Event& ev, out::Sink& sink);"
+    };
+    return b[n] || "";
+  }
+
+  chart(fn, n, x0, x1, y0, y1) {
+    let d = "";
+    for (let i = 0; i < n; i++) {
+      const t = i / (n - 1);
+      d += (i ? "L" : "M") + (x0 + t * (x1 - x0)).toFixed(1) + " " + (y1 - fn(t) * (y1 - y0)).toFixed(1) + " ";
+    }
+    return d.trim();
+  }
+
+  renderVals() {
+    const s = this.state, ro = s.tab !== "engine.cpp";
+    const body = ro ? this.headerBody(s.tab) : s.buffer;
+    const st = STATES[s.subState] || STATES.done;
+    const cd = s.cooldown, ready = cd === 0;
+
+    const cats = [
+      ["price-time priority", 1, "812 / 812"],
+      ["partial fills", 1, "604 / 604"],
+      ["cancel / replace", 1, "441 / 441"],
+      ["IOC", 0, "0 / 288"],
+      ["FOK", 0, "119 / 197"],
+      ["self-trade prevention", 2, "not reached"]
+    ].map(([name, ok, count]) => ({
+      name, count,
+      glyph: ok === 1 ? "✓" : ok === 0 ? "✕" : "—",
+      ink: ok === 1 ? "var(--s-pass)" : ok === 0 ? "var(--s-fail)" : "var(--s-idle)",
+      bg: ok === 1 ? "var(--s-pass-bg)" : ok === 0 ? "var(--s-fail-bg)" : "var(--s-idle-bg)"
+    }));
+
+    const testBars = Array.from({length:41}, (_,i) => i < 37 ? "var(--s-pass)" : "var(--s-fail)");
+
+    // HDR: x = log10(1/(1-p)) mapped 0.301..5
+    const X0 = 56, X1 = 884, Y0 = 22, Y1 = 252, LMIN = 0.301, LMAX = 5, YMAX = 900;
+    const px = l => X0 + (l - LMIN) / (LMAX - LMIN) * (X1 - X0);
+    const py = v => Y1 - Math.min(v, YMAX) / YMAX * (Y1 - Y0);
+    const curve = (base, k) => { let d = ""; for (let i=0;i<=90;i++){ const l = LMIN + i/90*(LMAX-LMIN); const v = base + k*Math.pow(Math.max(0,l-0.3),2.35); d += (i?"L":"M") + px(l).toFixed(1) + " " + py(v).toFixed(1) + " "; } return d.trim(); };
+    const marks = [[0.301,"p50",118],[1.301,"p95",164],[2,"p99",221],[3,"p99.9",352],[4,"p99.99",549],[5,"p99.999",817]];
+
+    const tlY = [0,1,2,3].map(i => { const y = 30 + i*50; return { y, ty: y+4, label: [600,450,300,150][i] }; });
+
+    return {
+      // nav / identity
+      roster: ROSTER, handle: "a.mehra", onHandle: () => {},
+      eventClock: "04:12:38",
+      setLight: () => { document.documentElement.setAttribute("data-theme", "light"); this.setState({theme:"light"}); },
+      setDark: () => { document.documentElement.setAttribute("data-theme", "dark"); this.setState({theme:"dark"}); },
+      lightBg: s.theme === "light" ? "var(--app-ink)" : "transparent",
+      lightInk: s.theme === "light" ? "var(--app-bg)" : "var(--app-ink-2)",
+      darkBg: s.theme === "dark" ? "var(--app-ink)" : "transparent",
+      darkInk: s.theme === "dark" ? "var(--app-bg)" : "var(--app-ink-2)",
+      isEditor: s.view === "editor", isSub: s.view === "sub", isBoard: s.view === "board", isSpec: s.view === "spec",
+      goEditor: () => this.setState({view:"editor"}), goSub: () => this.setState({view:"sub"}),
+      goBoard: () => this.setState({view:"board"}), goSpec: () => this.setState({view:"spec"}),
+      navBgEditor: s.view==="editor" ? "var(--app-panel)" : "transparent",
+      navBgSub: s.view==="sub" ? "var(--app-panel)" : "transparent",
+      navBgBoard: s.view==="board" ? "var(--app-panel)" : "transparent",
+      navBgSpec: s.view==="spec" ? "var(--app-panel)" : "transparent",
+
+      // editor
+      tabEngine: () => this.setState({tab:"engine.cpp"}),
+      tabBgEngine: ro ? "transparent" : "var(--app-code)",
+      tabMarkEngine: ro ? "transparent" : "var(--color-accent)",
+      headers: ["wire.h","order.h","out.h","engine.h"].map(n => ({
+        name: n, open: () => this.setState({tab:n}),
+        bg: s.tab===n ? "var(--app-code)" : "transparent",
+        mark: s.tab===n ? "var(--app-ink-3)" : "transparent"
+      })),
+      readOnly: ro,
+      roLine: ro ? s.tab + " is compiled as-is on the server. Edits here would be discarded." : "",
+      buffer: body, onEdit: this.edit,
+      bufferBg: ro ? "var(--app-panel)" : "var(--app-code)",
+      bufferInk: ro ? "var(--app-ink-2)" : "var(--app-ink)",
+      lines: Array.from({length: Math.max(28, body.split("\n").length)}, (_,i) => i+1),
+      bufferStat: body.split("\n").length + " lines · " + body.length + " bytes",
+      saveLabel: ro ? "read-only" : s.save,
+      saveDot: ro ? "var(--s-idle)" : s.save==="saved" ? "var(--s-pass)" : s.save==="saving" ? "var(--s-slow)" : "var(--s-fail)",
+
+      running: s.running,
+      runLabel: s.running ? "Compiling…" : "Run",
+      doRun: () => { this.setState({running:true}); setTimeout(()=>this.setState({running:false}), 900); },
+      runScore: "37/41", runState: "4 failing", runInk: "var(--s-fail)",
+      runAgo: "12s ago · 1.9s", testBars, categories: cats,
+
+      submitBlocked: !ready,
+      submitLabel: ready ? "Submit" : "Submit locked",
+      submitRight: ready ? "1 per 15 min" : this.mmss(cd),
+      submitBorder: ready ? "var(--color-accent)" : "var(--app-line)",
+      submitBg: ready ? "var(--color-accent)" : "transparent",
+      submitInk: ready ? "#fff" : "var(--app-ink-3)",
+      submitCursor: ready ? "pointer" : "not-allowed",
+      submitOpacity: ready ? "1" : "0.75",
+      submitNote: ready
+        ? "Runs the hidden correctness suite, then queues a ranked benchmark. One per 15 minutes — the clock starts on submit, not on result."
+        : "Locked until " + this.mmss(cd) + " elapses. Keep iterating with Run; it is unlimited.",
+      doSubmit: () => this.setState({view:"sub", subState:"verify_failed", cooldown:900}),
+      askReset: () => this.setState({confirm:true}), confirmReset: s.confirm,
+      cancelReset: () => this.setState({confirm:false}),
+      doReset: () => this.setState({buffer:SKELETON, confirm:false, save:"unsaved", tab:"engine.cpp"}),
+      mySubs: [
+        ["done","sub_9f2c","13:08","341 ns","var(--s-pass)"],
+        ["benchmarking","sub_8b1a","12:31","—","var(--s-bench)"],
+        ["verify_failed","sub_77e0","12:04","—","var(--s-fail)"],
+        ["compile_failed","sub_6d55","11:47","—","var(--s-fail)"]
+      ].map(([state,id,at,p50,ink]) => ({state:state.replace("_"," "),id,at,p50,ink,open:()=>this.setState({view:"sub",subState:state})})),
+
+      // submission detail
+      stateChips: Object.keys(STATES).map(k => ({
+        name: k, pick: () => this.setState({subState:k}),
+        border: s.subState===k ? "var(--app-rule)" : "var(--app-line)",
+        bg: s.subState===k ? "var(--app-panel)" : "transparent",
+        ink: s.subState===k ? "var(--app-ink)" : "var(--app-ink-3)"
+      })),
+      subId: "sub_9f2c81", subIdShort: "9f2c81", subAt: "12:04:11",
+      stTitle: st.t, stInk: st.ink, stBlurb: st.blurb,
+      headMetricLabel: s.subState==="done" ? "p50 / event" : "Rank impact",
+      headMetric: s.subState==="done" ? "341" : "—",
+      headMetricSub: s.subState==="done" ? "ns · [332, 349]" : "not ranked",
+      stageRail: [
+        ["Compile", s.subState==="compile_failed" ? ["var(--s-fail)","var(--s-fail)","failed"] : ["var(--s-pass)","var(--s-pass)","1.9s"]],
+        ["Verify", s.subState==="compile_failed" ? ["var(--app-line)","var(--app-ink-3)","not run"] : s.subState==="verify_failed" ? ["var(--s-fail)","var(--s-fail)","diverged"] : s.subState==="verify_timeout" ? ["var(--s-slow)","var(--s-slow)","timed out"] : ["var(--s-pass)","var(--s-pass)","passed"]],
+        ["Queue", ["done","benchmarking"].includes(s.subState) ? ["var(--s-pass)","var(--s-pass)","admitted"] : s.subState==="pending_benchmark" ? ["var(--s-idle)","var(--s-idle)","held"] : s.subState==="verify_passed" ? ["var(--s-pass)","var(--s-pass)","queued"] : ["var(--app-line)","var(--app-ink-3)","—"]],
+        ["Benchmark", s.subState==="done" ? ["var(--s-pass)","var(--s-pass)","9 runs"] : s.subState==="benchmarking" ? ["var(--s-bench)","var(--s-bench)","run 6/9"] : ["var(--app-line)","var(--app-ink-3)","—"]]
+      ].map(([name,[bar,ink,note]]) => ({name,bar,ink,note})),
+
+      showCompile: s.subState==="compile_failed",
+      showDiverge: s.subState==="verify_failed",
+      showTimeoutBox: s.subState==="verify_timeout",
+      showHeld: s.subState==="pending_benchmark",
+      showBenching: s.subState==="benchmarking",
+      showDone: s.subState==="done",
+      showCatBreak: ["verify_failed","verify_passed","done"].includes(s.subState),
+
+      stderrText: "engine.cpp: In function 'void engine_on_event(const wire::Event&, out::Sink&)':\nengine.cpp:58:24: error: no matching function for call to\n    'out::Sink::fill(uint64_t&, uint64_t&, int64_t&, uint32_t&)'\n   58 |       sink.fill(ev.order_id, resting.id, resting.price, take);\n      |       ~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\nIn file included from engine.cpp:3:\nout.h:14:8: note: candidate: 'void out::Sink::fill(const out::Fill&)'\n   14 |   void fill(const Fill&) noexcept;\n      |        ^~~~\nout.h:14:8: note:   candidate expects 1 argument, 4 provided\n\nengine.cpp:71:9: error: 'book' was not declared in this scope\n   71 |         book.erase(it);\n      |         ^~~~",
+
+      divIndex: "4,182", reproCount: "7 events",
+      divInput: "NEW  id=51203  BUY  price=10042  qty=300  tif=IOC",
+      refOut: [
+        {text:"FILL taker=51203 maker=50988 px=10042 qty=120", bg:"transparent", mark:"var(--app-line)"},
+        {text:"FILL taker=51203 maker=51044 px=10042 qty=80",  bg:"transparent", mark:"var(--app-line)"},
+        {text:"CANCEL 51203 remainder=100 (IOC)",              bg:"var(--s-pass-bg)", mark:"var(--s-pass)"}
+      ],
+      yourOut: [
+        {text:"FILL taker=51203 maker=50988 px=10042 qty=120", bg:"transparent", mark:"var(--app-line)"},
+        {text:"FILL taker=51203 maker=51044 px=10042 qty=80",  bg:"transparent", mark:"var(--app-line)"},
+        {text:"ACK 51203 resting=100", bg:"var(--s-fail-bg)", mark:"var(--s-fail)"}
+      ],
+      divRead: "The two fills match. You rested the 100-lot remainder instead of cancelling it — an IOC order never joins the book. Everything after this point diverges because the extra resting order changes the next match.",
+      repro: [
+        ["1","NEW  id=50988 SELL px=10042 qty=120 tif=DAY",""],
+        ["2","NEW  id=51044 SELL px=10042 qty=80  tif=DAY",""],
+        ["3","NEW  id=51100 SELL px=10043 qty=500 tif=DAY",""],
+        ["4","NEW  id=51203 BUY  px=10042 qty=300 tif=IOC","diverges"],
+        ["5","NEW  id=51290 SELL px=10042 qty=50  tif=DAY",""],
+        ["6","CANCEL id=51044",""],
+        ["7","NEW  id=51301 BUY  px=10043 qty=200 tif=DAY",""]
+      ].map(([n,text,tag]) => ({
+        n, text, tag,
+        weight: tag ? "700" : "400",
+        ink: "var(--s-fail)",
+        bg: tag ? "var(--s-fail-bg)" : "transparent"
+      })),
+
+      metrics: [
+        {k:"Runs", v:"9", sub:"2 warm-up, 2 discarded"},
+        {k:"Kept", v:"5", sub:"median of these"},
+        {k:"Interval", v:"[332, 349]", sub:"min/max of kept, ns"},
+        {k:"Events", v:"300,000", sub:"per run"},
+        {k:"Probe cost", v:"1.8%", sub:"rdtscp overhead"},
+        {k:"Core", v:"isolated", sub:"cpu 6 · no SMT sibling"}
+      ],
+      hdrGrid: marks.map(([l,label]) => ({x: px(l).toFixed(1), label})),
+      hdrY: [0,1,2,3,4].map(i => { const v = 900 - i*200; const y = py(v); return {y: y.toFixed(1), ty: (y+4).toFixed(1), label: v}; }),
+      hdrPath: curve(118, 25),
+      hdrRefPath: curve(210, 41),
+      hdrDots: marks.map(([l,label,v],i) => ({
+        x: px(l).toFixed(1), y: py(v).toFixed(1),
+        tx: (px(l) + (i>3?-8:8)).toFixed(1), ty: (py(v)-10).toFixed(1),
+        anchor: i>3 ? "end" : "start", label: v + "ns"
+      })),
+      tlY,
+      tl50: this.chart(t => 0.30 + 0.02*Math.sin(t*11), 60, 44, 430, 30, 180),
+      tl95: this.chart(t => 0.46 + 0.03*Math.sin(t*7+1), 60, 44, 430, 30, 180),
+      tl99: this.chart(t => 0.60 + 0.10*t + 0.05*Math.sin(t*17), 60, 44, 430, 30, 180),
+      pg50: "M60 62 L152 84 L244 108 L336 128 L414 140",
+      pg95: "M60 44 L152 60 L244 78 L336 96 L414 104",
+      pg99: "M60 34 L152 40 L244 52 L336 70 L414 74",
+      pgDots: [[60,62],[152,84],[244,108],[336,128],[414,140]].map(([x,y]) => ({x,y})),
+
+      // leaderboard
+      frozen: s.frozen,
+      toggleFreeze: () => this.setState({frozen: !s.frozen}),
+      revealIn: this.mmss(2731 - (s.clock % 600)),
+      boardGap: s.frozen ? "18px" : "22px",
+      boardOpacity: s.frozen ? "0.82" : "1",
+      boardFoot: s.frozen ? "Snapshot · 15:00:00 · not live" : "Live · refreshed 2s ago",
+      board: NAMES.map((name, i) => {
+        const p50 = 219 + Math.round(Math.pow(i, 1.75) * 9);
+        const me = name === "a.mehra";
+        return {
+          rank: String(i+1).padStart(2,"0"), name, p50: p50.toLocaleString(),
+          p99: (p50 * (2.4 + (i%5)*0.13)).toFixed(0),
+          subs: String(3 + (i*7)%6), at: ["09:52","10:31","11:14","12:08","12:44","13:20","14:02","14:38"][i%8],
+          you: me ? "you" : "",
+          weight: me ? "800" : i < 3 ? "700" : "500",
+          rankInk: i < 3 ? "var(--color-accent)" : "var(--app-ink-3)",
+          bg: me ? "var(--s-idle-bg)" : "transparent"
+        };
+      }),
+
+      specRules: [
+        {k:"Priority", v:"Price first, then arrival order. A replace that increases size goes to the back of its price level."},
+        {k:"Fill price", v:"Always the resting order's price, never the incoming order's."},
+        {k:"IOC", v:"Match what it can immediately, then cancel the remainder. It never rests."},
+        {k:"FOK", v:"Fill entirely at once or emit nothing but a reject. No partial state may be observable."},
+        {k:"Self-trade", v:"An order never matches another order from the same participant id. The resting side is cancelled."},
+        {k:"Emission order", v:"Fills in match order, then the terminal ack, cancel or reject for the incoming order."}
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

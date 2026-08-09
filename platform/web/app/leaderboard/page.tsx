@@ -1,19 +1,25 @@
 'use client';
 
-// Bands against fixed thresholds, not exact positions. The correctness gate
-// compresses the surviving cohort — everyone left wrote a working order book,
-// so spreads are often under 2x and defending rank 7 against rank 9 is not
-// honestly possible. Overlapping confidence intervals mean tied rank.
+// Ranked on p50, ascending. Correctness is a gate, not a tiebreak: nothing
+// reaches this table until it has passed the hidden check.
+//
+// The interval column is not decoration. It is the spread across the nine runs
+// behind each score, and two people whose intervals overlap are not reliably
+// separated by the number between them — which is worth seeing next to the rank
+// rather than in a footnote.
 
 import { useEffect, useState } from 'react';
 import { api, type LeaderboardEntry } from '@/lib/api';
+import { useIdentity } from '@/lib/identity';
 
-const BAND_ORDER = ['gold', 'silver', 'bronze', 'finisher'];
+const COLS = '56px minmax(0,1fr) 120px 120px 150px 96px';
 
 export default function LeaderboardPage() {
+  const { identity } = useIdentity();
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [frozen, setFrozen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     const load = () =>
@@ -23,85 +29,191 @@ export default function LeaderboardPage() {
           setEntries(r.entries);
           setFrozen(r.frozen);
           setError(null);
+          setLoaded(true);
         })
-        .catch((e) => setError(String(e.message ?? e)));
+        .catch((e) => {
+          setError(String(e.message ?? e));
+          setLoaded(true);
+        });
     load();
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, []);
 
-  const byBand = BAND_ORDER.map((b) => ({ band: b, rows: entries.filter((e) => e.band === b) })).filter(
-    (g) => g.rows.length > 0,
-  );
+  const ranked = entries.slice().sort((a, b) => a.p50_ns - b.p50_ns);
 
   return (
-    <main className="main">
-      <div className="page">
-        <h1>Leaderboard</h1>
-        <p className="sub">
-          Ranked on p50 per-order latency, taken as the median of 7–10 per-run medians. Bands, not
-          positions. Overlapping intervals mean a tie, and that is the honest answer rather than a
-          number that cannot be defended.
-        </p>
-
-        {frozen && (
-          <div className="card tone-warn mono" style={{ marginBottom: 20 }}>
-            Frozen. This is the standing as of the freeze; runs are still being measured underneath
-            and the final order is revealed at the end.
+    <div className="page scroll-y">
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'flex-end',
+          justifyContent: 'space-between',
+          gap: 24,
+          padding: '28px 0 16px',
+          borderBottom: '2px solid var(--app-rule)',
+          flexWrap: 'wrap',
+        }}
+      >
+        <div>
+          <div style={{ fontWeight: 800, fontSize: 38, letterSpacing: '-0.02em', lineHeight: 1 }}>
+            Leaderboard
           </div>
-        )}
-
-        {error && <p className="tone-bad mono">{error}</p>}
-
-        {entries.length === 0 ? (
-          <div className="card">
-            <div className="empty">Nothing has passed the correctness gate yet.</div>
+          <div style={{ fontSize: 13, color: 'var(--app-ink-2)', marginTop: 8, maxWidth: '74ch' }}>
+            Ranked on p50 nanoseconds per event, ascending. Correctness is a gate, not a tiebreak.
           </div>
-        ) : (
-          byBand.map((g) => (
-            <section key={g.band} style={{ marginBottom: 26 }}>
-              <h2 style={{ textTransform: 'capitalize' }}>{g.band}</h2>
-              <div className="card" style={{ padding: 0 }}>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Handle</th>
-                      <th style={{ textAlign: 'right' }}>p50</th>
-                      <th style={{ textAlign: 'right' }}>95% interval</th>
-                      <th style={{ textAlign: 'right' }}>p99</th>
-                      <th style={{ textAlign: 'right' }}>probe</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {g.rows.map((e) => (
-                      <tr key={e.handle}>
-                        <td className="mono">{e.handle}</td>
-                        <td className="num">{e.p50_ns.toFixed(1)} ns</td>
-                        <td className="num" style={{ color: 'var(--faint)' }}>
-                          {e.ci_low_ns.toFixed(1)} – {e.ci_high_ns.toFixed(1)}
-                        </td>
-                        <td className="num" style={{ color: 'var(--muted)' }}>
-                          {e.p99_ns != null ? `${e.p99_ns.toFixed(1)} ns` : '—'}
-                        </td>
-                        <td className="num" style={{ color: 'var(--faint)' }}>
-                          {e.probe_cost_ns != null ? `${e.probe_cost_ns.toFixed(1)} ns` : '—'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          ))
-        )}
-
-        <p style={{ color: 'var(--faint)', fontSize: 12.5, maxWidth: '70ch' }}>
-          p99 is reported but never ranked: sporadic hypervisor or thermal interference contaminates
-          tails while barely moving a median over 10M events. The probe cost is the fixed overhead of
-          the two <span className="mono">rdtscp</span> reads around each event, published so the
-          numbers can be read honestly.
-        </p>
+        </div>
+        <div className="mono" style={{ fontSize: 11, color: 'var(--app-ink-3)', textAlign: 'right' }}>
+          {frozen ? 'snapshot · not live' : 'live · refreshed every 5s'}
+        </div>
       </div>
-    </main>
+
+      {/* The freeze is the one thing on this page that must not be missed:
+          the standings people see at hour five are not the final ones. */}
+      {frozen && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 16,
+            marginTop: 18,
+            padding: '16px 18px',
+            background: 'var(--color-accent)',
+            color: '#fff',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ fontWeight: 800, fontSize: 22, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
+            Standings frozen
+          </span>
+          <span style={{ width: 2, alignSelf: 'stretch', background: 'rgba(255,255,255,0.5)' }} />
+          <span style={{ fontSize: 14, lineHeight: 1.45, minWidth: '30ch', flex: 1 }}>
+            This is a snapshot. Submissions still run and still count — you are just not being shown
+            where they land. What you see below is not the final result.
+          </span>
+        </div>
+      )}
+
+      {error && (
+        <div
+          className="mono"
+          style={{
+            marginTop: 18,
+            padding: '10px 14px',
+            background: 'var(--s-fail-bg)',
+            color: 'var(--s-fail)',
+            fontSize: 12,
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      <div
+        style={{
+          marginTop: frozen ? 18 : 22,
+          border: '1px solid var(--app-line)',
+          opacity: frozen ? 0.82 : 1,
+        }}
+      >
+        <div
+          className="kicker"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: COLS,
+            padding: '10px 16px',
+            background: 'var(--app-panel)',
+            borderBottom: '2px solid var(--app-rule)',
+            letterSpacing: '0.12em',
+            color: 'var(--app-ink-2)',
+          }}
+        >
+          <span>Rank</span>
+          <span>Participant</span>
+          <span style={{ textAlign: 'right' }}>p50 ns</span>
+          <span style={{ textAlign: 'right' }}>p99 ns</span>
+          <span style={{ textAlign: 'right' }}>Interval</span>
+          <span style={{ textAlign: 'right' }}>Probe</span>
+        </div>
+
+        {!loaded && <div style={{ padding: 16, color: 'var(--app-ink-3)' }}>Loading…</div>}
+        {loaded && ranked.length === 0 && (
+          <div style={{ padding: 16, color: 'var(--app-ink-3)' }}>
+            Nothing has passed the correctness gate yet.
+          </div>
+        )}
+
+        {ranked.map((e, i) => {
+          const me = identity?.handle === e.handle;
+          return (
+            <div
+              key={e.handle}
+              className="mono"
+              style={{
+                display: 'grid',
+                gridTemplateColumns: COLS,
+                alignItems: 'center',
+                padding: '9px 16px',
+                borderBottom: '1px solid var(--app-line)',
+                background: me ? 'var(--s-idle-bg)' : 'transparent',
+                fontSize: 13,
+              }}
+            >
+              <span
+                style={{
+                  fontWeight: 700,
+                  color: i < 3 ? 'var(--color-accent)' : 'var(--app-ink-3)',
+                }}
+              >
+                {String(i + 1).padStart(2, '0')}
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+                <span
+                  style={{
+                    fontFamily: 'var(--font-body)',
+                    fontWeight: me ? 800 : i < 3 ? 700 : 500,
+                    fontSize: 14,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {e.handle}
+                </span>
+                {me && <span style={{ fontSize: 10, color: 'var(--app-ink-3)' }}>you</span>}
+              </span>
+              <span style={{ textAlign: 'right', fontWeight: 700, fontSize: 15 }}>
+                {Math.round(e.p50_ns)}
+              </span>
+              <span style={{ textAlign: 'right', color: 'var(--app-ink-2)' }}>
+                {e.p99_ns != null ? Math.round(e.p99_ns) : '—'}
+              </span>
+              <span style={{ textAlign: 'right', color: 'var(--app-ink-3)', fontSize: 12 }}>
+                [{Math.round(e.ci_low_ns)}, {Math.round(e.ci_high_ns)}]
+              </span>
+              <span style={{ textAlign: 'right', color: 'var(--app-ink-3)', fontSize: 12 }}>
+                {e.probe_cost_ns != null ? `${e.probe_cost_ns.toFixed(0)}ns` : '—'}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <p
+        style={{
+          color: 'var(--app-ink-3)',
+          fontSize: 12,
+          maxWidth: '78ch',
+          marginTop: 14,
+          lineHeight: 1.6,
+        }}
+      >
+        p99 is reported but never ranked: sporadic hypervisor or thermal interference contaminates a
+        tail while barely moving a median over millions of events, so ranking on it would resolve
+        the closest pairs with the least reliable statistic. The probe cost is the fixed overhead of
+        the two <span className="mono">rdtscp</span> reads around each event — published so the
+        numbers can be read honestly rather than taken as pure engine time.
+      </p>
+    </div>
   );
 }

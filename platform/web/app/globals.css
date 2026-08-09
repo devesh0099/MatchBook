@@ -1,32 +1,135 @@
-/* The room is full of people reading compiler errors and latency numbers for
-   six hours. This leans instrument-panel: dense, dark, monospace where the
-   content is machine output, one accent colour, and state carried by colour
-   that means the same thing everywhere. */
+/* Modernist — the design system, ported from the Claude Design project
+ * (Exchange.dc.html + _ds/modernist/styles.css).
+ *
+ * Two layers, deliberately. `--color-*` are the design system's own tokens and
+ * are named exactly as it names them, so a retune upstream can be transcribed
+ * rather than translated. `--app-*` and `--s-*` are this application's layer on
+ * top: surfaces, rules, and the five submission-state colours.
+ *
+ * Dark is a chosen theme, not an inversion: it restates every token against a
+ * near-black ground, because flipping lightness on an accent this saturated
+ * produces a different colour, not a darker one.
+ */
 
-:root {
-  --bg: #0b0d10;
-  --panel: #12151a;
-  --panel-2: #171b21;
-  --line: #232932;
-  --line-bright: #2f3742;
-
-  --text: #dfe4ec;
-  --muted: #8b95a5;
-  --faint: #5d6674;
-
-  --accent: #4da3ff;
-  --good: #46c98b;
-  --bad: #ff6b6b;
-  --warn: #e8b84b;
-  --busy: #7f8ea3;
-
-  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
-  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-
-  --radius: 6px;
+/* Archivo, vendored. One variable-weight file covers 400/600/800.
+ * Not from Google Fonts: an external stylesheet is render-blocking, so a slow
+ * or captive resolver shows a white page rather than a fallback font. Also one
+ * fewer origin before first paint — since browsers partitioned the HTTP cache,
+ * a shared CDN copy is no longer shared with anything. */
+@font-face {
+  font-family: 'Archivo';
+  src: url('/fonts/archivo-var.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
 }
 
-* {
+:root {
+  /* — design system — */
+  --color-bg: #f3f2f2;
+  --color-surface: #eae9e9;
+  --color-text: #201e1d;
+  --color-accent: #ec3013;
+  --color-accent-2: #e15b47;
+  --color-divider: color-mix(in srgb, #201e1d 40%, transparent);
+
+  --color-neutral-100: #f8f4f4;
+  --color-neutral-200: #eae7e7;
+  --color-neutral-300: #d7d3d3;
+  --color-neutral-400: #bab6b6;
+  --color-neutral-500: #9b9797;
+  --color-neutral-600: #7d7979;
+  --color-neutral-700: #605d5d;
+  --color-neutral-800: #444141;
+  --color-neutral-900: #2d2b2b;
+
+  --color-accent-100: #fff2ef;
+  --color-accent-200: #ffe0d9;
+  --color-accent-300: #ffc4b8;
+  --color-accent-400: #ff9783;
+  --color-accent-500: #ff563c;
+  --color-accent-600: #dd2b0f;
+  --color-accent-700: #ae1800;
+  --color-accent-800: #7c1405;
+  --color-accent-900: #4d170e;
+
+  --font-heading: 'Archivo', system-ui, sans-serif;
+  --font-heading-weight: 800;
+  --font-body: 'Archivo', system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Square by design. Nothing in this system has a corner radius. */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+
+  --shadow-sm: 0 1px 2px color-mix(in srgb, #2d2b2b 14%, transparent);
+  --shadow-md: 0 3px 10px color-mix(in srgb, #2d2b2b 16%, transparent);
+  --shadow-lg: 0 12px 32px color-mix(in srgb, #2d2b2b 22%, transparent);
+
+  /* — application layer — */
+  --app-bg: var(--color-bg);
+  --app-panel: var(--color-surface);
+  --app-ink: var(--color-text);
+  --app-ink-2: var(--color-neutral-700);
+  --app-ink-3: var(--color-neutral-600);
+  --app-line: var(--color-neutral-300);
+  --app-rule: var(--color-text);
+  --app-code: #ffffff;
+
+  /* The five states a submission can be in, as colour. Kept distinct because
+   * "wrong answer", "too slow" and "the node is down" are different problems
+   * and collapsing them into one red X wastes the reader's time. */
+  --s-pass: #0a6d5b;
+  --s-fail: var(--color-accent);
+  --s-slow: #8a5a00;
+  --s-bench: #1f4f8f;
+  --s-idle: var(--color-neutral-600);
+  --s-pass-bg: #e2efeb;
+  --s-fail-bg: #ffe0d9;
+  --s-slow-bg: #f4e9d2;
+  --s-bench-bg: #e0e8f4;
+  --s-idle-bg: #eae7e7;
+}
+
+[data-theme='dark'] {
+  --color-bg: #141313;
+  --color-surface: #1c1b1b;
+  --color-text: #ece9e9;
+  --color-accent: #ff5a3c;
+  --color-divider: #4a4545;
+
+  --app-bg: #141313;
+  --app-panel: #1c1b1b;
+  --app-ink: #ece9e9;
+  --app-ink-2: #a5a1a1;
+  --app-ink-3: #807c7c;
+  --app-line: #332f2f;
+  --app-rule: #5c5757;
+  --app-code: #0e0d0d;
+
+  --s-pass: #4fc9ae;
+  --s-fail: #ff7156;
+  --s-slow: #d9a441;
+  --s-bench: #7fb0ee;
+  --s-idle: #8a8585;
+  --s-pass-bg: #12302a;
+  --s-fail-bg: #3a1710;
+  --s-slow-bg: #31280f;
+  --s-bench-bg: #15243a;
+  --s-idle-bg: #262323;
+}
+
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -34,360 +137,220 @@ html,
 body {
   margin: 0;
   padding: 0;
-  height: 100%;
+  background: var(--app-bg);
+  color: var(--app-ink);
 }
 
 body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--sans);
-  font-size: 14px;
-  line-height: 1.5;
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 1.55;
+  font-weight: 400;
   -webkit-font-smoothing: antialiased;
 }
 
-a {
-  color: var(--accent);
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  line-height: 1.12;
+  letter-spacing: -0.015em;
+  margin: 0 0 var(--space-2);
+}
+h1 { font-size: 42px; }
+h2 { font-size: 32px; }
+h3 { font-size: 25px; }
+h4 { font-size: 20px; }
+h5 { font-size: 16px; }
+h6 { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; }
+
+p { margin: 0 0 var(--space-3); }
+a { color: var(--color-accent); text-underline-offset: 3px; }
+img { display: block; max-width: 100%; }
+
+::selection {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ─────────────────────────────────────────────── components */
+
+.hr {
+  height: 2px;
+  border: 0;
+  margin: var(--space-4) 0;
+  background: var(--color-divider);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
   text-decoration: none;
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: 14px;
+  line-height: 1.2;
+  color: var(--color-text);
+  background: transparent;
+  border: 1px solid transparent;
+  padding: var(--space-2) calc(var(--space-3) * 1.2);
+  border-radius: var(--radius-md);
 }
-a:hover {
-  text-decoration: underline;
+.btn svg { display: block; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-primary { background: var(--color-accent); color: var(--color-bg); }
+.btn-primary:hover:not(:disabled) { background: var(--color-accent-600); }
+.btn-primary:active:not(:disabled) { background: var(--color-accent-700); }
+.btn-secondary { border-color: var(--color-divider); }
+.btn-secondary:hover:not(:disabled) { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+.btn-secondary:active:not(:disabled) { background: color-mix(in srgb, var(--color-text) 14%, transparent); }
+.btn-ghost { color: var(--color-accent); padding-inline: var(--space-1); }
+.btn-ghost:hover:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+
+/* The system's tables: uppercase micro-headers, 2px rule under them,
+ * hairlines between rows, and a whole-row hover. */
+.table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.table th {
+  text-align: left;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+  padding: var(--space-2);
+  border-bottom: 2px solid var(--color-divider);
 }
+.table td { padding: var(--space-2); border-bottom: 1px solid var(--color-divider); }
+.table tbody tr:hover { background: color-mix(in srgb, var(--color-text) 4%, transparent); }
 
-/* ---------------------------------------------------------------- shell */
-
-.shell {
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: color-mix(in srgb, var(--color-neutral-900) 50%, transparent);
+  z-index: 60;
+}
+.dialog {
+  width: min(440px, 100%);
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
 }
-
-.nav {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 16px;
-  height: 48px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-  flex: 0 0 auto;
-}
-
-.brand {
-  font-family: var(--mono);
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  margin-right: 16px;
-  color: var(--text);
-}
-.brand span {
-  color: var(--accent);
-}
-
-.nav a.tab {
-  padding: 6px 12px;
-  border-radius: var(--radius);
-  color: var(--muted);
-  font-weight: 500;
-}
-.nav a.tab:hover {
-  background: var(--panel-2);
-  color: var(--text);
-  text-decoration: none;
-}
-.nav a.tab.active {
-  background: var(--panel-2);
-  color: var(--text);
-}
-
-.nav .spacer {
-  flex: 1;
-}
-
-.who {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.who b {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.main {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-}
-.main.fill {
-  overflow: hidden;
-}
-
-.page {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 28px 20px 64px;
-}
-
-h1 {
+.dialog-title {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
   font-size: 20px;
-  margin: 0 0 4px;
-  letter-spacing: -0.01em;
 }
-h2 {
-  font-size: 15px;
-  margin: 28px 0 10px;
-}
-.sub {
-  color: var(--muted);
-  margin: 0 0 24px;
-  max-width: 70ch;
+.dialog-body { font-size: 14px; opacity: 0.85; }
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
-/* ---------------------------------------------------------------- controls */
+/* ─────────────────────────────────────────────── app primitives */
 
-button {
-  font: inherit;
-  font-weight: 550;
-  border: 1px solid var(--line-bright);
-  background: var(--panel-2);
-  color: var(--text);
-  padding: 7px 14px;
-  border-radius: var(--radius);
-  cursor: pointer;
-}
-button:hover:not(:disabled) {
-  border-color: #3d4655;
-  background: #1c212a;
-}
-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #06111d;
-}
-button.primary:hover:not(:disabled) {
-  background: #63b0ff;
-  border-color: #63b0ff;
-}
-
-select {
-  font: inherit;
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--line-bright);
-  border-radius: var(--radius);
-  padding: 7px 10px;
-}
-
-/* ---------------------------------------------------------------- panels */
-
-.card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 16px;
+/* The uppercase micro-label the design uses everywhere as a section marker. */
+.kicker {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--app-ink-3);
 }
 
 .mono {
-  font-family: var(--mono);
-  font-size: 12.5px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
-pre.out {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  line-height: 1.55;
-  background: #0e1116;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 12px 14px;
-  overflow-x: auto;
-  margin: 0;
-  white-space: pre;
-}
-
-.tone-good {
-  color: var(--good);
-}
-.tone-bad {
-  color: var(--bad);
-}
-.tone-warn {
-  color: var(--warn);
-}
-.tone-busy {
-  color: var(--busy);
-}
-
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  border: 1px solid currentColor;
-}
-.dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-table {
+/* `width: 100%` is load-bearing. The shell is a column flexbox, and an `auto`
+ * margin on a flex item suppresses the default cross-axis stretch — so
+ * `margin: 0 auto` alone centred the page at shrink-to-fit width (about 570px
+ * of a 1440px viewport) rather than filling it up to the cap. */
+.page {
   width: 100%;
-  border-collapse: collapse;
-}
-th {
-  text-align: left;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--faint);
-  font-weight: 600;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line);
-}
-td {
-  padding: 10px;
-  border-bottom: 1px solid var(--line);
-  vertical-align: middle;
-}
-tr:last-child td {
-  border-bottom: none;
-}
-td.num {
-  font-family: var(--mono);
-  text-align: right;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 24px 64px;
 }
 
-.empty {
-  color: var(--faint);
-  padding: 28px;
-  text-align: center;
-  font-size: 13px;
-}
+/* Scroll containers: the app is a fixed-height shell, so anything that can
+ * overflow must scroll inside its own box rather than growing the page. */
+.scroll-y { overflow-y: auto; min-height: 0; }
+.scroll-x { overflow-x: auto; }
 
-/* ---------------------------------------------------------------- prose
-
-   The spec page. It is a long normative document that people read under time
-   pressure and jump around in, so this optimises for scanning: a measured line
-   length, headings that are findable, and tables that stay readable because
-   half the rules ARE tables. */
-
-.prose {
-  max-width: 76ch;
-  color: var(--text);
-}
-
-.prose h1,
-.prose h2,
-.prose h3,
-.prose h4 {
-  line-height: 1.25;
-  letter-spacing: -0.01em;
-  scroll-margin-top: 64px;
-}
-.prose h1 {
-  font-size: 24px;
-  margin: 36px 0 8px;
-}
-.prose h2 {
-  font-size: 18px;
-  margin: 34px 0 10px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--line);
-}
-.prose h3 {
-  font-size: 15px;
-  margin: 26px 0 8px;
-  color: var(--text);
-}
-.prose h4 {
-  font-size: 13.5px;
-  margin: 20px 0 6px;
-  color: var(--muted);
-}
-
-.prose p,
-.prose li {
+pre.code {
+  margin: 0;
+  padding: 14px;
+  background: var(--app-code);
+  font-family: var(--font-mono);
+  font-size: 12px;
   line-height: 1.65;
-}
-.prose ul,
-.prose ol {
-  padding-left: 22px;
-}
-.prose li {
-  margin: 4px 0;
-}
-.prose li > p {
-  margin: 4px 0;
+  overflow-x: auto;
+  color: var(--app-ink);
 }
 
-.prose strong {
-  color: #fff;
-  font-weight: 600;
+/* Rendered SPEC.md. The spec is the normative document participants are bound
+ * by, so it gets real prose measure rather than app density. */
+.prose {
+  font-size: 15px;
+  line-height: 1.65;
+  max-width: 68ch;
 }
-
+.prose h1 { font-size: 38px; letter-spacing: -0.02em; margin-bottom: var(--space-4); }
+.prose h2 {
+  font-size: 24px;
+  margin-top: var(--space-8);
+  padding-top: var(--space-3);
+  border-top: 2px solid var(--app-rule);
+}
+.prose h3 { font-size: 18px; margin-top: var(--space-6); }
 .prose code {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  background: #0e1116;
-  border: 1px solid var(--line);
-  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--app-panel);
   padding: 1px 5px;
 }
 .prose pre {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  line-height: 1.55;
-  background: #0e1116;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 12px 14px;
+  background: var(--app-code);
+  border: 1px solid var(--app-line);
+  padding: var(--space-3);
   overflow-x: auto;
 }
-.prose pre code {
-  background: none;
-  border: none;
-  padding: 0;
-}
-
-/* Wide content scrolls inside its own box; the page itself never scrolls
-   sideways. */
-.prose table {
-  display: block;
-  overflow-x: auto;
-  white-space: nowrap;
-  margin: 14px 0;
-}
+.prose pre code { background: none; padding: 0; }
+.prose table { border-collapse: collapse; width: 100%; font-size: 14px; }
 .prose th,
-.prose td {
-  padding: 7px 12px;
-  font-size: 13px;
+.prose td { padding: 6px 10px; border-bottom: 1px solid var(--app-line); text-align: left; }
+.prose th {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--app-ink-3);
+  border-bottom: 2px solid var(--app-rule);
 }
-.prose td {
-  white-space: normal;
-}
-
 .prose blockquote {
-  margin: 16px 0;
-  padding: 2px 0 2px 14px;
-  border-left: 2px solid var(--accent);
-  color: var(--muted);
-}
-
-.prose hr {
-  border: none;
-  border-top: 1px solid var(--line);
-  margin: 30px 0;
+  margin: var(--space-4) 0;
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-accent);
+  color: var(--app-ink-2);
 }

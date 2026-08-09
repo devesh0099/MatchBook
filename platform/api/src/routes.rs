@@ -251,22 +251,7 @@ async fn submit(
     .await
     .map_err(internal)?;
 
-    let now = chrono::Utc::now();
-    let (mut will_queue, mut reason, mut wait) = (true, "eligible".to_string(), 0i64);
-
-    if let Some((last_at, pending)) = slot {
-        if pending.is_some() {
-            will_queue = false;
-            reason = "you already have a benchmark job pending".into();
-        } else if let Some(last) = last_at {
-            let elapsed = (now - last).num_seconds();
-            if elapsed < BENCH_RATE_LIMIT_SECS {
-                will_queue = false;
-                wait = BENCH_RATE_LIMIT_SECS - elapsed;
-                reason = format!("rate limited, {wait}s remaining");
-            }
-        }
-    }
+    let (will_queue, reason, wait) = bench_eligibility(slot);
 
     tx.commit().await.map_err(internal)?;
 
@@ -277,6 +262,32 @@ async fn submit(
         bench_reason: reason,
         bench_wait_secs: wait,
     }))
+}
+
+/// The two bench rate rules, in one place.
+///
+/// Both `submit` (which enforces them) and `queue` (which lets the editor show
+/// a live countdown) call this. They used to be one inline block inside
+/// `submit`, which meant the only way to learn the remaining wait was to spend
+/// a submission finding out — and a countdown computed separately in the
+/// browser would eventually disagree with the rule that actually decides.
+fn bench_eligibility(
+    slot: Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)>,
+) -> (bool, String, i64) {
+    let now = chrono::Utc::now();
+    if let Some((last_at, pending)) = slot {
+        if pending.is_some() {
+            return (false, "you already have a benchmark job pending".into(), 0);
+        }
+        if let Some(last) = last_at {
+            let elapsed = (now - last).num_seconds();
+            if elapsed < BENCH_RATE_LIMIT_SECS {
+                let wait = BENCH_RATE_LIMIT_SECS - elapsed;
+                return (false, format!("rate limited, {wait}s remaining"), wait);
+            }
+        }
+    }
+    (true, "eligible".to_string(), 0)
 }
 
 // ---------------------------------------------------------------- results
@@ -390,9 +401,22 @@ async fn queue(State(st): State<AppState>, Query(q): Query<WhoQuery>) -> ApiResu
     .map_err(internal)?;
 
     let ahead = mine.map(|m| m.0).unwrap_or(depth);
+
+    // Read-only, and by exactly the rule submit() enforces.
+    let slot: Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)> =
+        sqlx::query_as("SELECT last_bench_at, pending_sub FROM bench_slots WHERE participant_id = $1")
+            .bind(q.participant_id)
+            .fetch_optional(&st.db)
+            .await
+            .map_err(internal)?;
+    let (ready, reason, wait) = bench_eligibility(slot);
+
     Ok(Json(json!({
         "depth": depth,
         "ahead": ahead,
         "eta_secs": ahead * BENCH_JOB_SECS,
+        "bench_ready": ready,
+        "bench_reason": reason,
+        "bench_wait_secs": wait,
     })))
 }

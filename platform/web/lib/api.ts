@@ -178,10 +178,18 @@ export const api = {
 
   leaderboard: () => call<{ frozen: boolean; entries: LeaderboardEntry[] }>('/leaderboard'),
 
+  /// Also carries bench eligibility, computed by the same rule submit()
+  /// enforces — so the editor's countdown can never promise a submission the
+  /// server would then refuse.
   queue: (participantId: number) =>
-    call<{ depth: number; ahead: number; eta_secs: number }>(
-      `/queue?participant_id=${participantId}`,
-    ),
+    call<{
+      depth: number;
+      ahead: number;
+      eta_secs: number;
+      bench_ready: boolean;
+      bench_reason: string;
+      bench_wait_secs: number;
+    }>(`/queue?participant_id=${participantId}`),
 };
 
 /// Which states are still moving. The UI polls every 2s while non-terminal —
