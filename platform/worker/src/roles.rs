@@ -498,9 +498,15 @@ async fn run_bench_job(
 const SPOT_CHECK_TOLERANCE: f64 = 0.02;
 
 async fn reference_spot_check(db: &PgPool, cfg: &Config, _sandbox: &Sandbox) -> Result<()> {
+    // Long enough that the harness's derived warm-up (~3.9M events for this
+    // profile) still leaves a timed region, so this measures the reference
+    // against a SETTLED 300k-order book — the same memory-bound work a ranked
+    // run does. At 2M it would time the book still filling from 50k to 130k:
+    // deterministic, so the baseline would still be stable, but a number whose
+    // meaning changes with any depth retune, compared against a 2% tolerance.
     let out = tokio::process::Command::new(&cfg.harness_bin)
         .args([
-            "bench", "--seed", "1", "--profile", BENCH_PROFILE, "--events", "2000000", "--runs",
+            "bench", "--seed", "1", "--profile", BENCH_PROFILE, "--events", "5000000", "--runs",
             "3", "--engine", &cfg.reference_so, "--json",
         ])
         .output()

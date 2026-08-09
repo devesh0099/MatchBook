@@ -388,8 +388,15 @@ A **timeout** is reported distinctly from a wrong-output failure. They are diffe
 Generate (offline)  →  Load + decode + warm up  →  [ TIMED LOOP ]  →  Verify + flush
 ```
 
-Only the timed loop counts. Loading, decoding, page-touching, and warmup (~200k events)
-all happen before it. Verification and flushing happen after.
+Only the timed loop counts. Loading, decoding, page-touching, and warm-up all happen
+before it. Verification and flushing happen after.
+
+Warm-up is sized from the stream's own profile: the ranked profile builds a book of
+roughly **300,000 resting orders across ~5,900 price levels**, and it takes about 3.9M
+events to get there. Those events run through your engine — the digest covers them —
+but they are not measured, so every ranked sample is taken against a book at full
+depth. That book is far larger than any L3, which is the point: a layout that keeps
+per-order footprint small is measurably faster here and was not at shallower depths.
 
 ```cpp
 for (uint64_t i = 0; i < n; ++i) {
@@ -514,7 +521,7 @@ requeue loop.
 |---|---|---|---|
 | **Run** (visible tests) | ~100k events | seconds | unlimited |
 | **Submit** → correctness | 100k–500k events, fresh seed | seconds | unlimited |
-| **Submit** → benchmark | 10M events, `cancel_heavy` | ~30–60 s | 1 per participant per 15 min, max 1 pending |
+| **Submit** → benchmark | 10M events, `cancel_heavy` (3.9M warm-up, 6.1M timed) | ~60 s | 1 per participant per 15 min, max 1 pending |
 
 Rate limiting is checked **at enqueue**: correctness is always accepted, and the submit
 response tells you immediately whether the benchmark will auto-queue and how long the

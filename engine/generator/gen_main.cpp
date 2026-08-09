@@ -31,8 +31,10 @@ void usage() {
                "                 trusting (fill rate, bounded depth, every adversarial\n"
                "                 injection present and having its intended effect)\n"
                "  --live-target N  override the profile's per-session resting-order target.\n"
-               "                 Book depth is roughly sessions x this, so it is the single\n"
-               "                 knob for the depth/latency sweep\n");
+               "                 Book depth is roughly 0.62 x sessions x this, so it is the\n"
+               "                 single knob for the depth/latency sweep. It is recorded in\n"
+               "                 the stream header, so `bench` still derives the right\n"
+               "                 untimed warm-up for the stream it was given\n");
 }
 
 bool parse_u64(const char* s, uint64_t& out) {
@@ -94,7 +96,7 @@ int main(int argc, char** argv) {
 
   if (!out_path.empty()) {
     std::string err;
-    if (!mebench::generator::write_stream(out_path, seed, profile, stream, err)) {
+    if (!mebench::generator::write_stream(out_path, seed, profile, gen.live_target(), stream, err)) {
       std::fprintf(stderr, "%s\n", err.c_str());
       return 1;
     }

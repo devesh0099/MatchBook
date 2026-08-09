@@ -40,7 +40,14 @@ struct __attribute__((packed)) StreamHeader {
   uint64_t event_count;
   uint32_t profile_id;
   uint32_t tick_size;
-  uint64_t reserved[4];
+  // The per-session resting-order target this stream was built with, or 0 for
+  // the profile's own. Book depth is proportional to it, and so is the untimed
+  // warm-up a benchmark needs, so a stream that did not carry it could not say
+  // how much of itself is warm-up. Taken from `reserved`, so the layout is
+  // unchanged and a stream written before this field reads 0 — which is exactly
+  // the "use the profile default" case.
+  uint64_t live_target;
+  uint64_t reserved[3];
 };
 static_assert(sizeof(StreamHeader) == 64);
 

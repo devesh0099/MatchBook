@@ -211,8 +211,8 @@ me-platform/
 | File | | Role |
 |---|--:|---|
 | `generator.h` | 187 | `Rng` with a hand-rolled `below()`. `mt19937_64` is portable; **its distributions are not**, so `uniform_int_distribution`/`shuffle`/`sample` are banned here. |
-| `generator.cpp` | 567 | 4 profiles, session agents, price walk, and the 7 injections. Contains the two hard-won fixes: the clearing sweep before injected aggressors, and the live-list back-pressure that stopped unbounded depth growth. |
-| `validate.cpp` | 285 | Runs the reference over a stream and checks it is worth trusting: fill rate, bounded depth, and every injection having its **intended effect** — not merely being present. |
+| `generator.cpp` | 789 | 4 profiles, session agents, price walk, and the 7 injections. Runs its own `ReferenceEngine` so each session's live set holds only orders that are genuinely resting — the guess it replaced drifted 96% stale, which made 93% of cancels miss and capped book depth at 23k. Depth is now a dial: `0.62 x sessions x live_target`. |
+| `validate.cpp` | 420 | Runs the reference over a stream and checks it is worth trusting: fill rate, cancel-hit rate, depth bounded **and** holding up (a sweep that halves the book is invisible to a bounded-depth check), and every injection having its **intended effect** — not merely being present. |
 | `gen_main.cpp` | 133 | The `gen` CLI. Ships to participants, so hidden streams are just unpublished seeds. |
 
 ### `engine/harness/` — how submissions are run

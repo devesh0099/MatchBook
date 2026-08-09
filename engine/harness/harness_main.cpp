@@ -118,7 +118,8 @@ bool parse_u64(const char* s, uint64_t& out) {
 
 bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, uint64_t seed,
                  const std::string& profile_name, uint64_t events,
-                 std::vector<mebench::WireEvent>& out, mebench::Profile& profile_out);
+                 std::vector<mebench::WireEvent>& out, mebench::Profile& profile_out,
+                 uint32_t& live_target_out);
 
 int run_verify(int argc, char** argv) {
   std::string engine_spec, oracle_spec = "builtin", stream_path, profile_name = "balanced";
@@ -171,9 +172,11 @@ int run_verify(int argc, char** argv) {
 
   std::vector<mebench::WireEvent> stream;
   mebench::Profile stream_profile{};
-  (void)stream_profile;  // only bench derives anything from it
+  uint32_t stream_live_target = 0;
+  (void)stream_profile;  // only bench derives anything from these
+  (void)stream_live_target;
   if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream,
-                   stream_profile))
+                   stream_profile, stream_live_target))
     return kExitUsage;
 
   std::string err;
@@ -222,7 +225,8 @@ int run_verify(int argc, char** argv) {
 // process from its seed.
 bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, uint64_t seed,
                  const std::string& profile_name, uint64_t events,
-                 std::vector<mebench::WireEvent>& out, mebench::Profile& profile_out) {
+                 std::vector<mebench::WireEvent>& out, mebench::Profile& profile_out,
+                 uint32_t& live_target_out) {
   // The profile comes back out because bench derives its default warm-up from
   // it. Reading it off the stream rather than taking it as a flag is what stops
   // the caller's idea of the profile drifting from the stream's.
@@ -237,6 +241,7 @@ bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, 
       return false;
     }
     profile_out = static_cast<mebench::Profile>(header.profile_id);
+    live_target_out = static_cast<uint32_t>(header.live_target);
     return true;
   }
   if (!stream_path.empty()) {
@@ -246,6 +251,7 @@ bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, 
       return false;
     }
     profile_out = static_cast<mebench::Profile>(header.profile_id);
+    live_target_out = static_cast<uint32_t>(header.live_target);
     return true;
   }
   if (have_seed && events > 0) {
@@ -257,6 +263,7 @@ bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, 
     mebench::generator::Generator gen(seed, profile);
     out = gen.generate(events);
     profile_out = profile;
+    live_target_out = gen.live_target();
     return true;
   }
   std::fprintf(stderr, "need either --stream FILE or --seed S --events N\n");
@@ -301,9 +308,11 @@ int run_digest(int argc, char** argv) {
 
   std::vector<mebench::WireEvent> stream;
   mebench::Profile stream_profile{};
-  (void)stream_profile;  // only bench derives anything from it
+  uint32_t stream_live_target = 0;
+  (void)stream_profile;  // only bench derives anything from these
+  (void)stream_live_target;
   if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream,
-                   stream_profile))
+                   stream_profile, stream_live_target))
     return kExitUsage;
 
   std::string err;
@@ -376,8 +385,9 @@ int run_bench(int argc, char** argv) {
 
   std::vector<mebench::WireEvent> stream;
   mebench::Profile stream_profile{};
+  uint32_t stream_live_target = 0;
   if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream,
-                   stream_profile))
+                   stream_profile, stream_live_target))
     return kExitUsage;
   // Warm-up defaults to whatever THIS stream's profile needs to fill its book,
   // read from the stream header rather than passed in.
@@ -389,8 +399,8 @@ int run_bench(int argc, char** argv) {
   // book and a deep one. Deriving it here means the profile and the warm-up
   // cannot drift apart, because there is only one of them.
   if (!warmup_given) {
-    opts.warmup = std::min<uint64_t>(mebench::generator::warmup_events(stream_profile),
-                                     stream.size() / 2);
+    opts.warmup = std::min<uint64_t>(
+        mebench::generator::warmup_events(stream_profile, stream_live_target), stream.size() / 2);
   }
 
 

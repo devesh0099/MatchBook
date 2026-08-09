@@ -705,7 +705,7 @@ std::vector<WireEvent> Generator::generate(uint64_t count) {
 
 // ---------------------------------------------------------------- stream I/O
 
-bool write_stream(const std::string& path, uint64_t seed, Profile profile,
+bool write_stream(const std::string& path, uint64_t seed, Profile profile, uint32_t live_target,
                   const std::vector<WireEvent>& events, std::string& err) {
   std::FILE* f = std::fopen(path.c_str(), "wb");
   if (!f) {
@@ -719,6 +719,7 @@ bool write_stream(const std::string& path, uint64_t seed, Profile profile,
   h.event_count = events.size();
   h.profile_id = static_cast<uint32_t>(profile);
   h.tick_size = 1;
+  h.live_target = live_target;
 
   bool ok = std::fwrite(&h, sizeof(h), 1, f) == 1;
   if (ok && !events.empty()) {

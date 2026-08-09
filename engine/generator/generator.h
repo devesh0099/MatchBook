@@ -246,7 +246,7 @@ class Generator {
 };
 
 // Stream file I/O. Format is StreamHeader followed by `event_count` WireEvents.
-bool write_stream(const std::string& path, uint64_t seed, Profile profile,
+bool write_stream(const std::string& path, uint64_t seed, Profile profile, uint32_t live_target,
                   const std::vector<WireEvent>& events, std::string& err);
 bool read_stream(const std::string& path, StreamHeader& header, std::vector<WireEvent>& events,
                  std::string& err);
