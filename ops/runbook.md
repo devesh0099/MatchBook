@@ -93,10 +93,14 @@ ssh -N -L 8081:127.0.0.1:8081 web-node
 | Time | Action |
 |---|---|
 | 0:00 | Kickoff, spec walkthrough (30 min, mandatory). Walk through the FOK 60/50/100 example — nobody arrives knowing that rule. |
-| 0:30 | Publish the zip. Coding opens; correctness lane live. |
-| 1:30 | Benchmark lane opens. |
+| 0:30 | Publish the zip. Coding opens. Both lanes live — see below. |
 | 5:15 | `POST /admin/freeze` |
 | 6:00 | Submissions close. Rejudge block. Reveal. |
+
+The benchmark lane is open from the start. Holding it back until 1:30 was meant
+to prevent premature optimisation, but the correctness gate already does that —
+nothing reaches the bench queue until it has passed verification — so a clock
+would only have penalised whoever got correct early.
 
 ---
 
@@ -170,9 +174,7 @@ Then:
 
 - [ ] Source-review the top finishers — the memory-scanning rule is enforced by
       review, not by code
-- [ ] Plagiarism check across submissions
 - [ ] Publish all seeds, the generator, and the reference implementation
-- [ ] Publish per-participant flamegraphs
 - [ ] `pg_dump` to S3 before tearing anything down
 
 ---
@@ -182,15 +184,9 @@ Then:
 These are real and deliberate. None of them stops the event; all of them are
 worse if discovered at 5:00 PM.
 
-- **Flamegraphs are not generated.** The `flamegraph_s3` column exists and
-  nothing writes it. The "publish per-participant flamegraphs" step above cannot
-  be done as written; drop it or capture `perf` by hand for the top finishers.
-- **Plagiarism checking is not wired in.** Run Dolos or MOSS manually over the
-  submitted sources, which are in S3 under `source/<sha256>.cpp`.
-- **The benchmark lane opening at 1:30 is not enforced by the platform.** The
-  `bench_lane_open` setting exists and nothing reads it. Either hold the bench
-  worker back (`systemctl stop mebench-bench` until 1:30) or accept that
-  benchmarking is available from the start.
+- **The compose stack has not been brought up as a stack.** Each image builds
+  and runs, and the pieces have been exercised together as bare binaries, but
+  `docker compose up` on one host is untested. Do it once before the day.
 - **The bench node always recompiles**, rather than reusing the pool's cached
   binary. Nothing embeds a build fingerprint into a submission `.so`, so the
   match check had no evidence to work from; recompiling costs about a second

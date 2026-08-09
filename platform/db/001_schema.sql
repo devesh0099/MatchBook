@@ -48,8 +48,9 @@ CREATE TABLE submissions (
   -- Percentile curve from the run whose p50 IS the score, so the published
   -- distribution and the published headline describe the same run.
   percentiles       jsonb,
-  histogram_s3      text,
-  flamegraph_s3     text
+  -- No histogram_s3 / flamegraph_s3: the percentile distribution and the
+  -- within-run timeline are stored inline above, and flamegraphs are not
+  -- produced. A column nothing writes is a promise nothing keeps.
 );
 CREATE INDEX ON submissions (participant_id, created_at DESC);
 CREATE INDEX ON submissions (state) WHERE state IN ('received','verify_passed','bench_queued');
@@ -99,9 +100,12 @@ CREATE TABLE settings (
   key   text PRIMARY KEY,
   value jsonb NOT NULL
 );
+-- The benchmark lane has no time gate. Holding it back was meant to prevent
+-- premature optimisation, but the correctness gate already does that: nothing
+-- reaches the bench queue until it has passed verification. A clock would only
+-- have penalised whoever got correct early.
 INSERT INTO settings (key, value) VALUES
-  ('leaderboard_frozen', 'false'::jsonb),
-  ('bench_lane_open',    'true'::jsonb);
+  ('leaderboard_frozen', 'false'::jsonb);
 
 -- Postgres stays the leaderboard's source of truth. Redis holds a disposable
 -- serving copy that is rebuilt from this view whenever it is suspect — which is

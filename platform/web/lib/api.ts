@@ -43,8 +43,6 @@ export interface Submission {
   probe_cost_ns: number | null;
   run_p50s_ns: number[] | null;
   discard_count: number | null;
-  histogram_s3: string | null;
-  flamegraph_s3: string | null;
 }
 
 export interface OutEventView {

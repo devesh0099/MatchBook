@@ -299,13 +299,12 @@ pub struct SubmissionRow {
     pub probe_cost_ns: Option<f64>,
     pub run_p50s_ns: Option<Vec<f64>>,
     pub discard_count: Option<i32>,
-    pub histogram_s3: Option<String>,
-    pub flamegraph_s3: Option<String>,
+
 }
 
 const SUBMISSION_COLUMNS: &str = "id, participant_id, source_hash, state, created_at, updated_at, \
      verify_detail, p50_ns, p95_ns, p99_ns, percentiles, runs, timeline, probe_cost_ns, \
-     run_p50s_ns, discard_count, histogram_s3, flamegraph_s3";
+     run_p50s_ns, discard_count";
 
 async fn submission(
     State(st): State<AppState>,

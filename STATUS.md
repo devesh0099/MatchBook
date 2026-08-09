@@ -245,10 +245,11 @@ cap, and no process outlives the box.
 Recorded in the runbook's Known Limitations so they are read in the morning
 rather than discovered at 5pm.
 
-- **Flamegraphs** — column exists, nothing writes it.
-- **Plagiarism checking** — run Dolos/MOSS by hand over `source/<sha256>.cpp`.
-- **The 1:30 bench-lane gate** — `bench_lane_open` is read by nothing; stop the
-  bench worker until 1:30.
+- **Flamegraphs and plagiarism checking** — dropped by decision, not pending.
+  Neither column nor check exists.
+- **A bench-lane time gate** — dropped by decision. Benchmarking is live from
+  the start: the correctness gate already prevents premature optimisation, since
+  nothing reaches the bench queue until it has passed verification.
 - **Redis as the serving read model** — the leaderboard is computed from Postgres
   per request, which is fine at 18 rows. Redis holds the freeze snapshot only,
   and that *is* on the serving path.
