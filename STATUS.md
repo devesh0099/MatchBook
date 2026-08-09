@@ -1,11 +1,13 @@
 # Status
 
-Matching Engine Challenge platform. 12 commits, ~16,600 lines across C++20, Rust,
-TypeScript and SQL, plus 2,190 lines of vendored HdrHistogram.
+Matching Engine Challenge platform. 33 commits, ~13,900 lines across C++20, Rust,
+TypeScript and SQL, plus 2,190 lines of vendored HdrHistogram and ~2,500 lines of
+prose (spec, runbook, subsystem docs).
 
-**All twelve build-order items from the implementation spec are complete.** What
-remains is calibration that needs real hardware, and four features listed at the
-bottom that were deliberately not built.
+**All twelve build-order items from the implementation spec are complete, and the
+benchmark now measures what it was meant to.** What remains is calibration that
+needs the real bench node (§6), work that does not (§7), and things deliberately
+not built (§8).
 
 ---
 
@@ -13,22 +15,22 @@ bottom that were deliberately not built.
 
 ```
 me-platform/
-├── spec/SPEC.md                   552   the published, normative specification
+├── spec/SPEC.md                   559   the published, normative specification
 ├── engine/                             C++20 — the contest itself
-│   ├── include/mebench/           279   frozen headers: the participant contract
-│   ├── reference/                 321   the oracle (std::map + std::list)
-│   ├── generator/                1237   deterministic stream generator
-│   ├── harness/                  2205   verify + bench + digest
-│   ├── tests/                     952   41 visible tests, 5 mutant engines
-│   ├── boilerplate/               350   the skeleton participants start from
+│   ├── include/mebench/           286   frozen headers: the participant contract
+│   ├── reference/                 341   the oracle (std::map + std::list)
+│   ├── generator/                1692   deterministic streams; runs its own book
+│   ├── harness/                  2947   verify + bench + digest, and HARNESS.md
+│   ├── tests/                    1667   41 visible tests, 5 mutants, 1 fast engine
+│   ├── boilerplate/               316   the skeleton participants start from
 │   └── third_party/hdr/          2190   vendored HdrHistogram, pinned df64f85
 ├── platform/
-│   ├── db/001_schema.sql           112   whole data model; the queue is a table
-│   ├── common/                      95   types shared across the process boundary
-│   ├── api/                       1109   axum: two routers, two listeners
-│   ├── worker/                    1474   pool + bench roles, isolate integration
-│   └── web/                       1551   Next.js 16: editor, results, board, spec
-└── ops/                           1099   provisioning, noise floor, runbook
+│   ├── db/001_schema.sql          126   whole data model; the queue is a table
+│   ├── common/                     85   types shared across the process boundary
+│   ├── api/                      1078   axum: two routers, two listeners
+│   ├── worker/                   1677   pool + bench roles, isolate, SANDBOX.md
+│   └── web/                      1963   Next.js 16: editor, results, board, spec
+└── ops/                          1132   provisioning, noise floor, runbook
 ```
 
 ---
@@ -228,9 +230,7 @@ submitted #6
   t+25s  done      p50 40.1 ns · probe 20 ns · 9 runs · 0 discards
 ```
 
-(that run predates the depth change; a ranked job now looks like the numbers in
-§5 below)
-```
+(that run predates the depth change; a ranked job now looks like §5 below.)
 
 Submit lane, Run lane (`2/41` for the skeleton) and the rejudge block have all
 been driven end to end. With no bench worker running, a submission held at
@@ -242,6 +242,17 @@ resolve inside the box, the box runs as a subordinate uid, no seed appears in
 argv, the harness still receives the stream on fd 9. Infinite loop reports `TO`,
 runaway allocation is OOM-killed as `SG`, a fork bomb is contained by the process
 cap, and no process outlives the box.
+
+**A ranked job in its production configuration** — real isolate box, the 10M
+stream on fd 9 with no path inside, bench-stage limits:
+
+```
+p50 360.6 ns · p99 1884 ns · probe 10 ns (2.8%)
+6,108,800 timed of 10,000,000 · warm-up 3,891,200 derived from the stream header
+digest matched · 0 discards · 707 MB peak RSS of 8 GB · 43 s for 9 runs
+```
+
+That run also surfaced the `mlockall` finding in §6.
 
 ---
 
@@ -271,18 +282,63 @@ A full ranked job on this box, at the shipped 300k-order profile:
 
 ---
 
-## 6. Open — needs hardware
+## 6. Remaining — needs the bench node
 
-- **Noise floor + soak** → settles §16 q1 (drift correction) and q2 (metal vs
-  dedicated). Scripts exist; `analyze.py` maps spread and drift onto the plan's
-  decision table and was validated against synthetic tight and noisy machines.
-- **The ranked depth.** 300k is chosen against *this* box's 16 MB L3. Re-run the
-  sweep in `PLAN-book-depth.md` §7 on the bench node and confirm or move it.
-- **Band calibration.** Thresholds live in the `settings` table, so this is a SQL
-  statement on the morning, not a deploy. The defaults are invented numbers and
-  mean nothing until calibrated against the reference on the actual bench node.
+None of this can be finished on a laptop. All of it is a morning's work once the
+hardware exists.
 
-## 7. Deliberately not built
+| | What | Why it blocks |
+|---|---|---|
+| **1** | **Noise floor + soak.** `ops/noise-floor/{measure,soak,analyze}.py` exist and were validated against synthetic tight and noisy machines. | Settles plan §16 q1 (drift correction) and q2 (metal vs dedicated). Run it **before** provisioning for real — the `isolcpus`/`nohz_full` boot parameters only apply if metal is what the numbers call for. |
+| **2** | **Confirm or move the 300k depth.** Re-run the sweep in `PLAN-book-depth.md` §7. | 300k is calibrated to *this* box's 16 MB L3. Note the ceiling: the price band is **99.1% saturated**, so more depth goes vertical, and widening it means moving the injection band at price 20,000 first. |
+| **3** | **Measure the TSC granularity.** This box steps in 38 ticks — exactly 10 ns. | If the bench node does the same, ranked p50 is a *count of quanta*, and that **settles the ranking-presentation question on physics rather than preference**. Do not decide bands-vs-ranks-vs-ties before this. |
+| **4** | **Band calibration**, if bands survive (3). Thresholds live in the `settings` table — a SQL statement, not a deploy. | The shipped defaults are invented numbers and mean nothing until measured against the reference on the actual node. |
+| **5** | **`bench-hygiene.sh` must exit 0.** | The setup script refuses to mark the node healthy otherwise. Do not override it. Note `swap off` is now **load-bearing**, not tidiness: isolate forces `RLIMIT_MEMLOCK` to 0, so `mlockall` always fails in a ranked run and unreclaimable anonymous memory is the whole guarantee. |
+
+## 7. Remaining — does not need hardware
+
+Ordered by what would hurt most on the day.
+
+- **The frontend needs a rebuild.** It is functional and ugly: four views, no
+  visual system, charts bolted on. Brief written for a design pass in
+  [FRONTEND-BRIEF.md](FRONTEND-BRIEF.md). This is the largest remaining piece of
+  work and the only one participants see.
+- **`docker compose up` has never been run as a stack.** Every image builds and
+  runs individually, verified against real Postgres, MinIO, Redis and isolate —
+  but the composed stack is untested. Worth a dry run on the real web node, not
+  at 9am.
+- **One submission through the full platform since the depth change.** The
+  harness and sandbox paths are re-verified; the DB-mediated flow is not. Needs
+  a running stack, so it pairs with the item above.
+- **Handle claim collision.** Two people can both pick `ada` and silently share a
+  draft, history and rate limit. ~30 lines to make it loud rather than silent.
+  Offered, never approved.
+- **`market_order_never_rests` is a weak test.** It asserts only that the book is
+  empty afterwards, so it would also pass an engine that does nothing. M2/M3 are
+  properly covered by three other tests — but it means the `2/41` the skeleton
+  scores is slightly flattering.
+- **Publish the kit.** `ops/make-boilerplate.sh` → `dist/me-boilerplate.zip`,
+  published with the spec at kickoff. It embeds prebuilt `gen` and `bench`, so it
+  must be rebuilt after any engine change or "same seed, same bytes" breaks
+  between a laptop and the server.
+
+## 8. Future — worth doing, out of scope for one event
+
+- **Deliberate cancel-miss tuning.** Cancels now hit 98%; the ~2% misses are
+  ghost ids that never existed. A *recently dead* order would exercise the
+  deleted-key and tombstone-probe paths in a submission's index, which a
+  never-existed id does not. `PLAN-book-depth.md` §9.
+- **`kRecentCancelPct = 85`** means most timed cancels target recently placed,
+  and therefore cache-warm, orders. The knob that fixed the hit rate also bounds
+  how much of the memory hierarchy the cancel path grades. Worth sweeping.
+- **Multi-instrument books**, which is the honest way to reach realistic depth
+  without a single book 15× deeper than any real one.
+- **A build fingerprint embedded in the submission `.so`**, which would let the
+  bench node reuse the pool's binary instead of recompiling. Currently the check
+  has no evidence to work from and would pass vacuously, so the bench node always
+  recompiles — ~1 s against a 60 s job, so this is a nicety.
+
+## 9. Deliberately not built
 
 Recorded in the runbook's Known Limitations so they are read in the morning
 rather than discovered at 5pm.
@@ -295,8 +351,7 @@ rather than discovered at 5pm.
 - **Redis as the serving read model** — the leaderboard is computed from Postgres
   per request, which is fine at 18 rows. Redis holds the freeze snapshot only,
   and that *is* on the serving path.
-
-One known weak test: `market_order_never_rests` asserts only that the book is
-empty afterwards, so it would also pass for an engine that does nothing. M2/M3
-are covered properly by three other tests; the `2/41` the skeleton scores is
-slightly flattering for this reason.
+- **Authentication.** Participants pick a handle from a roster in `localStorage`;
+  the operator API is loopback-only over an SSH tunnel. Fine for 18 people on one
+  network for six hours. **Not fine on the open internet** — put the web node
+  behind a security group admitting only the room's egress IP.
