@@ -185,7 +185,19 @@ function EditorInner() {
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 420px', height: '100%', minHeight: 0 }}>
-      <section style={{ display: 'flex', flexDirection: 'column', minWidth: 0, borderRight: '1px solid var(--line)' }}>
+      <section
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          minWidth: 0,
+          // Without this the plain-text header view grows the column instead of
+          // scrolling inside it, and main.fill then clips it with no scrollbar
+          // anywhere. Monaco never showed this up because it manages its own
+          // scrolling and never grows its box.
+          overflow: 'hidden',
+          borderRight: '1px solid var(--line)',
+        }}
+      >
         <div
           style={{
             display: 'flex',
@@ -247,7 +259,7 @@ function EditorInner() {
         </div>
 
         {readOnly && (
-          <div style={{ flex: 1, minHeight: 0, overflow: 'auto', background: '#1e1e1e' }}>
+          <div style={{ flex: '1 1 0', minHeight: 0, overflow: 'auto', background: '#1e1e1e' }}>
             <pre
               className="mono"
               style={{
