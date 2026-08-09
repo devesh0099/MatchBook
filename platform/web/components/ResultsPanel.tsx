@@ -12,6 +12,7 @@ import {
   type RunResult,
   type Submission,
 } from '@/lib/api';
+import { DistributionChart, PerRunChart } from './Charts';
 
 export function StatePill({ state }: { state: Submission['state'] }) {
   const tone = stateTone(state);
@@ -197,6 +198,23 @@ ${d.stderr ?? ''}`}
               <Metric label="discarded" value={String(sub.discard_count)} />
             )}
           </div>
+          {(sub.run_p50s_ns?.length ?? 0) > 1 && (
+            <div style={{ marginTop: 18 }}>
+              <PerRunChart
+                runs={sub.run_p50s_ns as number[]}
+                medianNs={sub.p50_ns}
+                ciLowNs={Math.min(...(sub.run_p50s_ns as number[]))}
+                ciHighNs={Math.max(...(sub.run_p50s_ns as number[]))}
+              />
+            </div>
+          )}
+
+          {sub.percentiles && sub.percentiles.length > 1 && (
+            <div style={{ marginTop: 22 }}>
+              <DistributionChart percentiles={sub.percentiles} probeCostNs={sub.probe_cost_ns} />
+            </div>
+          )}
+
           {sub.probe_cost_ns != null && (
             <p style={{ color: 'var(--faint)', margin: '12px 0 0', fontSize: 12.5 }}>
               The probe cost is the fixed overhead of the two <span className="mono">rdtscp</span>{' '}

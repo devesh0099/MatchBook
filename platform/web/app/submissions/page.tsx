@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { api, stateLabel, stateTone, type Submission } from '@/lib/api';
 import { HandleGate } from '@/components/HandleGate';
 import { SubmissionPanel } from '@/components/ResultsPanel';
+import { HistoryChart, type HistoryPoint } from '@/components/Charts';
 import { useIdentity } from '@/lib/identity';
 
 export default function SubmissionsPage() {
@@ -36,6 +37,21 @@ function Inner() {
         Every Submit is recorded with the exact source that produced it, so &ldquo;what code gave
         this result&rdquo; is always answerable.
       </p>
+
+      {(() => {
+        // Oldest to newest, benchmarked submissions only — a submission with no
+        // p50 never reached the bench lane and would be a gap, not a datapoint.
+        const points: HistoryPoint[] = rows
+          .filter((s) => s.p50_ns != null)
+          .slice()
+          .reverse()
+          .map((s) => ({ id: s.id, p50: s.p50_ns as number, p95: s.p95_ns, p99: s.p99_ns }));
+        return points.length > 1 ? (
+          <div className="card" style={{ marginBottom: 22 }}>
+            <HistoryChart points={points} />
+          </div>
+        ) : null;
+      })()}
 
       {rows.length === 0 ? (
         <div className="card">

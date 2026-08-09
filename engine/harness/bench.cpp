@@ -270,6 +270,7 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
     run.steal_delta = have_steal ? (steal_after - steal_before) : 0;
     const double per_ns = r.tsc_ticks_per_ns > 0 ? r.tsc_ticks_per_ns : 1.0;
     run.p50_ns = hist.at(50.0) / per_ns;
+    run.p95_ns = hist.at(95.0) / per_ns;
     run.p99_ns = hist.at(99.0) / per_ns;
     run.p999_ns = hist.at(99.9) / per_ns;
     run.mean_ns = hist.mean() / per_ns;
@@ -293,31 +294,46 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
       continue;
     }
 
+    static const double kPcts[] = {50.0, 75.0, 90.0, 95.0, 99.0, 99.9, 99.99, 100.0};
+    for (double p : kPcts) run.percentiles.push_back({p, hist.at(p) / per_ns});
+
     consecutive_discards = 0;
     r.runs.push_back(run);
     r.run_p50s_ns.push_back(run.p50_ns);
     r.digest = run.digest;
     ++completed;
-
-    if (completed == opts.runs) {
-      // Keep the last run's full percentile table for the histogram artifact.
-      static const double kPcts[] = {50.0, 75.0, 90.0, 95.0, 99.0, 99.9, 99.99, 100.0};
-      for (double p : kPcts) r.percentiles.push_back({p, hist.at(p) / per_ns});
-    }
   }
 
   // Median of the per-run p50s. Never an average of per-event latencies across
   // runs — that would destroy the tail.
   r.p50_ns = median_of(r.run_p50s_ns);
-  std::vector<double> p99s, p999s;
+  std::vector<double> p95s, p99s, p999s;
   for (const auto& run : r.runs) {
     if (run.discarded) continue;
+    p95s.push_back(run.p95_ns);
     p99s.push_back(run.p99_ns);
     p999s.push_back(run.p999_ns);
   }
+  r.p95_ns = median_of(p95s);
   r.p99_ns = median_of(p99s);
   r.p999_ns = median_of(p999s);
   bootstrap_ci(r.run_p50s_ns, r.ci_low_ns, r.ci_high_ns);
+
+  // Publish the distribution of the run that DECIDED the score. Reporting the
+  // last run's curve alongside the median run's headline number would be two
+  // different runs wearing one label.
+  {
+    double best = 1e300;
+    for (uint32_t i = 0; i < r.runs.size(); ++i) {
+      if (r.runs[i].discarded) continue;
+      const double d = std::abs(r.runs[i].p50_ns - r.p50_ns);
+      if (d < best) {
+        best = d;
+        r.median_run_index = i;
+        r.percentiles = r.runs[i].percentiles;
+      }
+    }
+  }
 
   // Verification inside the timed run is what stops anyone winning by doing
   // less work. A mismatch here is its own outcome: passed correctness, diverged
@@ -393,7 +409,7 @@ std::string format_bench_report(const BenchResult& r) {
 std::string format_bench_json(const BenchResult& r) {
   std::ostringstream s;
   s << "{\"outcome\":\"" << bench_outcome_name(r.outcome) << "\",\"p50_ns\":" << r.p50_ns
-    << ",\"p99_ns\":" << r.p99_ns << ",\"p999_ns\":" << r.p999_ns
+    << ",\"p95_ns\":" << r.p95_ns << ",\"p99_ns\":" << r.p99_ns << ",\"p999_ns\":" << r.p999_ns
     << ",\"probe_cost_ns\":" << r.probe_cost_ns
     << ",\"p50_net_of_probe_ns\":" << (r.p50_ns > r.probe_cost_ns ? r.p50_ns - r.probe_cost_ns : 0.0) << ",\"ci_low_ns\":" << r.ci_low_ns
     << ",\"ci_high_ns\":" << r.ci_high_ns << ",\"discard_count\":" << r.discard_count
@@ -408,12 +424,12 @@ std::string format_bench_json(const BenchResult& r) {
   for (size_t i = 0; i < r.runs.size(); ++i) {
     const auto& run = r.runs[i];
     s << (i ? "," : "") << "{\"p50_ns\":" << run.p50_ns << ",\"p99_ns\":" << run.p99_ns
-      << ",\"p999_ns\":" << run.p999_ns << ",\"mean_ns\":" << run.mean_ns
+      << ",\"p95_ns\":" << run.p95_ns << ",\"p999_ns\":" << run.p999_ns << ",\"mean_ns\":" << run.mean_ns
       << ",\"max_ns\":" << run.max_ns << ",\"wall_s\":" << run.wall_s
       << ",\"steal_delta\":" << run.steal_delta
       << ",\"discarded\":" << (run.discarded ? 1 : 0) << "}";
   }
-  s << "],\"percentiles\":[";
+  s << "],\"median_run_index\":" << r.median_run_index << ",\"percentiles\":[";
   for (size_t i = 0; i < r.percentiles.size(); ++i) {
     s << (i ? "," : "") << "{\"p\":" << r.percentiles[i].first
       << ",\"ns\":" << r.percentiles[i].second << "}";

@@ -291,7 +291,9 @@ pub struct SubmissionRow {
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
     pub verify_detail: Option<serde_json::Value>,
     pub p50_ns: Option<f64>,
+    pub p95_ns: Option<f64>,
     pub p99_ns: Option<f64>,
+    pub percentiles: Option<serde_json::Value>,
     pub probe_cost_ns: Option<f64>,
     pub run_p50s_ns: Option<Vec<f64>>,
     pub discard_count: Option<i32>,
@@ -300,8 +302,8 @@ pub struct SubmissionRow {
 }
 
 const SUBMISSION_COLUMNS: &str = "id, participant_id, source_hash, state, created_at, updated_at, \
-     verify_detail, p50_ns, p99_ns, probe_cost_ns, run_p50s_ns, discard_count, histogram_s3, \
-     flamegraph_s3";
+     verify_detail, p50_ns, p95_ns, p99_ns, percentiles, probe_cost_ns, run_p50s_ns, \
+     discard_count, histogram_s3, flamegraph_s3";
 
 async fn submission(
     State(st): State<AppState>,

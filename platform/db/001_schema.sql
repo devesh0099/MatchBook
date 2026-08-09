@@ -34,10 +34,14 @@ CREATE TABLE submissions (
   -- benchmark results
   bench_seed_set    bigint[],
   p50_ns            double precision,      -- median of per-run p50s
+  p95_ns            double precision,      -- reported, unranked
   p99_ns            double precision,      -- reported, unranked
   probe_cost_ns     double precision,      -- published alongside
   run_p50s_ns       double precision[],    -- all 7-10 per-run p50s, for the bootstrap CI
   discard_count     int DEFAULT 0,         -- steal-time discards (3 => operator alert)
+  -- Percentile curve from the run whose p50 IS the score, so the published
+  -- distribution and the published headline describe the same run.
+  percentiles       jsonb,
   histogram_s3      text,
   flamegraph_s3     text
 );

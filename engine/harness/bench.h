@@ -28,6 +28,7 @@ const char* bench_outcome_name(BenchOutcome o);
 
 struct RunResult {
   double p50_ns = 0.0;
+  double p95_ns = 0.0;
   double p99_ns = 0.0;
   double p999_ns = 0.0;
   double mean_ns = 0.0;
@@ -36,6 +37,9 @@ struct RunResult {
   uint64_t steal_delta = 0;
   bool discarded = false;
   uint64_t digest = 0;
+  /// This run's own percentile table. Kept per run so the published curve can
+  /// come from the run that actually decided the score.
+  std::vector<std::pair<double, double>> percentiles;
 };
 
 struct BenchResult {
@@ -43,6 +47,7 @@ struct BenchResult {
 
   // The ranked number.
   double p50_ns = 0.0;
+  double p95_ns = 0.0;
   double p99_ns = 0.0;
   double p999_ns = 0.0;
 
@@ -68,8 +73,11 @@ struct BenchResult {
   std::string build_fingerprint;
   std::string notes;
 
-  // Percentile table for the histogram artifact.
+  // Percentile table for the published curve, taken from the MEDIAN run — the
+  // one whose p50 is the score. The last run's table would describe a run that
+  // decided nothing.
   std::vector<std::pair<double, double>> percentiles;  // (percentile, ns)
+  uint32_t median_run_index = 0;
 };
 
 struct BenchOptions {

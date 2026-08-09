@@ -32,7 +32,10 @@ export interface Submission {
   updated_at: string | null;
   verify_detail: VerifyDetail | null;
   p50_ns: number | null;
+  p95_ns: number | null;
   p99_ns: number | null;
+  /// Percentile curve from the run whose p50 IS the score.
+  percentiles: { p: number; ns: number }[] | null;
   probe_cost_ns: number | null;
   run_p50s_ns: number[] | null;
   discard_count: number | null;
