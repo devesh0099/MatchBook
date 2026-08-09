@@ -193,11 +193,22 @@ function EditorInner() {
         </div>
 
         {/*
-          The editable buffer stays MOUNTED for the whole session and is merely
-          hidden behind a header tab. @monaco-editor/react disposes a model when
-          `path` changes (keepCurrentModel defaults to false), so driving one
-          editor across tabs threw away the participant's work — and their undo
-          history and cursor with it. Headers get their own instance instead.
+          ONE Monaco, bound to engine.cpp, mounted for the whole session and
+          never given a different `path`.
+
+          Two earlier attempts drove a single editor across all five tabs, and
+          then two editors sharing the runtime; both lost or crossed the
+          buffer's content, because @monaco-editor/react disposes a model when
+          `path` changes (keepCurrentModel defaults to false) and models are
+          global to the monaco instance. In a six-hour event where this editor
+          is the ONLY submission path, losing the buffer is losing someone's
+          work — so the model lifecycle is removed from the problem rather than
+          negotiated with.
+
+          The headers are reference material you read, not code you edit, so
+          they render as plain text. The cost is syntax colour on four
+          read-only files; the benefit is that the editable buffer cannot be
+          touched by tab switching at all.
         */}
         <div style={{ flex: 1, minHeight: 0, display: readOnly ? 'none' : 'block' }}>
           <Editor
@@ -217,17 +228,23 @@ function EditorInner() {
         </div>
 
         {readOnly && (
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <Editor
-              height="100%"
-              theme="vs-dark"
-              defaultLanguage="cpp"
-              path={tab}
-              value={value}
-              options={{ ...EDITOR_OPTIONS, readOnly: true }}
-            />
+          <div style={{ flex: 1, minHeight: 0, overflow: 'auto', background: '#1e1e1e' }}>
+            <pre
+              className="mono"
+              style={{
+                margin: 0,
+                padding: '12px 16px',
+                color: '#d4d4d4',
+                fontSize: 13,
+                lineHeight: 1.5,
+                whiteSpace: 'pre',
+              }}
+            >
+              {value}
+            </pre>
           </div>
         )}
+
       </section>
 
       <aside style={{ display: 'flex', flexDirection: 'column', minWidth: 0, background: 'var(--panel)' }}>
