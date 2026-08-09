@@ -115,13 +115,31 @@ export function HdrHistogram({
   // library prints, so the frontend plots the library's numbers rather than
   // re-deriving them.
   const data = percentiles
-    .filter((d) => d.p < 100 && (d.inv ?? 0) > 0)
+    // p50 leftward is body, not tail; the plot starts where the axis is
+    // meaningful. p100 has no finite 1/(1-p), so the max is reported in the
+    // caption instead of pretending to a position.
+    .filter((d) => d.p >= 50 && d.p < 100 && (d.inv ?? 0) >= 2)
     .map((d) => ({ x: d.inv as number, ns: d.ns, p: d.p, count: d.count ?? 0 }));
   if (data.length < 4) return null;
 
+  // Explicit ticks at the percentiles people actually reason about.
+  //
+  // The previous formatter derived a label from the tick value with
+  // 100 - 100/x, which collapses to "100.00" for everything past p99.99 — so
+  // the axis printed the same label twice. Percentile and position are now
+  // stated together instead of one being recovered from the other.
   const maxX = data[data.length - 1].x;
-  const ticks: number[] = [];
-  for (let t = 1; t <= maxX * 1.001; t *= 10) ticks.push(t);
+  const TICKS: { at: number; label: string }[] = [
+    { at: 2, label: 'p50' },
+    { at: 20, label: 'p95' },
+    { at: 100, label: 'p99' },
+    { at: 1000, label: 'p99.9' },
+    { at: 10000, label: 'p99.99' },
+    { at: 100000, label: 'p99.999' },
+  ];
+  const shown = TICKS.filter((t) => t.at <= maxX);
+  const tickLabel = new Map(shown.map((t) => [t.at, t.label]));
+  const ticks = shown.map((t) => t.at);
 
   return (
     <Frame
@@ -135,9 +153,9 @@ export function HdrHistogram({
           dataKey="x"
           type="number"
           scale="log"
-          domain={[1, 'dataMax']}
+          domain={[2, maxX]}
           ticks={ticks}
-          tickFormatter={(v: number) => (v === 1 ? 'p0' : `p${(100 - 100 / v).toFixed(v >= 1000 ? 2 : v >= 100 ? 1 : 0)}`)}
+          tickFormatter={(v: number) => tickLabel.get(v) ?? ''}
           {...axis}
           label={{ value: 'percentile', position: 'insideBottom', offset: -12, fill: FAINT, fontSize: 10 }}
         />
@@ -185,71 +203,59 @@ export function HdrHistogram({
   );
 }
 
-// ---------------------------------------------------------------- per-run
+// ---------------------------------------------------------------- timeline
 
-export interface RunPoint {
+export interface TimelinePoint {
+  t: number;       // 0..1 through the timed region
+  event: number;   // first event index of this window
   p50_ns: number;
-  p95_ns?: number | null;
-  p99_ns?: number | null;
-  discarded?: boolean;
+  p95_ns: number;
+  p99_ns: number;
 }
 
 /**
- * p50, p95 and p99 across the ranked runs of one submission.
+ * Latency against time WITHIN the median run.
  *
- * The headline score is the median of the p50 line. Seeing all nine is what
- * distinguishes a stable engine from one whose first run costs 3x — same
- * reported number, different thing.
+ * Each point is the p50/p95/p99 of one window of events, so this shows how the
+ * engine behaved as the run progressed — a p99 that climbs is an allocator
+ * growing or a level that never gets cleaned up, and a flat p50 with a spiky
+ * p99 is a different animal from both being flat. One number per run cannot
+ * say any of that.
  */
-export function PerRunSeries({ runs, medianNs }: { runs: RunPoint[]; medianNs?: number | null }) {
-  if (!runs || runs.length < 2) return null;
+export function RunTimeline({ points }: { points: TimelinePoint[] }) {
+  if (!points || points.length < 3) return null;
 
-  const data = runs
-    .filter((r) => !r.discarded)
-    .map((r, i) => ({
-      run: i + 1,
-      p50: r.p50_ns,
-      p95: r.p95_ns ?? null,
-      p99: r.p99_ns ?? null,
-    }));
-  if (data.length < 2) return null;
+  const data = points.map((d) => ({
+    pct: Math.round(d.t * 100),
+    p50: d.p50_ns,
+    p95: d.p95_ns,
+    p99: d.p99_ns,
+  }));
 
   return (
     <Frame
-      title="Across the ranked runs"
-      note="The same stream, measured repeatedly. Your score is the median of the p50 line — a lone high point is usually a cold run, which the median absorbs."
-      height={220}
+      title="Latency through the run"
+      note="The median run, split into windows. Each point is that window's p50, p95 and p99 — so a tail that grows as the book fills is visible, where a single summary number would hide it."
+      height={230}
     >
-      <LineChart data={data} margin={{ top: 6, right: 14, bottom: 18, left: 4 }}>
+      <LineChart data={data} margin={{ top: 6, right: 14, bottom: 20, left: 4 }}>
         <CartesianGrid stroke={GRID} vertical={false} />
         <XAxis
-          dataKey="run"
+          dataKey="pct"
+          tickFormatter={(v: number) => `${v}%`}
           {...axis}
-          label={{ value: 'run', position: 'insideBottom', offset: -8, fill: FAINT, fontSize: 10 }}
+          label={{ value: 'through the run', position: 'insideBottom', offset: -10, fill: FAINT, fontSize: 10 }}
         />
         <YAxis scale="log" domain={['auto', 'auto']} tickFormatter={fmtNs} width={54} {...axis} />
         <Tooltip
           {...tooltipStyle}
           formatter={((v: unknown, n: unknown) => [fmtNs(Number(v)), String(n)]) as never}
-          labelFormatter={(l) => `run ${l}`}
+          labelFormatter={(l) => `${l}% through the run`}
         />
         <Legend wrapperStyle={{ fontSize: 11, color: MUTED }} />
-        {medianNs != null && (
-          <ReferenceLine
-            y={medianNs}
-            stroke={SERIES.p50}
-            strokeDasharray="4 4"
-            label={{
-              value: `score ${fmtNs(medianNs)}`,
-              position: 'insideTopLeft',
-              fill: SERIES.p50,
-              fontSize: 10,
-            }}
-          />
-        )}
-        <Line type="monotone" dataKey="p50" name="p50 (ranked)" stroke={SERIES.p50} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
-        <Line type="monotone" dataKey="p95" name="p95" stroke={SERIES.p95} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} connectNulls />
-        <Line type="monotone" dataKey="p99" name="p99" stroke={SERIES.p99} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} connectNulls />
+        <Line type="monotone" dataKey="p50" name="p50 (ranked)" stroke={SERIES.p50} strokeWidth={2} dot={false} isAnimationActive={false} />
+        <Line type="monotone" dataKey="p95" name="p95" stroke={SERIES.p95} strokeWidth={2} dot={false} isAnimationActive={false} />
+        <Line type="monotone" dataKey="p99" name="p99" stroke={SERIES.p99} strokeWidth={2} dot={false} isAnimationActive={false} />
       </LineChart>
     </Frame>
   );

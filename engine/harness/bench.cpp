@@ -31,6 +31,11 @@ constexpr int64_t kHistLowest = 1;
 constexpr int64_t kHistHighest = 10'000'000;
 constexpr int kHistSigFigs = 3;
 
+/// How many windows a run's timed region is split into for the timeline. Sixty
+/// is enough to see warmup settle or a periodic stall, and few enough that the
+/// per-window hdr_add stays irrelevant next to the run itself.
+constexpr uint64_t kTimelineWindows = 60;
+
 // An engine that does nothing, used to measure what the rdtscp pair and the
 // virtual dispatch cost on THIS node. Whatever it reports is pure probe
 // overhead: a constant added to every sample (SPEC section 5.1).
@@ -242,8 +247,9 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
 
     std::unique_ptr<IMatchingEngine> e(engine.create());
     HashSink sink;
-    Histogram hist;
-    if (!hist.valid()) {
+    Histogram hist;      // the whole run — score and percentile curve
+    Histogram window;    // the current timeline window, reset at each boundary
+    if (!hist.valid() || !window.valid()) {
       r.notes = "histogram allocation failed";
       r.outcome = BenchOutcome::NodeUnhealthy;
       return r;
@@ -254,18 +260,44 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
     // correctness run's digest over the same seed.
     for (uint64_t i = 0; i < warmup; ++i) dispatch(*e, buf.data()[i], sink);
 
+    // The timed region is split into windows, and each event is recorded ONCE —
+    // into the window histogram, which is folded into the run histogram at each
+    // boundary with hdr_add. Recording into two histograms per event would cost
+    // a second counts-array touch on every iteration; folding once per window
+    // costs sixty adds across the whole run.
+    const uint64_t timed = buf.size() - warmup;
+    const uint64_t window_size = std::max<uint64_t>(timed / kTimelineWindows, 1);
+    const double per_ns_live = r.tsc_ticks_per_ns > 0 ? r.tsc_ticks_per_ns : 1.0;
+    uint64_t window_start = warmup;
+    std::vector<WindowPoint> timeline;
+    timeline.reserve(kTimelineWindows + 1);
+
     const auto wall0 = std::chrono::steady_clock::now();
     for (uint64_t i = warmup; i < buf.size(); ++i) {
       const uint64_t t0 = rdtscp();
       dispatch(*e, buf.data()[i], sink);
       const uint64_t t1 = rdtscp();
-      hdr_record_value(hist.raw(), static_cast<int64_t>(t1 - t0));
+      hdr_record_value(window.raw(), static_cast<int64_t>(t1 - t0));
+
+      if (i - window_start + 1 >= window_size || i + 1 == buf.size()) {
+        timeline.push_back(WindowPoint{
+            static_cast<double>(i + 1 - warmup) / static_cast<double>(timed),
+            window_start,
+            window.at(50.0) / per_ns_live,
+            window.at(95.0) / per_ns_live,
+            window.at(99.0) / per_ns_live,
+        });
+        hdr_add(hist.raw(), window.raw());
+        hdr_reset(window.raw());
+        window_start = i + 1;
+      }
     }
     const auto wall1 = std::chrono::steady_clock::now();
 
     if (have_steal) read_steal_time(steal_after);
 
     RunResult run;
+    run.timeline = std::move(timeline);
     run.digest = sink.digest();
     run.steal_delta = have_steal ? (steal_after - steal_before) : 0;
     const double per_ns = r.tsc_ticks_per_ns > 0 ? r.tsc_ticks_per_ns : 1.0;
@@ -353,6 +385,7 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
         best = d;
         r.median_run_index = i;
         r.percentiles = r.runs[i].percentiles;
+        r.timeline = r.runs[i].timeline;
       }
     }
   }
@@ -458,6 +491,13 @@ std::string format_bench_json(const BenchResult& r) {
     s << (i ? "," : "") << "{\"p\":" << p.percentile << ",\"ns\":" << p.value_ns
       << ",\"count\":" << p.cumulative_count << ",\"inv\":"
       << (p.percentile >= 100.0 ? 0.0 : 1.0 / (1.0 - p.percentile / 100.0)) << "}";
+  }
+  s << "],\"timeline\":[";
+  for (size_t i = 0; i < r.timeline.size(); ++i) {
+    const auto& w = r.timeline[i];
+    s << (i ? "," : "") << "{\"t\":" << w.elapsed_frac << ",\"event\":" << w.first_event
+      << ",\"p50_ns\":" << w.p50_ns << ",\"p95_ns\":" << w.p95_ns
+      << ",\"p99_ns\":" << w.p99_ns << "}";
   }
   s << "]";
   if (!r.notes.empty()) s << ",\"notes\":\"" << r.notes << "\"";

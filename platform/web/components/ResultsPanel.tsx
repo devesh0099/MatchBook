@@ -12,7 +12,7 @@ import {
   type RunResult,
   type Submission,
 } from '@/lib/api';
-import { HdrHistogram, PerRunSeries } from './Charts';
+import { HdrHistogram, RunTimeline } from './Charts';
 
 export function StatePill({ state }: { state: Submission['state'] }) {
   const tone = stateTone(state);
@@ -198,9 +198,9 @@ ${d.stderr ?? ''}`}
               <Metric label="discarded" value={String(sub.discard_count)} />
             )}
           </div>
-          {sub.runs && sub.runs.length > 1 && (
+          {sub.timeline && sub.timeline.length > 2 && (
             <div style={{ marginTop: 18 }}>
-              <PerRunSeries runs={sub.runs} medianNs={sub.p50_ns} />
+              <RunTimeline points={sub.timeline} />
             </div>
           )}
 

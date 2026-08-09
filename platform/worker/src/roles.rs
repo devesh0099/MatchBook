@@ -471,7 +471,7 @@ async fn run_bench_job(
     sqlx::query(
         "UPDATE submissions SET state = $2, bench_seed_set = ARRAY[$3::bigint], p50_ns = $4, \
          p95_ns = $5, p99_ns = $6, probe_cost_ns = $7, run_p50s_ns = $8, discard_count = $9, \
-         percentiles = $10, runs = $11, updated_at = now() WHERE id = $1",
+         percentiles = $10, runs = $11, timeline = $12, updated_at = now() WHERE id = $1",
     )
     .bind(id)
     .bind(state)
@@ -484,6 +484,7 @@ async fn run_bench_job(
     .bind(result.get("discard_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
     .bind(result.get("percentiles").cloned())
     .bind(result.get("runs").cloned())
+    .bind(result.get("timeline").cloned())
     .execute(db)
     .await?;
 

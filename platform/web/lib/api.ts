@@ -38,6 +38,8 @@ export interface Submission {
   percentiles: { p: number; ns: number; count?: number; inv?: number }[] | null;
   /// Every kept run's own p50/p95/p99.
   runs: { p50_ns: number; p95_ns?: number | null; p99_ns?: number | null; discarded?: boolean }[] | null;
+  /// Windowed p50/p95/p99 through the median run.
+  timeline: { t: number; event: number; p50_ns: number; p95_ns: number; p99_ns: number }[] | null;
   probe_cost_ns: number | null;
   run_p50s_ns: number[] | null;
   discard_count: number | null;

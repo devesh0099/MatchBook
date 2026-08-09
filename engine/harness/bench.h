@@ -34,6 +34,15 @@ struct HdrPoint {
   uint64_t cumulative_count; // samples at or below this value
 };
 
+/// One window of a run: the percentiles of the events that fell inside it.
+/// This is what makes a within-run time series possible — how latency moved as
+/// the run progressed, rather than one number for the whole thing.
+struct WindowPoint {
+  double elapsed_frac;  // 0..1 through the timed region
+  uint64_t first_event;
+  double p50_ns, p95_ns, p99_ns;
+};
+
 struct RunResult {
   double p50_ns = 0.0;
   double p95_ns = 0.0;
@@ -48,6 +57,7 @@ struct RunResult {
   /// This run's own percentile distribution. Kept per run so the published
   /// curve can come from the run that actually decided the score.
   std::vector<HdrPoint> percentiles;
+  std::vector<WindowPoint> timeline;
 };
 
 struct BenchResult {
@@ -85,6 +95,8 @@ struct BenchResult {
   // one whose p50 is the score. The last run's table would describe a run that
   // decided nothing.
   std::vector<HdrPoint> percentiles;
+  /// Windowed percentiles from the same median run the curve comes from.
+  std::vector<WindowPoint> timeline;
   uint32_t median_run_index = 0;
 };
 

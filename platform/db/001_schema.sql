@@ -41,6 +41,9 @@ CREATE TABLE submissions (
   -- Every kept run's own p50/p95/p99, so a submission can be plotted run by
   -- run. run_p50s_ns stays as the array the bootstrap resamples.
   runs              jsonb,
+  -- Windowed p50/p95/p99 through the median run, so latency can be plotted
+  -- against time WITHIN the run rather than only summarised for it.
+  timeline          jsonb,
   discard_count     int DEFAULT 0,         -- steal-time discards (3 => operator alert)
   -- Percentile curve from the run whose p50 IS the score, so the published
   -- distribution and the published headline describe the same run.
