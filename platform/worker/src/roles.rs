@@ -791,9 +791,28 @@ fn first_lines(s: &str, n: usize) -> String {
 
 /// A fresh seed per submission, so the hidden stream cannot be
 /// reverse-engineered across attempts.
+///
+/// Drawn from the OS entropy pool, not from the clock. The seed is the one
+/// thing standing between the contest and the exploit the plan names: read the
+/// stream, hardcode the outputs. A submission never SEES the seed — the stream
+/// arrives on an inherited descriptor — but a clock-derived seed is guessable
+/// by anyone who knows the algorithm and roughly when their job was claimed,
+/// and "the repository is private" is obscurity rather than a defence. It also
+/// removes the collision between pool boxes claiming in the same nanosecond.
 fn rand_seed() -> i64 {
+    use std::io::Read;
+    let mut bytes = [0u8; 8];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(&mut bytes).is_ok() {
+            return (u64::from_le_bytes(bytes) & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+        }
+    }
+    // Only reachable if /dev/urandom is unavailable, which on these nodes means
+    // something is badly wrong — but a worker that cannot seed is worse than a
+    // worker with a weak seed, so fall back rather than refuse to run.
+    tracing::error!("/dev/urandom unavailable; falling back to a clock-derived seed");
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as u64;
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    ((secs.wrapping_mul(1_000_000_007).wrapping_add(nanos as u64)) & 0x7FFF_FFFF_FFFF_FFFF) as i64
+    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    ((d.as_secs().wrapping_mul(1_000_000_007).wrapping_add(d.subsec_nanos() as u64))
+        & 0x7FFF_FFFF_FFFF_FFFF) as i64
 }
