@@ -12,12 +12,24 @@ namespace {
 constexpr ProfileParams kProfiles[] = {
     // name         sess firms  mm tk ns st  cancel  mkt touch near deep  ioc fok mkt  live
     {"balanced", 24, 10, 6, 6, 6, 6, 45, 25, 35, 30, 10, 12, 8, 6, 150},
-    // The ranked benchmark profile. live_target is deliberately large: this is
-    // the one profile whose book depth decides what the contest can resolve. A
-    // few hundred resting orders fit in L1 and every data structure looks
-    // identical; a few thousand is where the cancel index and the level layout
-    // start to cost real cache misses.
-    {"cancel_heavy", 32, 12, 16, 6, 6, 4, 68, 22, 40, 28, 10, 10, 6, 5, 2600},
+    // The ranked benchmark profile. Retuned after measuring what it was
+    // actually grading: with 68% of events being cancels there were 2.3 cancel
+    // messages per order created, and since an order can only be cancelled
+    // once, 93% of them were bound to hit nothing. The median ranked event was
+    // therefore a FAILED index lookup — the cheapest operation in the engine —
+    // and the contest was ranking how fast you can not find something.
+    //
+    // "Real books are 90%+ cancels" means 90% of orders END in cancellation
+    // rather than execution; it does not mean 90% of messages are cancels. At
+    // roughly one cancel per order the successful-cancel path — find, erase,
+    // clean up the level — becomes the common case, which is the work the
+    // cancel index was chosen to expose.
+    //
+    // live_target is large and sessions are many so the book carries ~23k
+    // resting orders (~3MB of index and level nodes). A few thousand fit in L2
+    // and every layout measures the same; past L2 the cache behaviour that this
+    // contest is supposed to reward starts to show.
+    {"cancel_heavy", 320, 90, 200, 12, 78, 30, 42, 2, 20, 33, 45, 3, 2, 1, 1600},
     // Heavy on takers, but liquidity providers still have to outnumber them:
     // takers with nothing to sweep leave a book a handful of orders deep, which
     // stresses nothing at all.
@@ -44,6 +56,9 @@ constexpr KindBias kBias[] = {
 const KindBias& bias_of(AgentKind k) { return kBias[static_cast<uint8_t>(k)]; }
 
 uint32_t clamp_pct(uint32_t v) { return v > 100 ? 100 : v; }
+
+/// How often a cancel targets a recently placed order rather than any live one.
+constexpr uint32_t kRecentCancelPct = 85;
 
 }  // namespace
 
@@ -217,10 +232,28 @@ WireEvent Generator::emit_from(Session& s) {
       const uint64_t ghost = s.next_coid + 1'000'000 + s.rng.below(1000);
       return make_cancel(s.session_id, s.participant_id, ghost);
     }
-    const uint32_t idx = s.rng.below(static_cast<uint32_t>(s.live.size()));
+    // Cancel a RECENT order most of the time, not a uniformly random one.
+    //
+    // This is what re-quoting is: a market maker cancels the quote it just
+    // placed because the price moved, not one from ten thousand events ago.
+    // Uniform selection is also what made the stream grade the wrong thing —
+    // the live list accumulates orders that were actually filled, so a random
+    // pick overwhelmingly names a dead order and the cancel becomes a lookup
+    // miss. At 10M events that was 93% of all cancels, which made the median
+    // ranked event "fail to find something" rather than any of the work the
+    // cancel path is supposed to be measuring.
+    const uint32_t n = static_cast<uint32_t>(s.live.size());
+    uint32_t idx;
+    if (s.rng.chance(kRecentCancelPct)) {
+      const uint32_t window = n / 8 > 0 ? n / 8 : 1;
+      idx = n - 1 - s.rng.below(window);
+    } else {
+      idx = s.rng.below(n);
+    }
     const uint64_t coid = s.live[idx];
-    s.live[idx] = s.live.back();
-    s.live.pop_back();
+    // Swap-remove would shuffle a recent entry into the middle and destroy the
+    // ordering this selection depends on; erase keeps the list in age order.
+    s.live.erase(s.live.begin() + idx);
     return make_cancel(s.session_id, s.participant_id, coid);
   }
 
