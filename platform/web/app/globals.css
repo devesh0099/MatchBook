@@ -276,3 +276,118 @@ td.num {
   text-align: center;
   font-size: 13px;
 }
+
+/* ---------------------------------------------------------------- prose
+
+   The spec page. It is a long normative document that people read under time
+   pressure and jump around in, so this optimises for scanning: a measured line
+   length, headings that are findable, and tables that stay readable because
+   half the rules ARE tables. */
+
+.prose {
+  max-width: 76ch;
+  color: var(--text);
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  scroll-margin-top: 64px;
+}
+.prose h1 {
+  font-size: 24px;
+  margin: 36px 0 8px;
+}
+.prose h2 {
+  font-size: 18px;
+  margin: 34px 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.prose h3 {
+  font-size: 15px;
+  margin: 26px 0 8px;
+  color: var(--text);
+}
+.prose h4 {
+  font-size: 13.5px;
+  margin: 20px 0 6px;
+  color: var(--muted);
+}
+
+.prose p,
+.prose li {
+  line-height: 1.65;
+}
+.prose ul,
+.prose ol {
+  padding-left: 22px;
+}
+.prose li {
+  margin: 4px 0;
+}
+.prose li > p {
+  margin: 4px 0;
+}
+
+.prose strong {
+  color: #fff;
+  font-weight: 600;
+}
+
+.prose code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: #0e1116;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.prose pre {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  background: #0e1116;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  overflow-x: auto;
+}
+.prose pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* Wide content scrolls inside its own box; the page itself never scrolls
+   sideways. */
+.prose table {
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+  margin: 14px 0;
+}
+.prose th,
+.prose td {
+  padding: 7px 12px;
+  font-size: 13px;
+}
+.prose td {
+  white-space: normal;
+}
+
+.prose blockquote {
+  margin: 16px 0;
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+}
+
+.prose hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 30px 0;
+}

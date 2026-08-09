@@ -3,8 +3,13 @@
 // The specification, one click away at all times. Nobody should be re-typing
 // structs from a PDF, and a rule that is hard to find becomes a rule that gets
 // guessed at.
+//
+// The markdown is rendered to HTML at BUILD time by scripts/sync-assets.mjs
+// from the same spec/SPEC.md that ships in the boilerplate zip — so the page and
+// the zip cannot disagree about what the rules are, and no markdown parser is
+// shipped to the browser to re-parse a file we already have.
 
-import { SPEC_MARKDOWN } from '@/lib/boilerplate.generated';
+import { SPEC_HTML } from '@/lib/boilerplate.generated';
 
 export default function SpecPage() {
   return (
@@ -15,14 +20,8 @@ export default function SpecPage() {
           This document is normative. Where the reference implementation and this document disagree,
           this document wins and the reference is a bug.
         </p>
-        <div className="card">
-          <pre
-            className="out"
-            style={{ whiteSpace: 'pre-wrap', border: 'none', background: 'transparent', padding: 0 }}
-          >
-            {SPEC_MARKDOWN}
-          </pre>
-        </div>
+        {/* Build-time content from our own repo; there is no untrusted input path here. */}
+        <article className="prose" dangerouslySetInnerHTML={{ __html: SPEC_HTML }} />
       </div>
     </main>
   );

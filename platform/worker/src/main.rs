@@ -144,7 +144,16 @@ fn spawn_heartbeat(db: sqlx::PgPool, worker_id: String) {
         let mut ticker = tokio::time::interval(Duration::from_secs(15));
         loop {
             ticker.tick().await;
-            if let Err(e) = sqlx::query("UPDATE workers SET last_seen = now() WHERE id = $1")
+            // A worker the janitor marked unhealthy for silence is healthy again
+            // the moment it speaks — otherwise a transient database blip
+            // condemns it for the rest of the event. A verdict recorded as
+            // `held` (spot-check deviation, or the operator) is NOT undone here.
+            if let Err(e) = sqlx::query(
+                "UPDATE workers SET last_seen = now(), \
+                 healthy = CASE WHEN COALESCE(detail->>'held','false') = 'true' \
+                                THEN healthy ELSE true END \
+                 WHERE id = $1",
+            )
                 .bind(&worker_id)
                 .execute(&db)
                 .await

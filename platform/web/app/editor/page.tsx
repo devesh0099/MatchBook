@@ -17,6 +17,19 @@ import { RunPanel, SubmissionPanel } from '@/components/ResultsPanel';
 // to submit; it must not depend on the room's internet.
 loader.config({ paths: { vs: '/monaco/vs' } });
 
+// No LSP, no clangd. The compiler's own errors, shown verbatim in the results
+// panel, are the feedback loop (impl spec section 3).
+const EDITOR_OPTIONS = {
+  minimap: { enabled: false },
+  fontSize: 13,
+  fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
+  scrollBeyondLastLine: false,
+  renderWhitespace: 'selection',
+  tabSize: 2,
+  automaticLayout: true,
+  quickSuggestions: false,
+} as const;
+
 const AUTOSAVE_MS = 3000;
 const POLL_MS = 2000;
 
@@ -179,34 +192,42 @@ function EditorInner() {
           </span>
         </div>
 
-        <div style={{ flex: 1, minHeight: 0 }}>
+        {/*
+          The editable buffer stays MOUNTED for the whole session and is merely
+          hidden behind a header tab. @monaco-editor/react disposes a model when
+          `path` changes (keepCurrentModel defaults to false), so driving one
+          editor across tabs threw away the participant's work — and their undo
+          history and cursor with it. Headers get their own instance instead.
+        */}
+        <div style={{ flex: 1, minHeight: 0, display: readOnly ? 'none' : 'block' }}>
           <Editor
             height="100%"
             theme="vs-dark"
-            path={tab}
-            language="cpp"
-            value={value}
+            defaultLanguage="cpp"
+            path="engine.cpp"
+            keepCurrentModel
+            value={source}
             onChange={(v) => {
-              if (readOnly) return;
               const next = v ?? '';
               setSource(next);
               scheduleSave(next);
             }}
-            options={{
-              readOnly,
-              minimap: { enabled: false },
-              fontSize: 13,
-              fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, monospace",
-              scrollBeyondLastLine: false,
-              renderWhitespace: 'selection',
-              tabSize: 2,
-              automaticLayout: true,
-              // No LSP, no clangd. The compiler's own errors, shown verbatim in
-              // the panel, are the feedback loop (impl spec section 3).
-              quickSuggestions: false,
-            }}
+            options={EDITOR_OPTIONS}
           />
         </div>
+
+        {readOnly && (
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <Editor
+              height="100%"
+              theme="vs-dark"
+              defaultLanguage="cpp"
+              path={tab}
+              value={value}
+              options={{ ...EDITOR_OPTIONS, readOnly: true }}
+            />
+          </div>
+        )}
       </section>
 
       <aside style={{ display: 'flex', flexDirection: 'column', minWidth: 0, background: 'var(--panel)' }}>

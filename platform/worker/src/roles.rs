@@ -542,6 +542,12 @@ async fn reference_spot_check(db: &PgPool, cfg: &Config, _sandbox: &Sandbox) -> 
             .bind(&cfg.worker_id)
             .execute(db)
             .await?;
+        // `held` marks this as a deliberate verdict, so the heartbeat cannot
+        // quietly undo it 15 seconds later.
+        sqlx::query("UPDATE workers SET detail = jsonb_build_object('held', true) WHERE id = $1")
+            .bind(&cfg.worker_id)
+            .execute(db)
+            .await?;
         log_event(
             db,
             None,
@@ -550,6 +556,26 @@ async fn reference_spot_check(db: &PgPool, cfg: &Config, _sandbox: &Sandbox) -> 
         )
         .await?;
     } else {
+        // Back within tolerance. The check that condemned the node is the one
+        // entitled to absolve it — otherwise a single transient spike parks
+        // every submission in pending_benchmark for the rest of the event.
+        let restored: Option<(String,)> = sqlx::query_as(
+            "UPDATE workers SET healthy = true, detail = NULL \
+             WHERE id = $1 AND healthy = false RETURNING id",
+        )
+        .bind(&cfg.worker_id)
+        .fetch_optional(db)
+        .await?;
+        if restored.is_some() {
+            tracing::warn!("reference spot check recovered ({p50:.1} ns); node healthy again");
+            log_event(
+                db,
+                None,
+                "reference_spot_check_recovered",
+                serde_json::json!({ "p50_ns": p50, "baseline_ns": base }),
+            )
+            .await?;
+        }
         log_event(
             db,
             None,

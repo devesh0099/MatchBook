@@ -155,11 +155,17 @@ async fn set_bench_health(State(st): State<AppState>, Path(state): Path<String>)
         "unhealthy" => false,
         _ => return Err((axum::http::StatusCode::BAD_REQUEST, "use healthy|unhealthy".into())),
     };
-    sqlx::query("UPDATE workers SET healthy = $1 WHERE role = 'bench'")
-        .bind(healthy)
-        .execute(&st.db)
-        .await
-        .map_err(oops)?;
+    // Marking unhealthy by hand is a deliberate verdict: flag it `held` so the
+    // worker's own heartbeat does not undo it on the next tick.
+    sqlx::query(
+        "UPDATE workers SET healthy = $1, \
+         detail = CASE WHEN $1 THEN NULL ELSE jsonb_build_object('held', true) END \
+         WHERE role = 'bench'",
+    )
+    .bind(healthy)
+    .execute(&st.db)
+    .await
+    .map_err(oops)?;
     log(&st, None, "admin_bench_health", json!({ "healthy": healthy }))
         .await
         .map_err(oops)?;
