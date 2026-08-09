@@ -3,6 +3,9 @@
 #include <cstdio>
 #include <cstring>
 
+#include "common/decode.h"
+#include "mebench/out.h"
+
 namespace mebench::generator {
 namespace {
 
@@ -10,8 +13,8 @@ namespace {
 // and the TIF mix takers use. Placement is the product of the profile's
 // baseline weights and the agent kind's own bias, below.
 constexpr ProfileParams kProfiles[] = {
-    // name         sess firms  mm tk ns st  cancel  mkt touch near deep  ioc fok mkt  live
-    {"balanced", 24, 10, 6, 6, 6, 6, 45, 25, 35, 30, 10, 12, 8, 6, 150},
+    // name         sess firms  mm tk ns st  cancel  mkt touch near deep  ioc fok mkt  deep_ticks live
+    {"balanced", 24, 10, 6, 6, 6, 6, 45, 25, 35, 30, 10, 12, 8, 6, 42, 150},
     // The ranked benchmark profile. Retuned after measuring what it was
     // actually grading: with 68% of events being cancels there were 2.3 cancel
     // messages per order created, and since an order can only be cancelled
@@ -29,12 +32,12 @@ constexpr ProfileParams kProfiles[] = {
     // resting orders (~3MB of index and level nodes). A few thousand fit in L2
     // and every layout measures the same; past L2 the cache behaviour that this
     // contest is supposed to reward starts to show.
-    {"cancel_heavy", 320, 90, 200, 12, 78, 30, 42, 2, 20, 33, 45, 3, 2, 1, 1600},
+    {"cancel_heavy", 320, 90, 200, 12, 78, 30, 42, 2, 20, 33, 45, 3, 2, 1, 3000, 500},
     // Heavy on takers, but liquidity providers still have to outnumber them:
     // takers with nothing to sweep leave a book a handful of orders deep, which
     // stresses nothing at all.
-    {"sweep_heavy", 38, 14, 20, 6, 10, 2, 40, 25, 40, 30, 5, 18, 10, 12, 200},
-    {"deep_book", 28, 10, 6, 4, 14, 4, 35, 15, 25, 30, 30, 8, 5, 4, 600},
+    {"sweep_heavy", 38, 14, 20, 6, 10, 2, 40, 25, 40, 30, 5, 18, 10, 12, 42, 200},
+    {"deep_book", 28, 10, 6, 4, 14, 4, 35, 15, 25, 30, 30, 8, 5, 4, 400, 600},
 };
 
 struct KindBias {
@@ -60,7 +63,79 @@ uint32_t clamp_pct(uint32_t v) { return v > 100 ? 100 : v; }
 /// How often a cancel targets a recently placed order rather than any live one.
 constexpr uint32_t kRecentCancelPct = 85;
 
+/// Compaction threshold: rebuild once fewer than this fraction of slots are
+/// live. At one half, every compaction is paid for by at least as many
+/// removals, so the amortised cost per removal is constant.
+constexpr uint32_t kCompactWhenAliveBelowPct = 50;
+
+/// Below this many slots, compaction is not worth thinking about.
+constexpr size_t kCompactMinSlots = 64;
+
+/// Cancel rate for a session that has reached its resting-order target. Well
+/// above any kind's resting-add rate, so depth cannot climb past the target.
+constexpr uint32_t kBackPressurePct = 95;
+
 }  // namespace
+
+// ---------------------------------------------------------------- LiveSet
+
+void LiveSet::add(uint64_t coid) {
+  if (slots_.size() >= kCompactMinSlots &&
+      alive_ * 100u < slots_.size() * kCompactWhenAliveBelowPct) {
+    compact();
+  }
+  pos_[coid] = static_cast<uint32_t>(slots_.size());
+  slots_.push_back(coid);
+  ++alive_;
+}
+
+void LiveSet::remove(uint64_t coid) {
+  auto it = pos_.find(coid);
+  if (it == pos_.end()) return;  // never rested, or already gone
+  slots_[it->second] = 0;
+  pos_.erase(it);
+  --alive_;
+}
+
+void LiveSet::compact() {
+  std::vector<uint64_t> kept;
+  kept.reserve(alive_);
+  // Iterate the age-ordered vector, never the map: the map's order is
+  // unspecified and would make the stream depend on the standard library.
+  for (uint64_t c : slots_) {
+    if (c != 0) kept.push_back(c);
+  }
+  slots_.swap(kept);
+  pos_.clear();
+  for (uint32_t i = 0; i < slots_.size(); ++i) pos_[slots_[i]] = i;
+  alive_ = static_cast<uint32_t>(slots_.size());
+}
+
+uint64_t LiveSet::pick(Rng& rng, uint32_t recent_pct) {
+  if (alive_ == 0) return 0;
+  const uint32_t n = static_cast<uint32_t>(slots_.size());
+
+  // One probe, biased toward the recent end. Re-quoting cancels the order you
+  // just placed because the price moved, not one from ten thousand events ago.
+  uint32_t idx;
+  if (rng.chance(recent_pct)) {
+    const uint32_t window = n / 8 > 0 ? n / 8 : 1;
+    idx = n - 1 - rng.below(window);
+  } else {
+    idx = rng.below(n);
+  }
+
+  // Compaction holds at least half the slots live, so walking back to the
+  // nearest survivor terminates in ~1 step on average. It consumes no further
+  // randomness, which keeps the stream stable against changes in tombstone
+  // layout that do not change which orders are live.
+  uint32_t scanned = 0;
+  while (slots_[idx] == 0) {
+    idx = idx == 0 ? n - 1 : idx - 1;
+    if (++scanned > n) return 0;  // unreachable while alive_ > 0
+  }
+  return slots_[idx];
+}
 
 const ProfileParams& profile_params(Profile p) { return kProfiles[static_cast<uint32_t>(p)]; }
 
@@ -91,8 +166,12 @@ const char* injection_name(InjectionKind k) {
 
 // ---------------------------------------------------------------- construction
 
-Generator::Generator(uint64_t seed, Profile profile)
-    : seed_(seed), profile_(profile), pp_(&profile_params(profile)), rng_(seed) {
+Generator::Generator(uint64_t seed, Profile profile, uint32_t live_target_override)
+    : seed_(seed),
+      profile_(profile),
+      pp_(&profile_params(profile)),
+      live_target_(live_target_override ? live_target_override : profile_params(profile).live_target),
+      rng_(seed) {
   build_sessions();
 }
 
@@ -113,7 +192,6 @@ void Generator::build_sessions() {
                 1,
                 0,
                 bias_of(static_cast<AgentKind>(k)).weight};
-      s.live.reserve(256);
       total_weight_ += s.weight;
       sessions_.push_back(std::move(s));
       ++sid;
@@ -155,7 +233,12 @@ int32_t Generator::place_price(Session& s, Side side, bool& marketable) {
     offset = static_cast<int32_t>(s.rng.range(2, 8));
     through_touch = false;
   } else {
-    offset = static_cast<int32_t>(s.rng.range(9, 50));
+    // Density decays with distance from the touch, which is the shape a real
+    // book has. The minimum of two uniform draws is a triangular distribution
+    // — one extra RNG call, no floating point, identical on every platform.
+    const uint32_t a = s.rng.below(pp_->deep_ticks);
+    const uint32_t b = s.rng.below(pp_->deep_ticks);
+    offset = static_cast<int32_t>(9 + (a < b ? a : b));
     through_touch = false;
   }
 
@@ -167,8 +250,7 @@ int32_t Generator::place_price(Session& s, Side side, bool& marketable) {
 
 // ---------------------------------------------------------------- emission
 
-WireEvent Generator::make_new(Session& s, Side side, int32_t px, uint32_t qty, TIF tif,
-                              bool likely_rests) {
+WireEvent Generator::make_new(Session& s, Side side, int32_t px, uint32_t qty, TIF tif) {
   WireEvent e{};
   e.client_order_id = s.next_coid++;
   e.px = (tif == TIF::Market) ? 0 : px;
@@ -178,24 +260,9 @@ WireEvent Generator::make_new(Session& s, Side side, int32_t px, uint32_t qty, T
   e.type = EvType::New;
   e.side = side;
   e.tif = tif;
-
-  // "Believed resting" is intentional: the generator does not run a matching
-  // engine, so this list still accumulates orders that were actually filled —
-  // which is exactly how cancels for already-filled orders get produced.
-  //
-  // But an order placed THROUGH the touch is filled almost immediately, and
-  // tracking those made the list mostly garbage: cancels then overwhelmingly
-  // hit dead orders and stop removing real resting liquidity, so the book grows
-  // without bound and the stream drifts away from anything realistic. Excluding
-  // them keeps the list approximately right while leaving plenty of stale
-  // entries from orders that were filled later.
-  if (tif == TIF::Day && likely_rests) {
-    // Backstop only. Eviction drops an order nobody can ever cancel again, so
-    // it must stay well clear of live_target, which the cancel back-pressure in
-    // emit_from() already holds the list at.
-    if (s.live.size() >= pp_->live_target * 4u) s.live.erase(s.live.begin());
-    s.live.push_back(e.client_order_id);
-  }
+  // Nothing is added to the live set here. apply() asks the book afterwards
+  // whether this order actually rested, which is the only way to be right about
+  // a marketable Day order that partially filled and rested the remainder.
   return e;
 }
 
@@ -214,46 +281,52 @@ WireEvent Generator::make_cancel(uint16_t session_id, uint16_t firm, uint64_t co
 
 WireEvent Generator::emit_from(Session& s) {
   const KindBias& b = bias_of(s.kind);
-  uint32_t cancel_pct = clamp_pct(pp_->cancel_pct * b.cancel_scale_pct / 100);
 
-  // A real quoting desk holds a bounded number of live orders: once its book of
-  // quotes gets long it cancels before it adds.
+  // Cancel pressure rises with how full the session's quote book already is.
   //
-  // This has to be hard back-pressure, not a nudge. A session whose add rate
-  // beats its cancel rate grows its live list until the cap below evicts the
-  // oldest entry — and an evicted order is one nobody will ever cancel again,
-  // so it rests forever. That leak is linear in stream length: deep_book went
-  // from 5.7k to 35.6k resting orders over 3M events before this.
-  if (s.live.size() > pp_->live_target) cancel_pct = clamp_pct(cancel_pct < 85 ? 85 : cancel_pct);
+  // A fixed cancel percentage cannot work now that the live set is exact. In
+  // steady state every order that rests must leave, by cancel or by fill, so
+  // the cancel SHARE of the stream is not a free parameter — it is pinned near
+  // `r / (1 + r)` for a resting fraction r, about 37%. Setting it higher than
+  // that drains every session's live set to empty and the cancels become ghost
+  // lookups again; setting it lower grows the book without bound. The old code
+  // set it to 55% and got away with it only because the list it drew from was
+  // ~96% stale, so most of those cancels named nothing.
+  //
+  // Ramping to the profile's rate as the session approaches its target makes
+  // depth the controlled variable and cancel share the emergent one, which is
+  // the right way round: depth is what the benchmark is about, and a session
+  // far below target should be building quotes, not churning them.
+  const uint32_t base = clamp_pct(pp_->cancel_pct * b.cancel_scale_pct / 100);
+  const uint32_t n = s.live.size();
+  uint32_t cancel_pct;
+  if (n >= live_target_) {
+    // Hard back-pressure. Without it a kind whose resting fraction is high and
+    // whose cancel bias is low — Noise, which rests deep and rarely cancels —
+    // never stops growing.
+    cancel_pct = kBackPressurePct;
+  } else {
+    cancel_pct = static_cast<uint32_t>(static_cast<uint64_t>(base) * n / live_target_);
+  }
 
   if (s.rng.chance(cancel_pct)) {
-    // ~2% of cancels target an id that never existed at all.
+    // ~2% of cancels target an id that never existed at all. The engine cannot
+    // tell "never existed" from "already filled" and is not asked to, but the
+    // lookup-miss path still has to be exercised.
     if (s.live.empty() || s.rng.chance(2)) {
       const uint64_t ghost = s.next_coid + 1'000'000 + s.rng.below(1000);
       return make_cancel(s.session_id, s.participant_id, ghost);
     }
-    // Cancel a RECENT order most of the time, not a uniformly random one.
-    //
-    // This is what re-quoting is: a market maker cancels the quote it just
-    // placed because the price moved, not one from ten thousand events ago.
-    // Uniform selection is also what made the stream grade the wrong thing —
-    // the live list accumulates orders that were actually filled, so a random
-    // pick overwhelmingly names a dead order and the cancel becomes a lookup
-    // miss. At 10M events that was 93% of all cancels, which made the median
-    // ranked event "fail to find something" rather than any of the work the
-    // cancel path is supposed to be measuring.
-    const uint32_t n = static_cast<uint32_t>(s.live.size());
-    uint32_t idx;
-    if (s.rng.chance(kRecentCancelPct)) {
-      const uint32_t window = n / 8 > 0 ? n / 8 : 1;
-      idx = n - 1 - s.rng.below(window);
-    } else {
-      idx = s.rng.below(n);
-    }
-    const uint64_t coid = s.live[idx];
-    // Swap-remove would shuffle a recent entry into the middle and destroy the
-    // ordering this selection depends on; erase keeps the list in age order.
-    s.live.erase(s.live.begin() + idx);
+    // The live set holds only orders the book says are resting, so this hits.
+    // It did not used to: the old list tracked "believed resting" and drifted
+    // ~96% stale, so 93% of cancels named an order that was already gone. The
+    // median ranked event was a FAILED index lookup — the cheapest operation in
+    // the engine — and the contest was ranking how fast you can not find
+    // something.
+    const uint64_t coid = s.live.pick(s.rng, kRecentCancelPct);
+    // Not removed here. The cancel might still be rejected — a race the
+    // generator does not model but the book does — so apply() removes it when
+    // the book actually acknowledges it.
     return make_cancel(s.session_id, s.participant_id, coid);
   }
 
@@ -291,8 +364,80 @@ WireEvent Generator::emit_from(Session& s) {
   // reserved for market orders (SPEC M1).
   if (tif != TIF::Market && px <= 0) px = 1;
 
+  (void)marketable;  // the book decides what rests now, not a guess
   const uint32_t qty = s.rng.range(b.qty_lo, b.qty_hi);
-  return make_new(s, side, px, qty, tif, !marketable);
+  return make_new(s, side, px, qty, tif);
+}
+
+// ---------------------------------------------------------------- book feedback
+
+namespace {
+
+// Collects one event's output so apply() can walk it. Deliberately not the
+// harness's sink: this one keeps nothing but the current event.
+class GenSink final : public OutSink {
+ public:
+  void clear() { evs_.clear(); }
+  const std::vector<OutEvent>& events() const { return evs_; }
+  void emit(const OutEvent& e) noexcept override { evs_.push_back(e); }
+
+ private:
+  std::vector<OutEvent> evs_;
+};
+
+}  // namespace
+
+Generator::Session* Generator::session_for(uint16_t session_id) {
+  // Injection sessions start at kFirstInjectionSession and have no live set —
+  // their orders are scripted and never cancelled by the organic mix.
+  if (session_id == 0 || session_id >= kFirstInjectionSession) return nullptr;
+  const uint32_t idx = session_id - 1u;  // build_sessions() numbers from 1
+  return idx < sessions_.size() ? &sessions_[idx] : nullptr;
+}
+
+void Generator::apply(const WireEvent& w, uint64_t seq) {
+  static thread_local GenSink sink;
+  sink.clear();
+  const DecodedEvent d = decode(w, seq);
+  dispatch(book_, d, sink);
+
+  // Removals are cross-session. A trade takes liquidity out of whichever
+  // session was resting on the other side, and an STP cancel removes a resting
+  // order belonging to a session that did not send this event at all — so the
+  // emitting session is the wrong place to look.
+  for (const OutEvent& e : sink.events()) {
+    switch (e.type) {
+      case OutType::Trade: {
+        // The maker is gone only if it was fully consumed. One query is cheaper
+        // and more honest than tracking remaining quantity in a second place.
+        if (Session* m = session_for(e.maker.session_id)) {
+          if (!book_.is_resting(e.maker.session_id, e.maker.client_order_id)) {
+            m->live.remove(e.maker.client_order_id);
+          }
+        }
+        break;
+      }
+      case OutType::CancelAck: {
+        // Ordinary cancel zeroes `maker` and names the order in `taker`; an STP
+        // cancel puts the removed resting order in `maker` (SPEC S2/S5).
+        const OrderRef& gone = e.maker.session_id != 0 ? e.maker : e.taker;
+        if (Session* g = session_for(gone.session_id)) g->live.remove(gone.client_order_id);
+        break;
+      }
+      case OutType::Ack:
+      case OutType::Reject:
+      case OutType::Expired:
+        // Nothing enters the live set on these. A New's membership is decided
+        // once, below, from the book itself.
+        break;
+    }
+  }
+
+  if (w.type == EvType::New) {
+    if (Session* s = session_for(w.session_id)) {
+      if (book_.is_resting(w.session_id, w.client_order_id)) s->live.add(w.client_order_id);
+    }
+  }
 }
 
 uint32_t Generator::pick_session() {
@@ -479,10 +624,24 @@ void Generator::schedule_injections(uint64_t count) {
       InjectionKind::CancelLastOrderAtLevel,
   };
   const uint64_t n = sizeof(order) / sizeof(order[0]);
+
+  // Spread across the stream's first third rather than its whole length.
+  //
+  // Five of the seven scripts open with a market order that consumes the entire
+  // organic ask side (SPEC M2: a market order accepts every price). That is the
+  // only way to give an injected aggressor a known-empty book, since an
+  // aggressor always takes the best price first and organic prices are always
+  // better than the injection band — but at a few hundred thousand resting
+  // orders it removes half the book, and the refill costs hundreds of thousands
+  // of events.
+  //
+  // Keeping them early puts the damage where the book is filling up anyway, and
+  // leaves the back two thirds — the part the benchmark's steady state is
+  // measured on — undisturbed. They still run against a book with real depth,
+  // and the correctness lane still gets them spread over its whole warm-up.
+  const uint64_t window = count / 3;
   for (uint64_t i = 0; i < n; ++i) {
-    // Spread them through the stream rather than bunching at the start, so a
-    // divergence that only appears deep into a run still gets caught.
-    const uint64_t at = count * (i + 1) / (n + 2);
+    const uint64_t at = window * (i + 1) / (n + 1);
     schedule_.push_back({at, order[i]});
   }
 }
@@ -505,11 +664,16 @@ std::vector<WireEvent> Generator::generate(uint64_t count) {
     if (!pending_.empty()) {
       events.push_back(pending_.front());
       pending_.pop_front();
-      continue;
+    } else {
+      step_mid();
+      events.push_back(emit_from(sessions_[pick_session()]));
     }
 
-    step_mid();
-    events.push_back(emit_from(sessions_[pick_session()]));
+    // Every emitted event, injections included. An injection's clearing sweep
+    // consumes thousands of organic resting orders; a book that had not seen it
+    // would leave those orders in their sessions' live sets forever, which is
+    // precisely the staleness this loop exists to remove.
+    apply(events.back(), seq_);
   }
 
   return events;

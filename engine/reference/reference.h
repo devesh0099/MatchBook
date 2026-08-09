@@ -24,6 +24,26 @@ class ReferenceEngine final : public IMatchingEngine {
   void on_cancel(OrderRef ref, uint64_t seq, OutSink& out) noexcept override;
   void snapshot(BookSnapshot& out) const override;
 
+  // Is (session_id, client_order_id) resting right now?
+  //
+  // Not part of IMatchingEngine and never asked of a submission — this is the
+  // reference answering a question about itself, for the generator. The
+  // generator runs a private reference book so it knows which of its orders are
+  // actually live rather than guessing; without this it tracks "believed
+  // resting", which drifts until most cancels name orders that are already gone.
+  bool is_resting(uint16_t session_id, uint64_t client_order_id) const {
+    return index_.find(Key{session_id, client_order_id}) != index_.end();
+  }
+
+  uint32_t resting_order_count() const { return resting_order_count_; }
+
+  // Distinct occupied price levels. Depth alone does not say whether a book is
+  // wide or tall, and the two stress completely different parts of an engine:
+  // levels stress the price index, orders-per-level stress the FIFO queue.
+  uint32_t level_count() const {
+    return static_cast<uint32_t>(bids_.size() + asks_.size());
+  }
+
  private:
   struct Resting {
     Order o;

@@ -14,9 +14,11 @@
 #include <deque>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "mebench/wire.h"
+#include "reference/reference.h"
 
 namespace mebench::generator {
 
@@ -65,10 +67,29 @@ struct ProfileParams {
   // TIF mix among New events, as percentages; the remainder is Day.
   uint32_t tif_ioc_pct, tif_fok_pct, tif_market_pct;
 
+  // How far out, in ticks, a "deep" placement can sit. This is what spreads
+  // depth across PRICE LEVELS rather than piling it into a handful of them.
+  //
+  // It used to be fixed at 50, which was fine at a few thousand resting orders
+  // and wrong at a few hundred thousand: the whole book lived in ~100 levels,
+  // every level held thousands of orders, and matching degenerated into walking
+  // enormous FIFO queues. That measures list traversal, not the price index —
+  // and a real book with this much size behind it is wide, not tall.
+  //
+  // Orders this far out never fill, because mid random-walks in a +/-50 band.
+  // That is realistic and, since the generator now tracks resting orders
+  // exactly, they stay cancellable rather than leaking depth forever.
+  uint32_t deep_ticks;
+
   // How many orders a session is content to have live before it cancels in
-  // preference to adding. This is the knob that sets book depth: a session
-  // that never pushes back adds faster than it cancels, and the book grows for
-  // the whole run.
+  // preference to adding. This is the knob that sets book depth.
+  //
+  // Since the generator started running its own reference book, this number
+  // means what it says: a session's live set holds only orders that are
+  // genuinely resting, so back-pressure binds on real depth and the book
+  // settles at roughly `n_sessions * live_target`. It used to bind on a list
+  // that was ~96% stale, which is why depth was a small and unpredictable
+  // fraction of that product.
   uint32_t live_target;
 };
 
@@ -97,9 +118,44 @@ struct InjectionRecord {
 
 const char* injection_name(InjectionKind k);
 
+// A session's genuinely-resting orders, in age order, with O(1) removal.
+//
+// Two requirements pull against each other. Removal is driven by the reference
+// book's output and names an arbitrary order, so it has to be O(1) — a session
+// holding a thousand live orders across a ten-million-event stream cannot
+// afford a linear erase. Selection is age-biased, because re-quoting cancels the
+// order you just placed, so the order of the list has to survive removal, which
+// rules out swap-remove.
+//
+// Tombstones satisfy both: removal blanks a slot, and compaction runs only once
+// the dead outnumber the living, so it is O(1) amortised. `slots` is the only
+// thing ever iterated; the map is lookup-only, so no iteration order of an
+// unordered container can leak into the stream.
+class LiveSet {
+ public:
+  void add(uint64_t coid);
+  void remove(uint64_t coid);
+
+  // A live client_order_id, biased toward recent ones, or 0 if empty.
+  uint64_t pick(Rng& rng, uint32_t recent_pct);
+
+  uint32_t size() const { return alive_; }
+  bool empty() const { return alive_ == 0; }
+
+ private:
+  void compact();
+
+  std::vector<uint64_t> slots_;  // age-ordered; 0 means a tombstone
+  std::unordered_map<uint64_t, uint32_t> pos_;
+  uint32_t alive_ = 0;
+};
+
 class Generator {
  public:
-  Generator(uint64_t seed, Profile profile);
+  // `live_target_override` replaces the profile's live_target when non-zero.
+  // Depth is now proportional to it, so the whole depth/latency sweep is this
+  // one integer rather than a family of near-duplicate profiles.
+  Generator(uint64_t seed, Profile profile, uint32_t live_target_override = 0);
 
   // Produces exactly `count` events. Injections are scheduled inside that
   // budget; they need roughly 250 events of room, so a stream under
@@ -109,6 +165,11 @@ class Generator {
   const std::vector<InjectionRecord>& injections() const { return injections_; }
   uint64_t seed() const { return seed_; }
   Profile profile() const { return profile_; }
+  uint32_t live_target() const { return live_target_; }
+
+  // Resting orders in the generator's own book at the end of generate().
+  uint32_t final_depth() const { return book_.resting_order_count(); }
+  uint32_t final_levels() const { return book_.level_count(); }
 
   static constexpr uint64_t kMinEventsForInjections = 5000;
 
@@ -139,7 +200,7 @@ class Generator {
     uint16_t participant_id;
     AgentKind kind;
     Rng rng;
-    std::vector<uint64_t> live;  // client_order_ids BELIEVED resting
+    LiveSet live;  // client_order_ids the reference book says are resting
     uint64_t next_coid = 1;
     int32_t stack_px = 0;  // LevelStacker's chosen level
     uint32_t weight = 1;
@@ -149,9 +210,14 @@ class Generator {
   void step_mid();
   uint32_t pick_session();
   WireEvent emit_from(Session& s);
-  WireEvent make_new(Session& s, Side side, int32_t px, uint32_t qty, TIF tif, bool likely_rests);
+  WireEvent make_new(Session& s, Side side, int32_t px, uint32_t qty, TIF tif);
   WireEvent make_cancel(uint16_t session_id, uint16_t firm, uint64_t coid);
   int32_t place_price(Session& s, Side side, bool& marketable);
+
+  // Feed one emitted event through the private book and fold the resulting
+  // output back into the live sets.
+  void apply(const WireEvent& e, uint64_t seq);
+  Session* session_for(uint16_t session_id);
 
   void schedule_injections(uint64_t count);
   void enqueue_injection(InjectionKind kind, uint64_t at_seq);
@@ -159,12 +225,19 @@ class Generator {
   uint64_t seed_;
   Profile profile_;
   const ProfileParams* pp_;
+  uint32_t live_target_;
   Rng rng_;  // sequencer + price walk only; sessions have their own streams
   int32_t mid_ = 10000;
   uint64_t seq_ = 0;
 
   std::vector<Session> sessions_;
   uint32_t total_weight_ = 0;
+
+  // The generator's own copy of the book. EVERY emitted event goes through it,
+  // injections included: the clearing sweeps consume thousands of organic
+  // resting orders, and a book that did not see them would hand back exactly
+  // the staleness this exists to remove.
+  reference::ReferenceEngine book_;
 
   std::deque<WireEvent> pending_;  // an in-flight injection script
   std::vector<std::pair<uint64_t, InjectionKind>> schedule_;

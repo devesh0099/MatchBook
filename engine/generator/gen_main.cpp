@@ -1,6 +1,6 @@
 // generator/gen_main.cpp — the `gen` binary.
 //
-//   gen --seed S --profile P --events N -o stream.bin [--validate]
+//   gen --seed S --profile P --events N -o stream.bin [--validate] [--live-target N]
 //
 // Participants get this binary, not 240MB of stream files: same seed, same
 // bytes, everywhere. Hidden streams are simply unpublished seeds.
@@ -29,7 +29,10 @@ void usage() {
                "  -o FILE        output path; omit with --validate to generate in memory\n"
                "  --validate     run the reference over the stream and check it is worth\n"
                "                 trusting (fill rate, bounded depth, every adversarial\n"
-               "                 injection present and having its intended effect)\n");
+               "                 injection present and having its intended effect)\n"
+               "  --live-target N  override the profile's per-session resting-order target.\n"
+               "                 Book depth is roughly sessions x this, so it is the single\n"
+               "                 knob for the depth/latency sweep\n");
 }
 
 bool parse_u64(const char* s, uint64_t& out) {
@@ -47,6 +50,7 @@ int main(int argc, char** argv) {
   uint64_t events = 1'000'000;
   std::string profile_name = "balanced";
   std::string out_path;
+  uint64_t live_target = 0;
   bool do_validate = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -60,6 +64,8 @@ int main(int argc, char** argv) {
       profile_name = argv[++i];
     } else if ((a == "-o" || a == "--out") && has_next) {
       out_path = argv[++i];
+    } else if (a == "--live-target" && has_next) {
+      if (!parse_u64(argv[++i], live_target)) return usage(), 2;
     } else if (a == "--validate") {
       do_validate = true;
     } else if (a == "-h" || a == "--help") {
@@ -83,7 +89,7 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  mebench::generator::Generator gen(seed, profile);
+  mebench::generator::Generator gen(seed, profile, static_cast<uint32_t>(live_target));
   const auto stream = gen.generate(events);
 
   if (!out_path.empty()) {
@@ -106,7 +112,8 @@ int main(int argc, char** argv) {
         events, mebench::generator::Generator::kMinEventsForInjections);
   }
 
-  const auto rep = mebench::generator::validate_stream(stream, gen.injections(), profile);
+  const auto rep =
+      mebench::generator::validate_stream(stream, gen.injections(), profile, gen.live_target());
 
   std::printf("\nstream: %" PRIu64 " events (%" PRIu64 " new, %" PRIu64 " cancel), profile=%s\n",
               rep.event_count, rep.new_count, rep.cancel_count,
@@ -117,7 +124,13 @@ int main(int argc, char** argv) {
               rep.expired_count);
   std::printf("        %" PRIu64 " unknown-order rejects, %" PRIu64 " FOK rejects\n",
               rep.reject_unknown_count, rep.reject_fok_count);
-  std::printf("fill:   %.1f%% of submitted quantity traded\n\n", rep.fill_rate * 100.0);
+  std::printf("fill:   %.1f%% of submitted quantity traded\n", rep.fill_rate * 100.0);
+  std::printf("cancel: %.1f%% of cancels found their order (%" PRIu64 " hit, %" PRIu64 " missed)\n",
+              rep.cancel_hit_rate * 100.0, rep.cancel_hit_count,
+              rep.cancel_count - rep.cancel_hit_count);
+  std::printf("depth:  %u resting orders across %u price levels (%.0f per level)\n\n",
+              gen.final_depth(), gen.final_levels(),
+              gen.final_levels() ? static_cast<double>(gen.final_depth()) / gen.final_levels() : 0.0);
 
   for (const auto& c : rep.checks) {
     const char* tag = c.skipped ? "SKIP" : (c.passed ? "PASS" : "FAIL");
