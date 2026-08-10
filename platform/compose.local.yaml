@@ -1,0 +1,50 @@
+# Local development overrides. NEVER used on the web node.
+#
+#   docker compose -f platform/compose.yaml -f platform/compose.local.yaml up -d
+#
+# Three differences from production, all of them because a laptop is not an
+# EC2 instance:
+#
+#   * Ports move off 80/443/5432, which a developer machine usually has taken.
+#   * Caddy serves plain HTTP, so there is no self-signed certificate warning.
+#   * MinIO stands in for S3. compose.yaml has no object store because on AWS
+#     the API talks to real S3 through an instance role; locally there has to be
+#     something for it to talk to.
+services:
+  caddy:
+    # ":80" is a site address with no hostname, so Caddy serves plain HTTP and
+    # does not issue a certificate for localhost or redirect to 443.
+    environment:
+      SITE_ADDRESS: ':80'
+    # `!override` is required: compose MERGES list-valued keys like `ports` by
+    # appending, so without it the container tries to bind the original port too.
+    ports: !override
+      - '8088:80'
+
+  postgres:
+    ports: !override
+      - '127.0.0.1:15432:5432'
+
+  minio:
+    image: quay.io/minio/minio
+    command: ['server', '/data', '--console-address', ':9001']
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: mebench
+      MINIO_ROOT_PASSWORD: mebench123
+    ports:
+      # Published so the host-side workers can reach it too.
+      - '127.0.0.1:19000:9000'
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 3s
+      retries: 20
+
+  api:
+    environment:
+      S3_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: mebench
+      AWS_SECRET_ACCESS_KEY: mebench123
+    depends_on:
+      minio:
+        condition: service_healthy
