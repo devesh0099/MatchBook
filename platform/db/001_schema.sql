@@ -127,4 +127,13 @@ SELECT DISTINCT ON (s.participant_id)
 FROM submissions s
 JOIN participants p ON p.id = s.participant_id
 WHERE s.state = 'done' AND s.p50_ns IS NOT NULL
-ORDER BY s.participant_id, s.created_at DESC;
+-- BEST per participant, not latest. This ordering is the whole rule: DISTINCT
+-- ON keeps the first row of each participant's group, so ordering by
+-- created_at DESC silently graded whatever they happened to submit last. A
+-- participant who tried an experiment at 4pm and made it worse would have been
+-- ranked on the experiment, and their best work discarded with nothing on the
+-- page explaining why the number went up.
+--
+-- Ties break on the EARLIER submission: if two runs measure the same, the one
+-- that got there first is the one that earned it.
+ORDER BY s.participant_id, s.p50_ns ASC, s.created_at ASC;
