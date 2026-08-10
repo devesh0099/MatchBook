@@ -325,7 +325,17 @@ Short, and none of it blocks the event.
   found by running `docker compose up` for the first time. Build it after any
   `cargo update`.
 
-## 8. Future — worth doing, out of scope for one event
+## 8. Open plans, for review
+
+- **[PLAN-ratio-scoring.md](PLAN-ratio-scoring.md)** — score
+  `submission_p50 / reference_p50`, measured in the same job on the same core,
+  instead of raw nanoseconds. Cancels machine contamination rather than trying
+  to detect it, which matters because a co-tenant evicting L3 is *invisible*
+  from inside the guest — it looks exactly like a slow submission. Costs 2×
+  bench time. **Only worth doing if the noise floor says shared tenancy is
+  marginal**; measure before building.
+
+## 9. Future — worth doing, out of scope for one event
 
 - **Deliberate cancel-miss tuning.** Cancels now hit 98%; the ~2% misses are
   ghost ids that never existed. A *recently dead* order would exercise the
@@ -341,7 +351,7 @@ Short, and none of it blocks the event.
   has no evidence to work from and would pass vacuously, so the bench node always
   recompiles — ~1 s against a 60 s job, so this is a nicety.
 
-## 9. Deliberately not built
+## 10. Deliberately not built
 
 Recorded in the runbook's Known Limitations so they are read in the morning
 rather than discovered at 5pm.
