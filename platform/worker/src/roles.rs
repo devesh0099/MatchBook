@@ -525,25 +525,49 @@ async fn reference_spot_check(db: &PgPool, cfg: &Config, _sandbox: &Sandbox) -> 
         return Ok(());
     };
 
-    // The morning baseline, recorded by the first spot check after the node
-    // comes up. Every later one is compared against it — a measurement that is
-    // never compared is just a log line.
-    let baseline: Option<(serde_json::Value,)> =
+    // The output digest for this fixed seed, which is what makes the baseline
+    // safe to compare against later.
+    //
+    // The baseline is a stored number, and the check assumes any change in the
+    // measurement means the MACHINE changed. That is only true while the
+    // workload is identical. Retuning the ranked profile changes what these
+    // five million events are, so the same command legitimately measures
+    // something else — and the node then condemns itself for a reason that has
+    // nothing to do with its health, permanently, because every later check
+    // compares against the same stale number. Observed: a profile change moved
+    // this from 280ns to 350ns and parked the queue at 25% "deviation".
+    //
+    // The digest is a fingerprint of the stream and the output it produces, so
+    // a profile change moves it and a slow machine does not. Different digest
+    // means re-baseline rather than alert.
+    let digest = v.get("digest").and_then(|x| x.as_str()).unwrap_or("").to_string();
+
+    let stored: Option<(serde_json::Value,)> =
         sqlx::query_as("SELECT value FROM settings WHERE key = 'bench_reference_baseline_ns'")
             .fetch_optional(db)
             .await?;
+    let stored = stored.map(|b| b.0);
 
-    let baseline = baseline.and_then(|b| b.0.as_f64());
-    let Some(base) = baseline else {
+    // Older rows hold a bare number; treat those as a workload we cannot vouch
+    // for and re-record.
+    let base = stored.as_ref().and_then(|v| {
+        let same_workload = v.get("digest").and_then(|d| d.as_str()) == Some(digest.as_str());
+        if same_workload { v.get("p50_ns").and_then(|x| x.as_f64()) } else { None }
+    });
+
+    let Some(base) = base else {
+        let record = serde_json::json!({ "p50_ns": p50, "digest": digest });
         sqlx::query(
             "INSERT INTO settings (key, value) VALUES ('bench_reference_baseline_ns', $1) \
              ON CONFLICT (key) DO UPDATE SET value = $1",
         )
-        .bind(serde_json::json!(p50))
+        .bind(&record)
         .execute(db)
         .await?;
-        tracing::info!("recorded reference baseline: {p50:.1} ns");
-        log_event(db, None, "reference_baseline_set", serde_json::json!({ "p50_ns": p50 })).await?;
+        let why = if stored.is_some() { "workload changed" } else { "first check on this node" };
+        tracing::info!("recorded reference baseline: {p50:.1} ns ({why})");
+        log_event(db, None, "reference_baseline_set",
+                  serde_json::json!({ "p50_ns": p50, "digest": digest, "reason": why })).await?;
         return Ok(());
     };
 
