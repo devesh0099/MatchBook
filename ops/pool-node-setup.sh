@@ -25,8 +25,18 @@ echo "==> toolchain"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq || echo "  (apt-get update reported errors; continuing)"
 apt-get install -y --no-install-recommends \
-  build-essential g++ cmake git pkg-config zip \
-  libcap-dev libseccomp-dev libsystemd-dev
+  build-essential g++ cmake git pkg-config zip curl ca-certificates \
+  libcap-dev libseccomp-dev libsystemd-dev libssl-dev
+
+# Rust, for the worker. Not in the apt line above because Ubuntu's packaged
+# toolchain is far older than what Cargo.lock resolves against — the API image
+# needed 1.96 — so this uses rustup and takes stable. Neither setup script did
+# this before, and both then failed at `cargo build` on a fresh AMI.
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "==> rust toolchain (rustup)"
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+fi
+export PATH="$HOME/.cargo/bin:$PATH"
 
 # The pinned compiler. Record it: the benchmark node asserts the same string,
 # and a silent divergence here is the kind of thing nobody notices until the
