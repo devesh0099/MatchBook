@@ -11,3 +11,12 @@ streams/
 .DS_Store
 target/
 dist/
+
+# Local-only, deliberately untracked.
+#
+# .vscode is personal editor config that was pushed by accident once. AWS.md and
+# FRONTEND-BRIEF.md are working documents kept on disk but out of the repo; they
+# were purged from history rather than just deleted, so nothing re-adds them.
+.vscode/
+AWS.md
+FRONTEND-BRIEF.md
