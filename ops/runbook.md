@@ -88,6 +88,9 @@ listener is not reachable from the network:
 
 ```sh
 ssh -N -L 8081:127.0.0.1:8081 web-node    # then curl localhost:8081/admin/...
+# No SSH? Same tunnel over SSM — see AWS.md 3d:
+#   aws ssm start-session --target <id> --document-name AWS-StartPortForwardingSession \
+#     --parameters '{"portNumber":["8081"],"localPortNumber":["8081"]}'
 ```
 
 ---
