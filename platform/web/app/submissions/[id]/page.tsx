@@ -207,8 +207,8 @@ export default function SubmissionPage() {
         <Callout tone="idle" title="Correct — but not queued for the benchmark">
           <p style={{ margin: 0, maxWidth: '66ch' }}>{d.bench_held}</p>
           <p style={{ margin: '10px 0 0', maxWidth: '66ch', color: 'var(--app-ink-2)' }}>
-            Your code passed. This is a queue rule, not a result: the benchmark node runs one job at
-            a time, and one per participant per 15 minutes.
+            Your code passed. This is a queue rule, not a result: the benchmark node runs one job
+            at a time, and you can only have one of yours waiting for it.
           </p>
         </Callout>
       )}
@@ -761,11 +761,24 @@ function CategoryGrid({ progress }: { progress: { area: string; exercised: numbe
           border: '1px solid var(--app-line)',
         }}
       >
-        {progress.map((p) => {
+        {progress.map((p, i) => {
           const tone = p.failed ? 'fail' : p.exercised > 0 ? 'pass' : 'idle';
           const glyph = p.failed ? '✕' : p.exercised > 0 ? '✓' : '—';
+          // The harness reports however many areas it reports — seven today. A
+          // fixed three-column grid leaves the last row short, and the gap
+          // colour then shows through as an empty grey tile. Stretch the final
+          // item across whatever is left instead.
+          const remainder = progress.length % 3;
+          const spanLast = i === progress.length - 1 && remainder !== 0 ? 4 - remainder : 1;
           return (
-            <div key={p.area} style={{ background: TONE_BG[tone], padding: '12px 14px' }}>
+            <div
+              key={p.area}
+              style={{
+                background: TONE_BG[tone],
+                padding: '12px 14px',
+                gridColumn: spanLast > 1 ? `span ${spanLast}` : undefined,
+              }}
+            >
               <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
                 <span className="mono" style={{ fontWeight: 700, fontSize: 15, color: TONE_INK[tone] }}>
                   {glyph}

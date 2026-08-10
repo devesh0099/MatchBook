@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Screenshot every view in both themes, so the design can be checked by eye.
 
-Local development only. Needs `npm run start` on :3000 and the API behind it.
+Local development only.
 
-    python3 design/shots.py [outdir]
+    python3 design/shots.py [outdir]              # npm run start on :3000
+    BASE=https://localhost:8443 python3 design/shots.py [outdir]   # compose
+
+Certificate errors are ignored: Caddy issues its own for `localhost`, so a
+compose dry run is always self-signed.
 """
-import sys, pathlib
+import os, sys, pathlib
 from playwright.sync_api import sync_playwright
 
-BASE = "http://localhost:3000"
+BASE = os.environ.get("BASE", "http://localhost:3000")
 OUT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/shots")
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -36,7 +40,9 @@ with sync_playwright() as pw:
     browser = pw.chromium.launch(executable_path="/usr/bin/google-chrome")
     try:
         for theme in ("light", "dark"):
-            ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+            ctx = browser.new_context(
+                viewport={"width": 1440, "height": 900}, ignore_https_errors=True
+            )
             ctx.add_init_script(
                 f"localStorage.setItem('mebench.participant', '{IDENTITY}');"
                 f"localStorage.setItem('mebench.theme', '{theme}');"
