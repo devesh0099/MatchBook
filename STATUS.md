@@ -1,13 +1,13 @@
 # Status
 
-Matching Engine Challenge platform. 33 commits, ~13,900 lines across C++20, Rust,
+Matching Engine Challenge platform. 38 commits, ~13,900 lines across C++20, Rust,
 TypeScript and SQL, plus 2,190 lines of vendored HdrHistogram and ~2,500 lines of
 prose (spec, runbook, subsystem docs).
 
-**All twelve build-order items from the implementation spec are complete, and the
-benchmark now measures what it was meant to.** What remains is calibration that
-needs the real bench node (§6), work that does not (§7), and things deliberately
-not built (§8).
+**Every build-order item is complete, the benchmark measures what it was meant
+to, and a submission has been driven through the whole platform on the real
+path.** What remains is provisioning and calibration on AWS — [AWS.md](AWS.md)
+is the guide for it — plus the short list in §7 that needs no hardware.
 
 ---
 
@@ -220,22 +220,33 @@ advisories with no fix inside the 14.x line. This deviates from the impl spec's
 | Rust workspace | 0 errors, 0 warnings |
 | Frontend | typecheck clean, builds, image serves |
 | Fresh `git clone` → build | ✅ |
+| `docker compose up` as a stack | ✅ all five services |
+| A submission through the whole platform | ✅ `received` → `done` |
 
-**End-to-end, on real infrastructure** (Postgres 16, MinIO, Redis, isolate 2.6):
+**The whole platform, on the real path.** One submission — the reference engine
+pasted in as `engine.cpp` — POSTed through Caddy, compiled and verified by a
+pool worker in an isolate box, measured by a bench worker, read back through the
+API:
 
 ```
-submitted #6
-  t+5s   received
-  t+10s  benchmarking
-  t+25s  done      p50 40.1 ns · probe 20 ns · 9 runs · 0 discards
+received → compiling → verifying → verify_passed
+        → pending_benchmark → bench_queued → benchmarking → done
+
+p50 320.4 ns · p99 1542.8 ns · probe 10.0 ns (3.1%)
+9 runs · 0 discards · 6,108,800 timed events
+116 percentile points · 61 timeline windows, both rendering
 ```
 
-(that run predates the depth change; a ranked job now looks like §5 below.)
+The number is meaningless — one unpinned laptop running Postgres, MinIO, Caddy,
+Next and both workers at once — but every stage moved and every field arrived.
+
+Two behaviours confirmed rather than asserted. The pool worker enqueued eight
+seconds before the bench worker registered, so the job **parked at
+`pending_benchmark` instead of erroring**, and the janitor unparked it by itself
+once the node appeared. Neither was staged; it happened because of the timing.
 
 Submit lane, Run lane (`2/41` for the skeleton) and the rejudge block have all
-been driven end to end. With no bench worker running, a submission held at
-`pending_benchmark` and resumed by itself when one appeared — the failure
-isolation working without being prompted.
+been driven end to end.
 
 **Security properties confirmed rather than assumed:** the stream path does not
 resolve inside the box, the box runs as a subordinate uid, no seed appears in
@@ -282,37 +293,24 @@ A full ranked job on this box, at the shipped 300k-order profile:
 
 ---
 
-## 6. Remaining — needs the bench node
+## 6. Remaining — on AWS
 
-None of this can be finished on a laptop. All of it is a morning's work once the
-hardware exists.
+Everything left is provisioning and calibration on real hardware. The
+step-by-step is **[AWS.md](AWS.md)**; this is the summary and the reasoning.
 
 | | What | Why it blocks |
 |---|---|---|
 | **1** | **Noise floor + soak.** `ops/noise-floor/{measure,soak,analyze}.py` exist and were validated against synthetic tight and noisy machines. | Settles plan §16 q1 (drift correction) and q2 (metal vs dedicated). Run it **before** provisioning for real — the `isolcpus`/`nohz_full` boot parameters only apply if metal is what the numbers call for. |
-| **2** | **Confirm or move the 300k depth.** Re-run the sweep in `PLAN-book-depth.md` §7. | 300k is calibrated to *this* box's 16 MB L3. Note the ceiling: the price band is **99.1% saturated**, so more depth goes vertical, and widening it means moving the injection band at price 20,000 first. |
-| **3** | **Measure the TSC granularity.** This box steps in 38 ticks — exactly 10 ns. | If the bench node does the same, ranked p50 is a *count of quanta*, and that **settles the ranking-presentation question on physics rather than preference**. Do not decide bands-vs-ranks-vs-ties before this. |
-| **4** | **Band calibration**, if bands survive (3). Thresholds live in the `settings` table — a SQL statement, not a deploy. | The shipped defaults are invented numbers and mean nothing until measured against the reference on the actual node. |
-| **5** | **`bench-hygiene.sh` must exit 0.** | The setup script refuses to mark the node healthy otherwise. Do not override it. Note `swap off` is now **load-bearing**, not tidiness: isolate forces `RLIMIT_MEMLOCK` to 0, so `mlockall` always fails in a ranked run and unreclaimable anonymous memory is the whole guarantee. |
+| **2** | **Measure the TSC granularity.** This box steps in 38 ticks — exactly 10 ns. | If the bench node does the same, ranked p50 is a *count of quanta*, and that **settles the ranking-presentation question on physics rather than preference**. Do not decide bands-vs-ranks-vs-ties before this. |
+| **3** | **Confirm or move the 300k depth.** Re-run the sweep in `PLAN-book-depth.md` §7. | 300k is calibrated to *this* box's 16 MB L3. Note the ceiling: the price band is **99.1% saturated**, so more depth goes vertical, and widening it means moving the injection band at price 20,000 first. |
+| **4** | **Band calibration**, if bands survive (2). Thresholds live in the `settings` table — a SQL statement, not a deploy. | The shipped defaults are invented numbers and mean nothing until measured against the reference on the actual node. |
+| **5** | **`bench-hygiene.sh` must exit 0.** | The setup script refuses to mark the node healthy otherwise. Do not override it. `swap off` is **load-bearing**, not tidiness: isolate forces `RLIMIT_MEMLOCK` to 0, so `mlockall` always fails in a ranked run and unreclaimable anonymous memory is the whole guarantee. |
+| **6** | **S3 bucket and an instance role for the web node.** | Nothing in the platform creates either. Without them every `/run` and `/submit` returns an opaque `internal error` — the API stores source in S3 before it does anything else. This is the one provisioning step with no error message pointing at it. |
 
 ## 7. Remaining — does not need hardware
 
-Ordered by what would hurt most on the day.
+Short, and none of it blocks the event.
 
-- **The frontend needs a rebuild.** It is functional and ugly: four views, no
-  visual system, charts bolted on. Brief written for a design pass in
-  [FRONTEND-BRIEF.md](FRONTEND-BRIEF.md). This is the largest remaining piece of
-  work and the only one participants see.
-- **`docker compose up` has never been run as a stack.** Every image builds and
-  runs individually, verified against real Postgres, MinIO, Redis and isolate —
-  but the composed stack is untested. Worth a dry run on the real web node, not
-  at 9am.
-- **One submission through the full platform since the depth change.** The
-  harness and sandbox paths are re-verified; the DB-mediated flow is not. Needs
-  a running stack, so it pairs with the item above.
-- **Handle claim collision.** Two people can both pick `ada` and silently share a
-  draft, history and benchmark slot. ~30 lines to make it loud rather than silent.
-  Offered, never approved.
 - **`market_order_never_rests` is a weak test.** It asserts only that the book is
   empty afterwards, so it would also pass an engine that does nothing. M2/M3 are
   properly covered by three other tests — but it means the `2/41` the skeleton
@@ -321,6 +319,11 @@ Ordered by what would hurt most on the day.
   published with the spec at kickoff. It embeds prebuilt `gen` and `bench`, so it
   must be rebuilt after any engine change or "same seed, same bytes" breaks
   between a laptop and the server.
+- **The Rust image pin will rot again.** `platform/api/Dockerfile` has to be at
+  least as new as the toolchain `Cargo.lock` was resolved with, and nothing in CI
+  builds that image — it silently stopped building once already and was only
+  found by running `docker compose up` for the first time. Build it after any
+  `cargo update`.
 
 ## 8. Future — worth doing, out of scope for one event
 

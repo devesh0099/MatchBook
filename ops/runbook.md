@@ -11,6 +11,10 @@ one at a time, never scaled).
 
 ## Before the day
 
+Provisioning and calibration are in **[../AWS.md](../AWS.md)**, which is the
+before-the-day document. This section is the short form; that one has the
+reasoning and the ordering constraints.
+
 ### Decide the hardware — this is a measurement, not an opinion
 
 ```sh
@@ -186,7 +190,8 @@ worse if discovered at 5:00 PM.
 
 - **The compose stack has not been brought up as a stack.** Each image builds
   and runs, and the pieces have been exercised together as bare binaries, but
-  `docker compose up` on one host is untested. Do it once before the day.
+  `docker compose up` has been run as a stack and works, but only on one host —
+  the three-node deployment has not been rehearsed. See AWS.md §5.
 - **The bench node always recompiles**, rather than reusing the pool's cached
   binary. Nothing embeds a build fingerprint into a submission `.so`, so the
   match check had no evidence to work from; recompiling costs about a second
