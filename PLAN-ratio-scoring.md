@@ -118,20 +118,20 @@ That pushes the naive engine out of cache **sooner**, which helps discrimination
 
 The implication is not a different depth, it is a **safer** one: pick a depth
 comfortably past the crossover rather than near it, so the measured gap does not
-depend on how much cache a stranger happens to be using. The §9 sizing already
-does that — naive at ~2× L3, optimized at ~0.7× — and it is another argument for
-that margin rather than the tightest depth that technically works.
+depend on how much cache a stranger happens to be using. The shipped sizing does
+that — naive at ~1.9× L3, optimized at ~0.7× — and shared tenancy is another
+argument for that margin rather than the tightest depth that technically works.
 
-What *does* change depth is the hardware. 300k was chosen against 16 MB. An Ice
-Lake Xeon is roughly 54 MB, which puts the window at **400k–1M orders** and the
-sensible middle near **750k** — about 2.5× the current setting, and close to
-where the price band runs out of room (`deep_ticks` ~7,500 against a hard ceiling
-near 9,900, where it collides with the injection prices at 20,000).
+What *does* change depth is the hardware. The profile now ships at **750k**,
+sized for a ~54 MB Ice Lake L3, where the window runs from about 400k to 1M. On
+the 16 MB laptop it was tuned on, 300k was the better number — and 750k measures
+*worse* there (3.50× against 4.86×), because both engines leave a 16 MB cache.
+Re-run the sweep on the real node and take the widest ratio.
 
 ## 7. Sequence
 
-1. **Measure first.** The noise floor (`AWS.md` §2) says how bad shared tenancy
-   actually is on the instance we get. If the spread is inside the plan's bar,
+1. **Measure first.** The noise floor (`ops/noise-floor/`) says how bad shared
+   tenancy actually is on the instance we get. If the spread is inside the plan's bar,
    none of this is needed.
 2. If it is not: implement §4 behind a setting, so a single ranked run reports
    both the raw p50 and the ratio.

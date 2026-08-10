@@ -6,8 +6,8 @@ prose (spec, runbook, subsystem docs).
 
 **Every build-order item is complete, the benchmark measures what it was meant
 to, and a submission has been driven through the whole platform on the real
-path.** What remains is provisioning and calibration on AWS — [AWS.md](AWS.md)
-is the guide for it — plus the short list in §7 that needs no hardware.
+path.** What remains is provisioning and calibration on the real bench node
+(§6), plus the short list in §7 that needs no hardware.
 
 ---
 
@@ -295,8 +295,7 @@ A full ranked job on this box, at the shipped 300k-order profile:
 
 ## 6. Remaining — on AWS
 
-Everything left is provisioning and calibration on real hardware. The
-step-by-step is **[AWS.md](AWS.md)**; this is the summary and the reasoning.
+Everything left is provisioning and calibration on real hardware.
 
 | | What | Why it blocks |
 |---|---|---|

@@ -11,10 +11,6 @@ one at a time, never scaled).
 
 ## Before the day
 
-Provisioning and calibration are in **[../AWS.md](../AWS.md)**, which is the
-before-the-day document. This section is the short form; that one has the
-reasoning and the ordering constraints.
-
 ### Decide the hardware — this is a measurement, not an opinion
 
 ```sh
@@ -88,7 +84,7 @@ listener is not reachable from the network:
 
 ```sh
 ssh -N -L 8081:127.0.0.1:8081 web-node    # then curl localhost:8081/admin/...
-# No SSH? Same tunnel over SSM — see AWS.md 3d:
+# No SSH available? The same port forward over SSM:
 #   aws ssm start-session --target <id> --document-name AWS-StartPortForwardingSession \
 #     --parameters '{"portNumber":["8081"],"localPortNumber":["8081"]}'
 ```
@@ -194,7 +190,7 @@ worse if discovered at 5:00 PM.
 - **The compose stack has not been brought up as a stack.** Each image builds
   and runs, and the pieces have been exercised together as bare binaries, but
   `docker compose up` has been run as a stack and works, but only on one host —
-  the three-node deployment has not been rehearsed. See AWS.md §5.
+  the three-node deployment has not been rehearsed.
 - **The bench node always recompiles**, rather than reusing the pool's cached
   binary. Nothing embeds a build fingerprint into a submission `.so`, so the
   match check had no evidence to work from; recompiling costs about a second

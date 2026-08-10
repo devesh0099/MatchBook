@@ -392,7 +392,7 @@ Only the timed loop counts. Loading, decoding, page-touching, and warm-up all ha
 before it. Verification and flushing happen after.
 
 Warm-up is sized from the stream's own profile: the ranked profile builds a book of
-roughly **300,000 resting orders across ~5,900 price levels**, and it takes about 3.9M
+roughly **750,000 resting orders across ~14,800 price levels**, and it takes about 9.7M
 events to get there. Those events run through your engine — the digest covers them —
 but they are not measured, so every ranked sample is taken against a book at full
 depth. That book is far larger than any L3, which is the point: a layout that keeps
@@ -452,14 +452,14 @@ pointless to go faster by doing less work.
 
 Two nested distributions:
 
-- **Within one run:** ~10M per-event latencies → HdrHistogram → **p50 is ranked**; p99 and
-  p99.9 are reported but unranked.
-- **Across runs:** the run is repeated 7–10 times → **score = median of the per-run p50s**.
+- **Within one run:** ~10.3M per-event latencies → HdrHistogram → **p50 is ranked**; p99
+  and p99.9 are reported but unranked.
+- **Across runs:** the run is repeated 9 times → **score = median of the per-run p50s**.
 
 Per-event latencies are never averaged across runs; that would destroy the tail.
 
 Ranking is on **p50, not p99**: sporadic hypervisor or thermal interference contaminates
-tails but barely moves a median over 10M events. Mean is not used — a single 50 µs page
+tails but barely moves a median over ten million events. Mean is not used — a single 50 µs page
 fault vanishes into it.
 
 ### 5.4 Presentation and ties
@@ -521,7 +521,7 @@ requeue loop.
 |---|---|---|---|
 | **Run** (visible tests) | ~100k events | seconds | unlimited |
 | **Submit** → correctness | 100k–500k events, fresh seed | seconds | unlimited |
-| **Submit** → benchmark | 10M events, `cancel_heavy` (3.9M warm-up, 6.1M timed) | ~60 s | unlimited; at most 1 of yours queued at a time |
+| **Submit** → benchmark | 20M events, `cancel_heavy` (9.7M warm-up, 10.3M timed) | ~2 min | unlimited; at most 1 of yours queued at a time |
 
 Rate limiting is checked **at enqueue**: correctness is always accepted, and the submit
 response tells you immediately whether the benchmark will auto-queue and how long the
@@ -534,22 +534,7 @@ is what iteration needs.
 
 ---
 
-## 7. Timeline
-
-| Time | Phase |
-|---|---|
-| 0:00 | Kickoff, spec walkthrough (30 min, mandatory) |
-| 0:30 | Coding opens, correctness lane live |
-| 1:30 | Benchmark lane opens |
-| 5:15 | Leaderboard freezes |
-| 6:00 | Submissions close, final rejudge, reveal |
-
-The benchmark lane opens an hour after coding does. Get it correct first; the leaderboard
-is not accepting anything that has not passed the gate anyway.
-
----
-
-## 8. A note on the environment
+## 7. A note on the environment
 
 The benchmark node is tuned to be unrealistically quiet: isolated cores, no scheduler
 tick, fixed frequency, no turbo, one job at a time. This is so the measurement is of
