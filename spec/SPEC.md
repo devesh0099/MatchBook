@@ -1,38 +1,153 @@
 # Matching Engine Challenge — Specification
 
-Version 1.0. This document is normative. Where the reference implementation and this
-document disagree, this document wins and the reference is a bug.
+Version 1.1. Normative. Where the reference implementation and this document
+disagree, this document wins and the reference is a bug.
 
-You implement `create_engine()` in a single translation unit, `engine.cpp`. Your engine
-receives decoded order events and emits output events into a sink. You are graded in two
-stages: a **correctness gate** (binary — pass or fail) and, once passed, a **latency
-benchmark** (ranked on p50 per-order latency).
+You implement `create_engine()` in one translation unit, `engine.cpp`. Your engine
+receives decoded order events and emits output events into a sink. Grading is two
+stages: a **correctness gate** (pass or fail) and, once passed, a **latency benchmark**
+ranked on p50 per-event latency.
+
+Three definitions the rules depend on:
+
+| Term | Meaning |
+|---|---|
+| **Cancel** | The only removal operation. Always removes the entire remaining quantity. There is no partial cancel and no cancel-replace. If you know the ITCH *Order Delete* / *Order Cancel* distinction, it does not exist here. |
+| **Order identity** | The pair `(session_id, client_order_id)`. `client_order_id` is unique only within a session, and the stream deliberately reuses the same value across sessions concurrently. A map keyed on `client_order_id` alone will cancel the wrong order. |
+| **Firm vs session** | `participant_id` is the firm; `session_id` is the connection. One firm may hold several sessions. Self-trade prevention keys on `participant_id`. Order identity keys on `session_id`. Neither substitutes for the other. |
 
 ---
 
-## 1. Terminology
+## 1. Matching rules
 
-**Cancel, never delete.** This specification uses *cancel* for removing a resting order
-from the book, matching `EvType::Cancel` and `OutType::CancelAck`. If you have read
-Nasdaq ITCH or similar exchange documentation, you may know a distinction between *Order
-Delete* (full removal) and *Order Cancel* (partial quantity reduction). **That
-distinction does not exist here.** There is one removal operation and it is called
-cancel. It always removes the entire remaining quantity.
+### 1.1 Core
 
-**Cancel identity is a pair, not an id.**
+- **Trade price is the resting order's price. Always.** Not the aggressor's, not a
+  midpoint.
+- **Priority is strict price-time FIFO.** Best price first; within a price level, lowest
+  `seq` first. "Time" means arrival sequence, not a clock — there is no timestamp
+  anywhere in this contest.
+- **Emission order is book-walk order:** one `Trade` per maker consumed, in the order the
+  makers are consumed.
+- A marketable limit order matches as far as its limit allows, then **rests its remainder
+  silently** — the `Ack` already covered acceptance.
+- A non-marketable limit order rests entirely and emits only its `Ack`.
 
-> Cancel removes a resting order identified by the `(session_id, client_order_id)` pair.
-> Client order IDs are unique only within a session; two sessions may use the same value
-> concurrently.
+### 1.2 Acknowledgement — ack on receipt (A1–A4)
 
-This matters. An `unordered_map<uint64_t, Order*>` keyed on `client_order_id` alone will
-appear to work and then cancel the wrong order. The stream deliberately contains
-concurrent duplicate `client_order_id` values across sessions.
+`Ack` means exactly one thing everywhere in this specification: **the order was
+accepted.** This matches FIX-style venue behaviour (`ExecType=New` before any fills).
 
-**Firm vs session.** `participant_id` identifies the *firm*. `session_id` identifies the
-*connection*. One firm may have several sessions. Self-trade prevention keys on
-`participant_id`; cancel identity keys on `session_id`. They are different fields with
-different jobs, and neither substitutes for the other.
+1. **A1.** Every accepted `New` emits exactly one `Ack`, **before any other output for
+   that event** — limit, IOC, FOK (accepted path), and market alike.
+2. **A2.** After the `Ack`: trades in match order, interleaved STP `CancelAck`s per S5,
+   then one `Expired` for any IOC or market remainder.
+3. **A3.** A rejected order emits **only** the `Reject` — never an `Ack`. Ack means
+   accepted; rejection is the opposite of acceptance. Concretely: an unfillable FOK emits
+   exactly one `Reject`/`FokUnfillable` and nothing else.
+4. **A4.** Canonical sequences:
+
+   | Input | Output sequence |
+   |---|---|
+   | Non-marketable limit | `Ack` |
+   | Marketable limit, fully filled | `Ack, Trade…` |
+   | Marketable limit, partial (remainder rests) | `Ack, Trade…` |
+   | IOC, some liquidity | `Ack, Trade…, Expired` |
+   | IOC, nothing matched | `Ack, Expired` |
+   | Market | same shapes as IOC |
+   | FOK, fillable | `Ack, Trade…` |
+   | FOK, unfillable | `Reject` (reason `FokUnfillable`) |
+   | Cancel of a live order | `CancelAck` |
+   | Cancel of an unknown or already-filled order | `Reject` (reason `UnknownOrder`) |
+
+### 1.3 Market orders (M1–M5)
+
+1. **M1.** A market order is `px = 0`, `TIF::Market`, and is **never rested**. There are
+   no `INT32_MIN`/`INT32_MAX` price sentinels; do not invent any, they invite overflow
+   bugs in comparison code.
+2. **M2.** It matches against the opposite side at **each level's resting price**, best
+   price first, price-time order within a level, until its quantity is exhausted or the
+   opposite side is empty.
+3. **M3.** Any unfilled remainder emits exactly one `Expired` carrying the remaining
+   quantity — including the fully-unfilled case: a market order into an empty opposite
+   side emits `Ack, Expired` and nothing else.
+4. **M4.** A market order acks on receipt like every order (A1). It never rests and never
+   emits `Reject` for lack of liquidity — an empty opposite side yields `Ack, Expired`.
+5. **M5.** Net effect: market ≡ IOC at unlimited price. The event sequences are identical
+   in shape.
+
+### 1.4 Cancel
+
+- **Cancel of a live order** removes it entirely and emits `CancelAck` carrying its
+  **remaining** quantity. For a partially filled order that is the *remainder*, not the
+  original quantity. This is the only case where a cancel carries a meaningful quantity.
+- **Cancel of an unknown or already-filled order** emits `Reject` with `UnknownOrder`.
+  Not silent, not fatal. Distinguishing "never existed" from "already filled" would need a
+  graveyard of every order ever seen; this specification does not require one.
+- Cancel of an order that was removed by self-trade prevention behaves the same way: it is
+  no longer live, so `Reject`/`UnknownOrder`.
+
+### 1.5 Self-trade prevention — cancel resting (S1–S5)
+
+1. **S1.** Self-trade is detected on `participant_id` equality between the aggressor and
+   the resting order. `session_id` is irrelevant to STP: a firm crossing itself across two
+   different sessions is still a self-trade.
+2. **S2.** When the aggressor reaches a resting order with the same `participant_id`: the
+   resting order is removed from the book, a `CancelAck` is emitted carrying the resting
+   order's **remaining** quantity, and the aggressor **continues matching** at the same
+   level and beyond with its quantity unchanged. No trade occurs between the pair.
+3. **S3.** STP never rejects the aggressor and never reduces the aggressor's quantity.
+4. **S4.** No rule emits a self-trade rejection; there is no such `RejectReason`.
+5. **S5.** Emission ordering is book-walk order. If the walk is `Trade(B), CancelAck(own),
+   Trade(C)`, that is the exact output order — the STP `CancelAck` appears interleaved at
+   the position where the resting order was encountered.
+
+On an STP `CancelAck`, `maker` is the removed resting order and `taker` is the aggressor
+that triggered it; `in_seq` is the aggressor's `seq`.
+
+### 1.6 Fill-or-kill (F1–F4)
+
+FOK requires checking fillability **before mutating anything**: a greedy implementation
+that matches and then finds it cannot finish has no way to undo.
+
+1. **F1.** Fillability is computed by a **read-only walk of the opposite side before any
+   mutation**: sum the remaining quantity of resting orders whose `participant_id`
+   **differs** from the aggressor's, best price first, bounded by the FOK order's limit
+   price.
+2. **F2.** If that sum < the FOK order's quantity: emit exactly one `Reject` with
+   `FokUnfillable`. The book is untouched — no trades, no STP cancellations, no partial
+   effects of any kind, and no `Ack`.
+3. **F3.** If that sum ≥ the FOK order's quantity: commit. Same-firm resting orders
+   encountered during the commit are handled by S1–S5 (removed with `CancelAck`, no
+   trade). Because they were excluded from the fillability count, STP cancellations can
+   never cause a shortfall — "check then commit" stays atomic without a rollback path.
+4. **F4.** A FOK order never emits `Expired` and never partially fills. Its only outcomes
+   are: accepted and fully filled (`Ack, Trade…`, possibly with interleaved STP
+   `CancelAck`s per S5), or a single `Reject`/`FokUnfillable` with no `Ack`.
+
+**Worked example for F1.** Firm A sends FOK buy 100 @ 10000. The ask side holds 60 from
+firm B and 50 from firm A, both at 10000.
+
+- Counting all 110 available → commit → STP cancels A's own 50 mid-match → only 60 fills.
+  A partially filled FOK. This violates FOK's entire promise.
+- Excluding same-firm liquidity → 60 available < 100 → clean `Reject`/`FokUnfillable`,
+  book untouched, A's resting 50 still there.
+
+The second is correct.
+
+**F1 is a specification invention, not industry practice.** Real venues offer several STP
+variants under which this corner never arises, so exchange experience will not tell you
+this rule. It is what cancel-resting STP plus FOK atomicity force; the alternatives are
+partial FOK fills or rollback machinery. The hidden stream contains an injected case that
+separates F1 from the naive count.
+
+### 1.7 IOC × STP (I1)
+
+1. **I1.** IOC matches under S1–S5 like any aggressor; whatever remains after the walk —
+   **including** quantity that met only same-firm liquidity, now cancelled — emits one
+   `Expired`.
+
+---
 
 ---
 
@@ -68,12 +183,11 @@ struct Order {                       // 32 bytes, naturally aligned
 static_assert(sizeof(Order) == 32 && alignof(Order) == 8);
 ```
 
-`seq` is the global arrival sequence number. **Time priority is defined on `seq`, not on
-any clock.** There is no timestamp anywhere in this contest.
+`seq` is the global arrival sequence number and the basis of time priority (§1.1).
 
-Prices are `int32_t` **integer ticks**. There are no floating-point prices. Do not
-introduce any; `double` arithmetic with FMA contraction produces build-dependent results
-and would make your submission's correctness depend on the compiler's mood.
+Prices are `int32_t` **integer ticks**. There are no floating-point prices; `double`
+arithmetic with FMA contraction is build-dependent, which would make correctness depend
+on the compiler.
 
 ### 2.2 Enumerations
 
@@ -94,8 +208,8 @@ enum class RejectReason : uint8_t {
 There is **no `Modify`** event. There is no cancel-replace. Do not implement one.
 
 `RejectReason` has exactly three values and every one is reachable by a rule below. There
-is no `SelfTrade` reason (STP never rejects — see S4), no `DuplicateId` and no
-`InvalidQty` (the generator cannot produce those inputs — see §2.5).
+is no `SelfTrade` reason (STP never rejects — S4), no `DuplicateId` and no
+`InvalidQty` (the generator cannot produce those inputs — §2.5).
 
 ### 2.3 Output events
 
@@ -201,140 +315,9 @@ and cancels for orders that never existed.
 
 ---
 
-## 3. Matching rules
-
-### 3.1 Core
-
-- **Trade price is the resting order's price. Always.** Not the aggressor's, not a
-  midpoint. This is the single most common first-submission failure.
-- **Priority is strict price-time FIFO.** Best price first; within a price level, lowest
-  `seq` first. "Time" means arrival sequence, not a timestamp.
-- **Emission order is book-walk order:** one `Trade` per maker consumed, in the order the
-  makers are consumed.
-- A marketable limit order matches as far as its limit price allows, then **rests its
-  remainder silently** (no extra output — the `Ack` already covered acceptance).
-- A non-marketable limit order rests entirely and emits only its `Ack`.
-
-### 3.2 Acknowledgement — ack on receipt (A1–A4)
-
-`Ack` means exactly one thing everywhere in this specification: **the order was
-accepted.** This matches FIX-style venue behaviour (`ExecType=New` before any fills).
-
-1. **A1.** Every accepted `New` emits exactly one `Ack`, **before any other output for
-   that event** — limit, IOC, FOK (accepted path), and market alike.
-2. **A2.** After the `Ack`: trades in match order, interleaved STP `CancelAck`s per S5,
-   then one `Expired` for any IOC or market remainder.
-3. **A3.** A rejected order emits **only** the `Reject` — never an `Ack`. Ack means
-   accepted; rejection is the opposite of acceptance. Concretely: an unfillable FOK emits
-   exactly one `Reject`/`FokUnfillable` and nothing else.
-4. **A4.** Canonical sequences:
-
-   | Input | Output sequence |
-   |---|---|
-   | Non-marketable limit | `Ack` |
-   | Marketable limit, fully filled | `Ack, Trade…` |
-   | Marketable limit, partial (remainder rests) | `Ack, Trade…` |
-   | IOC, some liquidity | `Ack, Trade…, Expired` |
-   | IOC, nothing matched | `Ack, Expired` |
-   | Market | same shapes as IOC |
-   | FOK, fillable | `Ack, Trade…` |
-   | FOK, unfillable | `Reject` (reason `FokUnfillable`) |
-   | Cancel of a live order | `CancelAck` |
-   | Cancel of an unknown or already-filled order | `Reject` (reason `UnknownOrder`) |
-
-### 3.3 Market orders (M1–M5)
-
-1. **M1.** A market order is `px = 0`, `TIF::Market`, and is **never rested**. There are
-   no `INT32_MIN`/`INT32_MAX` price sentinels; do not invent any, they invite overflow
-   bugs in comparison code.
-2. **M2.** It matches against the opposite side at **each level's resting price**, best
-   price first, price-time order within a level, until its quantity is exhausted or the
-   opposite side is empty.
-3. **M3.** Any unfilled remainder emits exactly one `Expired` carrying the remaining
-   quantity — including the fully-unfilled case: a market order into an empty opposite
-   side emits `Ack, Expired` and nothing else.
-4. **M4.** A market order acks on receipt like every order (A1). It never rests and never
-   emits `Reject` for lack of liquidity — an empty opposite side yields `Ack, Expired`.
-5. **M5.** Net effect: market ≡ IOC at unlimited price. The event sequences are identical
-   in shape.
-
-### 3.4 Cancel
-
-- **Cancel of a live order** removes it entirely and emits `CancelAck` carrying its
-  **remaining** quantity. For a partially filled order that is the *remainder*, not the
-  original quantity. This is the only case where a cancel carries a meaningful quantity.
-- **Cancel of an unknown or already-filled `(session_id, client_order_id)`** emits
-  `Reject` with `UnknownOrder`. Not silent, not fatal. The engine cannot distinguish
-  "never existed" from "already fully filled" without keeping a graveyard of every order
-  it has ever seen, and this specification does not require one.
-- Cancel of an order that was removed by self-trade prevention behaves the same way: it is
-  no longer live, so `Reject`/`UnknownOrder`.
-
-### 3.5 Self-trade prevention — cancel resting (S1–S5)
-
-1. **S1.** Self-trade is detected on `participant_id` equality between the aggressor and
-   the resting order. `session_id` is irrelevant to STP: a firm crossing itself across two
-   different sessions is still a self-trade.
-2. **S2.** When the aggressor reaches a resting order with the same `participant_id`: the
-   resting order is removed from the book, a `CancelAck` is emitted carrying the resting
-   order's **remaining** quantity, and the aggressor **continues matching** at the same
-   level and beyond with its quantity unchanged. No trade occurs between the pair.
-3. **S3.** STP never rejects the aggressor and never reduces the aggressor's quantity.
-4. **S4.** No rule emits a self-trade rejection; there is no such `RejectReason`.
-5. **S5.** Emission ordering is book-walk order. If the walk is `Trade(B), CancelAck(own),
-   Trade(C)`, that is the exact output order — the STP `CancelAck` appears interleaved at
-   the position where the resting order was encountered.
-
-On an STP `CancelAck`, `maker` is the removed resting order and `taker` is the aggressor
-that triggered it; `in_seq` is the aggressor's `seq`.
-
-### 3.6 Fill-or-kill (F1–F4)
-
-FOK is the heavy item in this contest. It requires walking the book to check fillability
-**before mutating anything**. A greedy implementation that matches and then discovers it
-cannot finish has no way to undo. Build a dry-run pass.
-
-1. **F1.** Fillability is computed by a **read-only walk of the opposite side before any
-   mutation**: sum the remaining quantity of resting orders whose `participant_id`
-   **differs** from the aggressor's, best price first, bounded by the FOK order's limit
-   price.
-2. **F2.** If that sum < the FOK order's quantity: emit exactly one `Reject` with
-   `FokUnfillable`. The book is untouched — no trades, no STP cancellations, no partial
-   effects of any kind, and no `Ack`.
-3. **F3.** If that sum ≥ the FOK order's quantity: commit. Same-firm resting orders
-   encountered during the commit are handled by S1–S5 (removed with `CancelAck`, no
-   trade). Because they were excluded from the fillability count, STP cancellations can
-   never cause a shortfall — "check then commit" stays atomic without a rollback path.
-4. **F4.** A FOK order never emits `Expired` and never partially fills. Its only outcomes
-   are: accepted and fully filled (`Ack, Trade…`, possibly with interleaved STP
-   `CancelAck`s per S5), or a single `Reject`/`FokUnfillable` with no `Ack`.
-
-**Worked example for F1.** Firm A sends FOK buy 100 @ 10000. The ask side holds 60 from
-firm B and 50 from firm A, both at 10000.
-
-- Counting all 110 available → commit → STP cancels A's own 50 mid-match → only 60 fills.
-  A partially filled FOK. This violates FOK's entire promise.
-- Excluding same-firm liquidity → 60 available < 100 → clean `Reject`/`FokUnfillable`,
-  book untouched, A's resting 50 still there.
-
-The second is correct.
-
-**F1 is a specification invention, not industry practice.** Real venues offer several STP
-variants (cancel-newest, cancel-both, decrement-and-cancel), and under the common
-cancel-aggressor policies this corner never arises. Nobody arrives knowing this rule from
-exchange experience. It is the resolution forced by cancel-resting STP plus FOK
-atomicity; the alternatives are partial FOK fills or mandatory rollback machinery. The
-hidden stream contains an injected case that distinguishes F1 from the naive count.
-
-### 3.7 IOC × STP (I1)
-
-1. **I1.** IOC matches under S1–S5 like any aggressor; whatever remains after the walk —
-   **including** quantity that met only same-firm liquidity, now cancelled — emits one
-   `Expired`.
-
 ---
 
-## 4. Correctness
+## 3. Correctness
 
 Three layers. Only layer 2 and layer 3 gate the leaderboard.
 
@@ -380,9 +363,11 @@ A **timeout** is reported distinctly from a wrong-output failure. They are diffe
 
 ---
 
-## 5. Benchmark and scoring
+---
 
-### 5.1 What is measured
+## 4. Benchmark and scoring
+
+### 4.1 What is measured
 
 ```
 Generate (offline)  →  Load + decode + warm up  →  [ TIMED LOOP ]  →  Verify + flush
@@ -419,7 +404,7 @@ model is explicit:
   per-event latency, not overlapped stream throughput.** Cross-event memory-level-
   parallelism tricks earn no credit — by definition of the metric.
 
-### 5.2 Sink
+### 4.2 Sink
 
 The benchmark run uses a **checksum-only sink** costing a few nanoseconds, with no
 volume-dependent memory traffic, so sink cost is identical for everyone and cancels in the
@@ -448,7 +433,7 @@ The digest from your benchmark run must equal the digest from your correctness r
 same stream. **Verification happens inside the timed run**, which is what makes it
 pointless to go faster by doing less work.
 
-### 5.3 Metric
+### 4.3 Metric
 
 Two nested distributions:
 
@@ -462,7 +447,7 @@ Ranking is on **p50, not p99**: sporadic hypervisor or thermal interference cont
 tails but barely moves a median over ten million events. Mean is not used — a single 50 µs page
 fault vanishes into it.
 
-### 5.4 Presentation and ties
+### 4.4 Presentation and ties
 
 Results are presented as **bands against fixed thresholds**, not exact positions. A
 bootstrap confidence interval is computed across your per-run medians; **overlapping
@@ -472,14 +457,14 @@ is not honestly possible.
 
 The leaderboard **freezes at 5:15** (ICPC style) and is revealed at the end.
 
-### 5.5 Rejudge
+### 4.5 Rejudge
 
 Every participant's final submission is **rejudged in one continuous block** on the same
 machine in the same short window before results are announced. The live leaderboard during
 the event is indicative; **the rejudge is authoritative.** A reference run brackets the
 block on both sides; if the two disagree, the block is rerun.
 
-### 5.6 Machine health
+### 4.6 Machine health
 
 Two checks, both on signals your code cannot cause:
 
@@ -496,7 +481,9 @@ requeue loop.
 
 ---
 
-## 6. Rules
+---
+
+## 5. Contest rules
 
 - **You submit one file**: `engine.cpp`, a single translation unit. It may include the
   frozen headers and the C++20 standard library. Nothing else.
@@ -534,7 +521,9 @@ is what iteration needs.
 
 ---
 
-## 7. A note on the environment
+---
+
+## 6. The environment
 
 The benchmark node is tuned to be unrealistically quiet: isolated cores, no scheduler
 tick, fixed frequency, no turbo, one job at a time. This is so the measurement is of
