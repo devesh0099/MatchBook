@@ -175,6 +175,8 @@ EOF
 
 if [[ ! -f "$PREFIX/worker.env" ]]; then
   cat > "$PREFIX/worker.env" <<'EOF'
+# `web-node` is a placeholder and resolves to NOTHING. Use the web node's
+# PRIVATE VPC address, and check it brought Postgres up with DB_BIND set.
 DATABASE_URL=postgres://mebench:CHANGEME@web-node:5432/mebench
 S3_BUCKET=me-platform-artifacts
 AWS_REGION=eu-west-1

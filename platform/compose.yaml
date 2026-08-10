@@ -38,7 +38,7 @@ services:
       dockerfile: platform/api/Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://mebench:mebench@postgres:5432/mebench
+      DATABASE_URL: postgres://mebench:${POSTGRES_PASSWORD:-mebench}@postgres:5432/mebench
       REDIS_URL: redis://redis:6379
       # The operator router is a SEPARATE axum Router on its own listener,
       # reachable only through an SSH tunnel to this host. That is the entire
@@ -79,13 +79,26 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: mebench
-      POSTGRES_PASSWORD: mebench
+      # Loopback-only by default, so the default password is harmless. The
+      # moment DB_BIND below exposes this to the VPC it stops being harmless —
+      # set POSTGRES_PASSWORD before the first `up`, because it is only read
+      # when the cluster is initialised.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mebench}
       POSTGRES_DB: mebench
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db:/docker-entrypoint-initdb.d:ro
     ports:
-      - "127.0.0.1:5432:5432"
+      # The pool and bench nodes are separate EC2 instances and reach Postgres
+      # over the VPC's private network — so on AWS this must NOT be loopback, or
+      # nothing outside the web node can connect and the workers sit idle
+      # forever with a connection error.
+      #
+      # Set DB_BIND to the web node's PRIVATE IP (never a public one), and let
+      # the security group be the boundary: allow 5432 only from the pool and
+      # bench security groups. Default stays loopback so a laptop is safe by
+      # doing nothing.
+      - "${DB_BIND:-127.0.0.1}:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mebench -d mebench"]
       interval: 3s

@@ -95,6 +95,11 @@ done
 if [[ ! -f "$PREFIX/worker.env" ]]; then
   cat > "$PREFIX/worker.env" <<'EOF'
 # Fill these in before starting the workers.
+#
+# `web-node` is a placeholder and resolves to NOTHING. Use the web node's
+# PRIVATE VPC address (172.31.x.x), never a public one, and make sure that
+# node brought Postgres up with DB_BIND set to the same address — the compose
+# default publishes it on loopback, where this cannot reach it.
 DATABASE_URL=postgres://mebench:CHANGEME@web-node:5432/mebench
 S3_BUCKET=me-platform-artifacts
 AWS_REGION=eu-west-1
