@@ -21,7 +21,16 @@ const VERIFY_PROFILE: &str = "balanced";
 const VERIFY_WALL_TIME_S: f64 = 45.0;
 
 /// The ranked stream.
-const BENCH_EVENTS: u64 = 10_000_000;
+///
+/// Long enough that the untimed warm-up fits with a real timed region after it,
+/// AND long enough that the harness's half-the-stream warm-up cap does not bind.
+///
+/// cancel_heavy builds ~750k resting orders and the harness derives 9,676,800
+/// events of warm-up for that. The cap is the subtle one: at 16M the warm-up is
+/// clipped to 8M, timing starts against a book at ~90% of target, and the result
+/// is reported as a ranked number with nothing saying it was measured early.
+/// 20M clears the cap with 10.3M events timed, at about 8s per run.
+const BENCH_EVENTS: u64 = 20_000_000;
 const BENCH_PROFILE: &str = "cancel_heavy";
 const BENCH_RUNS: u32 = 9;
 

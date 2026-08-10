@@ -28,35 +28,61 @@ constexpr ProfileParams kProfiles[] = {
     // clean up the level — becomes the common case, which is the work the
     // cancel index was chosen to expose.
     //
-    // Depth is set to ~300k resting orders (320 sessions x 1520, times the
+    // Depth is set to ~750k resting orders (320 sessions x 3780, times the
     // controller's ~0.62 settling ratio). That is the point of the profile.
     //
-    // A reference-shaped book costs ~136 B/order, so 300k is ~41 MB — well past
-    // any current L3, and past the TLB's 4K-page reach by several times. A
-    // pool-allocated engine at ~48 B/order is ~14 MB and still fits. That gap is
-    // the only thing that makes a cache-conscious layout measurably different
-    // from a naive one; at the 23k this profile used to carry, both books sat
-    // inside L3 and 23k and 49k measured byte-identically.
+    // 750k targets a ~54 MB L3 -- an Ice Lake Xeon, which is what this will be
+    // measured on. The window where a naive book is RAM-bound and a
+    // pool-allocated one is not runs from about 400k to 1M orders there, and
+    // 750k sits in the middle of it with margin on both sides: naive ~102 MB
+    // (1.9x L3), optimised ~39 MB (0.7x). The margin is deliberate, because a
+    // shared instance's EFFECTIVE cache is smaller than its nominal one and
+    // varies with whatever the co-tenant is doing.
     //
-    // Measured on a Zen 4 box (16 MB L3), reference against a pool/flat-array
-    // engine over 6M timed events:
+    // On a 16 MB L3 this is the WRONG number and will read worse than 300k did:
+    // at 750k both engines are RAM-bound, so the gap compresses instead of
+    // widening. Depth follows the cache it is measured against, and 300k was
+    // right for a 16 MB box.
+    //
+    // The sizing arithmetic: a reference-shaped book costs ~136 B/order and a
+    // pool-allocated one ~48 B + 3.1 MB of fixed level array. Against 54 MB
+    // that puts the naive engine out of cache above ~400k and the optimised one
+    // still inside it below ~1M, which is the window.
+    //
+    // Measured on a Zen 4 box with a 16 MB L3, reference against the
+    // pool/flat-array engine in tests/engines/optimized.cpp, 6M timed events —
+    // the evidence that depth does anything at all, since at 23k it did not:
     //
     //     depth    reference   optimized   ratio
-    //      23k       130 ns       40 ns    3.25x
+    //      23k       130 ns       40 ns    3.25x   <- both fit in L3
     //      50k       220 ns       50 ns    4.40x
     //     150k       281 ns       60 ns    4.67x
-    //     300k       341 ns       70 ns    4.86x
+    //     300k       341 ns       70 ns    4.86x   <- best on 16 MB
+    //     750k       421 ns      120 ns    3.50x   <- both RAM-bound; see below
     //
-    // Two honest caveats. Most of the discrimination is already present by
-    // ~50-100k; and that box's rdtscp advances in 38-tick (10 ns) steps, so the
-    // optimized column is 5, 6 and 7 quanta and the 150k->300k increment is
-    // below its resolution. The bench node settles the exact figure.
+    // The last row is the point, not a failure. At 750k the optimised book is
+    // ~36 MB and leaves a 16 MB L3 as well, so both engines go to memory and the
+    // gap COMPRESSES. On a 54 MB L3 it is ~39 MB and still fits, which is where
+    // the same depth should widen the gap instead. The shipped number is a bet
+    // on the target hardware and section 9 of AWS.md is what settles it: if the
+    // bench node's L3 turns out closer to 16 MB than 54 MB, 300k is the better
+    // setting and this should go back.
     //
-    // deep_ticks cannot grow much further to keep pace: asks rest at
-    // mid + offset, so a band beyond ~9,900 ticks collides with the injection
-    // price base at 20,000. Past ~100k the book therefore thickens levels
-    // rather than adding them (3 orders/level at 12k, 49 at 291k).
-    {"cancel_heavy", 320, 90, 200, 12, 78, 30, 42, 2, 20, 33, 45, 3, 2, 1, 3000, 1520},
+    // Two caveats on the earlier rows. Most of the discrimination is already
+    // there by ~50-100k; and that box's rdtscp advances in 38-tick (10 ns)
+    // steps, so the optimized column at 300k and below is 5, 6 and 7 quanta and
+    // the 150k->300k increment is under its resolution.
+    //
+    // deep_ticks is 7,500 so the book stays WIDE at this depth: 15,000 levels
+    // holds 750k orders at ~50 per level, the same shape 3,000 gave at 300k.
+    // Depth without width measures FIFO-queue traversal instead of the price
+    // index, which is not the thing being graded.
+    //
+    // It is close to its ceiling. Asks rest at mid + offset with mid <= 10,050,
+    // so 7,500 puts the top of the book at 17,559 against an injection band
+    // starting at 20,000 -- about 2,400 ticks of headroom. Beyond ~9,900 they
+    // collide and the injection price base has to move first.
+    {"cancel_heavy", 320, 90, 200, 12, 78, 30, 42, 2, 20, 33, 45, 3, 2, 1, 7500, 3780},
     // Heavy on takers, but liquidity providers still have to outnumber them:
     // takers with nothing to sweep leave a book a handful of orders deep, which
     // stresses nothing at all.
