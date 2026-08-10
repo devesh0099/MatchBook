@@ -3,7 +3,7 @@ import './globals.css';
 import { TopBar } from '@/components/TopBar';
 
 export const metadata: Metadata = {
-  title: 'Matching Engine Challenge',
+  title: 'Matchbook — Matching Engine Challenge',
   description: 'Implement order book matching in C++. Gated on correctness, ranked on latency.',
 };
 

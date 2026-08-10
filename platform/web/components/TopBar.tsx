@@ -91,7 +91,7 @@ export function TopBar() {
       >
         <div style={{ width: 12, height: 12, background: 'var(--color-accent)' }} />
         <div style={{ fontWeight: 800, letterSpacing: '0.14em', fontSize: 12, textTransform: 'uppercase' }}>
-          Matcher
+          Matchbook
         </div>
         <div
           style={{
