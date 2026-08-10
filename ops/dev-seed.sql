@@ -1,5 +1,13 @@
 -- dev-seed.sql — local development data. NEVER run against the event database.
 --
+-- It lives in ops/ rather than platform/db/ for exactly that reason: compose
+-- mounts platform/db into /docker-entrypoint-initdb.d, and Postgres runs every
+-- .sql it finds there, in name order, the first time a cluster comes up. A file
+-- whose header says "never run this" would have been run automatically on the
+-- event's own database. Run it by hand:
+--
+--   docker exec -i me-postgres psql -U mebench -d mebench < ops/dev-seed.sql
+--
 -- Enough submissions to render every state the UI has a panel for, plus a few
 -- other people so the leaderboard is not a single row. The percentile curve and
 -- the within-run timeline are generated here rather than pasted, so this file
