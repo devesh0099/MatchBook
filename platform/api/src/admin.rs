@@ -1,10 +1,24 @@
 //! Operator routes.
 //!
-//! This is a SEPARATE axum Router served on its own listener bound to
-//! 127.0.0.1, reached over an SSH tunnel to the web node. That is the entire
-//! auth story for the platform — not a route prefix, not a middleware, not a
-//! token. There is no auth code anywhere, and this listener is the reason that
-//! is defensible (impl spec section 3).
+//! This is a SEPARATE axum Router on its own listener, reached over an SSH
+//! tunnel to the web node. That is the entire auth story for the platform —
+//! not a route prefix, not a middleware, not a token. There is no auth code
+//! anywhere, and unreachability is the reason that is defensible (impl spec
+//! section 3).
+//!
+//! WHERE that unreachability is enforced depends on how the API is running,
+//! and it is worth being precise because getting it wrong fails in both
+//! directions:
+//!
+//!   * Bare process — `ADMIN_BIND_ADDR=127.0.0.1:8081`. The kernel refuses
+//!     anything that is not loopback.
+//!   * Under compose — the container binds `0.0.0.0:8081` and the HOST PUBLISH
+//!     `127.0.0.1:8081:8081` is the restriction. Binding the container's own
+//!     loopback instead makes the port unreachable from anywhere at all,
+//!     because Docker forwards published ports to the container's bridge
+//!     address and never to its loopback.
+//!
+//! Either way Caddy must not proxy it, and the Caddyfile says so.
 
 use axum::{
     extract::{Path, Query, State},

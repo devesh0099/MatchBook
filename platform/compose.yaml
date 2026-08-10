@@ -40,17 +40,31 @@ services:
     environment:
       DATABASE_URL: postgres://mebench:mebench@postgres:5432/mebench
       REDIS_URL: redis://redis:6379
-      # The public listener. The operator router is a SEPARATE axum Router on
-      # its own listener bound to 127.0.0.1 and reached over an SSH tunnel —
-      # that is the entire auth story (impl spec section 3).
+      # The operator router is a SEPARATE axum Router on its own listener,
+      # reachable only through an SSH tunnel to this host. That is the entire
+      # auth story (impl spec section 3) — but WHERE the loopback restriction
+      # lives changes once it is containerised, and getting that wrong makes it
+      # unreachable rather than exposed.
+      #
+      # Binding 127.0.0.1 INSIDE the container binds the container's own
+      # loopback. Docker forwards a published port to the container's bridge
+      # address, not to its loopback, so nothing outside could reach the admin
+      # port at all: `POST /admin/freeze` and `/admin/bench/unhealthy` — the two
+      # things an operator needs most — silently did not work.
+      #
+      # So the container binds all interfaces and the HOST PUBLISH below is what
+      # restricts it. The `127.0.0.1:` prefix on the ports entry is now
+      # load-bearing: drop it and every operator route is open to the room, with
+      # no password anywhere to stop it.
       BIND_ADDR: 0.0.0.0:8080
-      ADMIN_BIND_ADDR: 127.0.0.1:8081
+      ADMIN_BIND_ADDR: 0.0.0.0:8081
       AWS_REGION: ${AWS_REGION:-eu-west-1}
       S3_BUCKET: ${S3_BUCKET:-me-platform-artifacts}
     expose:
       - "8080"
     ports:
-      # Admin is published to loopback only, never to the world.
+      # Admin is published to the HOST's loopback only, never to the world.
+      # This line is the access control; see ADMIN_BIND_ADDR above.
       - "127.0.0.1:8081:8081"
     depends_on:
       postgres:

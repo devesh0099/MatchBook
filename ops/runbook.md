@@ -87,7 +87,7 @@ Operator access is an SSH tunnel; there is no admin auth because the admin
 listener is not reachable from the network:
 
 ```sh
-ssh -N -L 8081:127.0.0.1:8081 web-node
+ssh -N -L 8081:127.0.0.1:8081 web-node    # then curl localhost:8081/admin/...
 ```
 
 ---
