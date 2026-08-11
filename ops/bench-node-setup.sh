@@ -27,7 +27,12 @@ esac
 PREFIX="${PREFIX:-/opt/mebench}"
 REPO="${REPO:-/opt/me-platform}"
 ISOLATED_CPUS="${ISOLATED_CPUS:-4-7}"
-BENCH_CPU="${BENCH_CPU:-4}"
+# Exported, not just set: this script runs bench-hygiene.sh as a child, and that
+# script has its own BENCH_CPU default of 4. Without the export a node
+# configured for a smaller core count pins to the right CPU and is then checked
+# against CPU 4 — so a correct setup fails its own gate, on a box where CPU 4
+# may not exist at all.
+export BENCH_CPU="${BENCH_CPU:-4}"
 
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 
