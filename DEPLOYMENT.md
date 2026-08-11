@@ -272,8 +272,6 @@ ops/make-boilerplate.sh          # publish dist/me-boilerplate.zip with the spec
 
 - Calibrate the ranked depth against the bench node's real L3. The shipped 750k
   is sized for ~54 MB; on a smaller cache 300k scores better.
-- Set band thresholds in the `settings` table relative to the reference p50
-  measured on that node.
 - Drive one submission through all three nodes.
 - Stop the bench worker mid-queue and confirm jobs park at `pending_benchmark`
   and unpark when it returns.

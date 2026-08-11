@@ -3,10 +3,14 @@
 // Ranked on p50, ascending. Correctness is a gate, not a tiebreak: nothing
 // reaches this table until it has passed the hidden check.
 //
+// The row order is the SERVER's, not ours. Equal p50s break on the earlier
+// submission, and that timestamp is deliberately not in the payload — so a
+// client-side sort could only ever get ties wrong. Render in the order given.
+//
 // The interval column is not decoration. It is the spread across the nine runs
 // behind each score, and two people whose intervals overlap are not reliably
 // separated by the number between them — which is worth seeing next to the rank
-// rather than in a footnote.
+// rather than in a footnote. It is information, not a rule: it does not tie ranks.
 
 import { useEffect, useState } from 'react';
 import { api, type LeaderboardEntry } from '@/lib/api';
@@ -40,7 +44,7 @@ export default function LeaderboardPage() {
     return () => clearInterval(t);
   }, []);
 
-  const ranked = entries.slice().sort((a, b) => a.p50_ns - b.p50_ns);
+  const ranked = entries;
 
   return (
     <div className="page scroll-y">
@@ -60,7 +64,8 @@ export default function LeaderboardPage() {
             Leaderboard
           </div>
           <div style={{ fontSize: 13, color: 'var(--app-ink-2)', marginTop: 8, maxWidth: '74ch' }}>
-            Ranked on p50 nanoseconds per event, ascending. Correctness is a gate, not a tiebreak.
+            Ranked on p50 nanoseconds per event, ascending. Equal scores rank on the earlier
+            submission. Correctness is a gate, not a tiebreak.
           </div>
         </div>
         <div className="mono" style={{ fontSize: 11, color: 'var(--app-ink-3)', textAlign: 'right' }}>

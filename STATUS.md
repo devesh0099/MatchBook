@@ -51,7 +51,7 @@ cannot emit is untested dead code that every participant has to guess about.
 ### `reference/` — the oracle
 
 `std::map<Price, std::list<Order>>`, clarity over speed. It is the fuzzing
-oracle, the noise-floor baseline and what the bands are calibrated against, so
+oracle and the noise-floor baseline, so
 every branch is written to map onto a numbered spec rule. The two rules most
 likely to be got wrong are the ones most heavily commented: trade price is the
 **resting** order's price, and FOK fillability **excludes the aggressor's own
@@ -300,11 +300,10 @@ Everything left is provisioning and calibration on real hardware.
 | | What | Why it blocks |
 |---|---|---|
 | **1** | **Noise floor + soak.** `ops/noise-floor/{measure,soak,analyze}.py` exist and were validated against synthetic tight and noisy machines. | Settles plan §16 q1 (drift correction) and q2 (metal vs dedicated). Run it **before** provisioning for real — the `isolcpus`/`nohz_full` boot parameters only apply if metal is what the numbers call for. |
-| **2** | **Measure the TSC granularity.** This box steps in 38 ticks — exactly 10 ns. | If the bench node does the same, ranked p50 is a *count of quanta*, and that **settles the ranking-presentation question on physics rather than preference**. Do not decide bands-vs-ranks-vs-ties before this. |
+| **2** | **Measure the TSC granularity.** This box steps in 38 ticks — exactly 10 ns. | If the bench node does the same, a ranked p50 is a *count of quanta*, so **exact ties between participants are expected, not rare**. The presentation is settled — sorted p50, earlier submission above — but this number says how often the tiebreak actually decides a position, and whether the quantum is coarse enough that the ranking is measuring less than it appears to. |
 | **3** | **Confirm or move the 300k depth.** Re-run the sweep in `PLAN-book-depth.md` §7. | 300k is calibrated to *this* box's 16 MB L3. Note the ceiling: the price band is **99.1% saturated**, so more depth goes vertical, and widening it means moving the injection band at price 20,000 first. |
-| **4** | **Band calibration**, if bands survive (2). Thresholds live in the `settings` table — a SQL statement, not a deploy. | The shipped defaults are invented numbers and mean nothing until measured against the reference on the actual node. |
-| **5** | **`bench-hygiene.sh` must exit 0.** | The setup script refuses to mark the node healthy otherwise. Do not override it. `swap off` is **load-bearing**, not tidiness: isolate forces `RLIMIT_MEMLOCK` to 0, so `mlockall` always fails in a ranked run and unreclaimable anonymous memory is the whole guarantee. |
-| **6** | **S3 bucket and an instance role for the web node.** | Nothing in the platform creates either. Without them every `/run` and `/submit` returns an opaque `internal error` — the API stores source in S3 before it does anything else. This is the one provisioning step with no error message pointing at it. |
+| **4** | **`bench-hygiene.sh` must exit 0.** | The setup script refuses to mark the node healthy otherwise. Do not override it. `swap off` is **load-bearing**, not tidiness: isolate forces `RLIMIT_MEMLOCK` to 0, so `mlockall` always fails in a ranked run and unreclaimable anonymous memory is the whole guarantee. |
+| **5** | **S3 bucket and an instance role for the web node.** | Nothing in the platform creates either. Without them every `/run` and `/submit` returns an opaque `internal error` — the API stores source in S3 before it does anything else. This is the one provisioning step with no error message pointing at it. |
 
 ## 7. Remaining — does not need hardware
 

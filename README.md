@@ -176,7 +176,7 @@ arithmetic over real samples, but it is not a benchmark. There is no core
 pinning, no isolated CPU, turbo is on and something else is always running.
 
 You will see this directly: the bench node re-measures a reference engine every
-twenty minutes and marks itself **unhealthy** if the result moves more than 2%.
+twenty minutes and marks itself **unhealthy** if the result moves more than 5%.
 On a laptop it will. When that happens, submissions park at `pending_benchmark`
 rather than failing — which is the designed behaviour, not a bug. Clear it with:
 

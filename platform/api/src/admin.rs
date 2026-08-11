@@ -188,6 +188,13 @@ async fn set_bench_health(State(st): State<AppState>, Path(state): Path<String>)
 
 /// Redis is disposable. On restart, or on any suspicion of drift, rebuild the
 /// serving copy from Postgres — it is 18 rows.
+///
+/// The `leaderboard` ZSET below is written here and **read nowhere**: `/api/
+/// leaderboard` serves from Postgres, and only `leaderboard:frozen` (a plain
+/// JSON blob) is ever read back. Do not make it a serving path. A ZSET scored on
+/// p50 cannot express the ranking: equal scores order lexicographically by
+/// member, so a tie would resolve by handle instead of by the earlier
+/// submission. `leaderboard_from_db` is the only thing that ranks.
 async fn rebuild(State(st): State<AppState>) -> R {
     let entries = leaderboard_from_db(&st.db).await.map_err(oops)?;
     if let Some(client) = &st.redis {
@@ -229,7 +236,7 @@ async fn rejudge(State(st): State<AppState>, Query(q): Query<RejudgeQuery>) -> R
     });
 
     let rows: Vec<(i64,)> = sqlx::query_as(
-        "WITH final AS (            SELECT DISTINCT ON (participant_id) id FROM submissions            WHERE state = 'done' ORDER BY participant_id, created_at DESC)          UPDATE submissions s SET state = 'bench_queued', claimed_by = NULL,            requeue_priority = 1, bench_seed_set = ARRAY[$1::bigint]          FROM final WHERE s.id = final.id RETURNING s.id",
+        "WITH final AS (            SELECT DISTINCT ON (participant_id) id FROM submissions            WHERE state = 'done' ORDER BY participant_id, created_at DESC)          UPDATE submissions s SET state = 'bench_queued', claimed_by = NULL,            requeue_priority = 1, bench_queued_at = now(), bench_seed_set = ARRAY[$1::bigint]          FROM final WHERE s.id = final.id RETURNING s.id",
     )
     .bind(seed)
     .fetch_all(&st.db)

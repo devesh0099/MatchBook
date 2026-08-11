@@ -18,7 +18,7 @@ Two mechanisms, both real and both working:
   consecutive discards exit `UNHEALTHY` and the node stops taking work.
 - **The reference spot check.** Every ~20 minutes, between jobs, the bench worker
   re-runs the reference engine and compares its p50 against a baseline recorded
-  when the node came up. More than **2%** deviation marks the node unhealthy.
+  when the node came up. More than **5%** deviation marks the node unhealthy.
   Verified firing in practice at 7.1% on a contended laptop.
 
 The second is the right shape: it measures a **known** workload and asks whether
@@ -45,7 +45,7 @@ It runs **between jobs**. A neighbour that starts and stops inside one 60-second
 ranked job contaminates that job and the next spot check sees nothing.
 
 So the dangerous case is not the obvious one. It is interference large enough to
-move a rank but too brief, or too smooth, to trip a 2% gate twenty minutes later.
+move a rank but too brief, or too smooth, to trip the gate twenty minutes later.
 
 ## 4. Proposal: bracket every ranked run with the reference
 
@@ -145,8 +145,9 @@ Re-run the sweep on the real node and take the widest ratio.
 
 - **Infer contamination from our own CPU or memory usage.** The interference is
   on the other side of the hypervisor; our processes look identical either way.
-- **Tighten the 2% spot-check tolerance.** It would fire more often on a shared
+- **Tighten the spot-check tolerance.** It would fire more often on a shared
   instance and park the queue more, which is a worse failure than a slightly
-  noisy number — and it still would not see inside a job.
+  noisy number — and it still would not see inside a job. It has since gone the
+  other way, 2% to 5%, for exactly this reason.
 - **Implement this before the noise floor.** If dedicated tenancy is affordable
   and the instance is quiet, this is complexity for nothing.

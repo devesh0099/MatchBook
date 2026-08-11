@@ -491,43 +491,46 @@ export default function EditorPage() {
           </button>
 
           {/* Submit is the consequential action, so it is the only accent-filled
-              control on the page — and it goes flat and grey the moment it is
-              not available, with the reason stated underneath. */}
+              control on the page. It is never disabled: holding an outstanding
+              benchmark does not stop you submitting, it only changes what
+              happens next — a waiting job is replaced, a running one is left
+              alone and yours queues behind it. The line underneath says which,
+              because the button cannot. */}
           <button
             onClick={onSubmit}
-            disabled={!gate?.ready || !loaded}
+            disabled={!loaded}
             style={{
               appearance: 'none',
               width: '100%',
-              border: `2px solid ${gate?.ready ? 'var(--color-accent)' : 'var(--app-line)'}`,
-              background: gate?.ready ? 'var(--color-accent)' : 'transparent',
-              color: gate?.ready ? '#fff' : 'var(--app-ink-3)',
+              border: '2px solid var(--color-accent)',
+              background: 'var(--color-accent)',
+              color: '#fff',
               font: 'inherit',
               fontWeight: 800,
               fontSize: 13,
               letterSpacing: '0.06em',
               textTransform: 'uppercase',
               padding: '13px 14px',
-              cursor: gate?.ready ? 'pointer' : 'not-allowed',
+              cursor: loaded ? 'pointer' : 'progress',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
               textAlign: 'left',
-              opacity: gate?.ready ? 1 : 0.75,
+              opacity: loaded ? 1 : 0.6,
             }}
           >
-            <span>{gate?.ready ? 'Submit' : 'Benchmark queued'}</span>
+            <span>Submit</span>
             <span className="mono" style={{ fontWeight: 700, fontSize: 13 }}>
-              {gate == null ? '…' : gate.ready ? 'unlimited' : 'one at a time'}
+              {gate == null ? '…' : gate.ready ? 'unlimited' : 'queues after this one'}
             </span>
           </button>
 
           <div style={{ fontSize: 11, color: 'var(--app-ink-2)', lineHeight: 1.5 }}>
-            {gate?.ready
-              ? 'Runs the hidden correctness check, then queues a ranked benchmark. Submit as often as you like — the only limit is one benchmark of yours in the queue at a time.'
-              : gate == null
-                ? 'Checking your benchmark slot…'
-                : `${gate.reason}. It unlocks by itself when that one finishes; correctness still runs on anything you submit meanwhile.`}
+            {gate == null
+              ? 'Checking your benchmark slot…'
+              : gate.ready
+                ? 'Runs the hidden correctness check, then queues a ranked benchmark. Submit as often as you like — the only limit is one benchmark of yours in the queue at a time.'
+                : `Runs the hidden correctness check. Your ${gate.reason} — nothing is lost and you do not need to resubmit.`}
           </div>
 
           {error && (

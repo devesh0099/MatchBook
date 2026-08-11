@@ -449,11 +449,17 @@ fault vanishes into it.
 
 ### 4.4 Presentation and ties
 
-Results are presented as **bands against fixed thresholds**, not exact positions. A
-bootstrap confidence interval is computed across your per-run medians; **overlapping
-intervals means tied rank.** Everyone past the correctness gate wrote a working order
-book, spreads are often under 2×, and defending the difference between rank 7 and rank 9
-is not honestly possible.
+Positions are exact: **sorted by score, ascending.** You are ranked on your **best**
+submission, not your latest — a later experiment that measures worse costs you nothing.
+
+**Identical scores break on the earlier submission.** If two engines measure the same, the
+one that got there first is placed above. Exact ties are not a corner case: if the bench
+node's clock advances in fixed steps, a score is a count of those steps and equal scores
+are expected.
+
+A bootstrap confidence interval across your per-run medians is published beside each
+score. It is information about how separated a close pair really is — it does **not**
+affect rank.
 
 The leaderboard **freezes at 5:15** (ICPC style) and is revealed at the end.
 
@@ -472,7 +478,7 @@ Two checks, both on signals your code cannot cause:
    requeued **at the front** of the queue, not the back. You already waited once and it
    was not your fault.
 2. **Reference spot check** — the reference implementation is run every ~20 minutes;
-   >2% deviation from the morning baseline raises an alert.
+   >5% deviation from the morning baseline raises an alert.
 
 Checks on context switches, page faults, and frequency are deliberately **not** applied:
 your own engine can legitimately cause those (a heap-growing engine page-faults — that is
@@ -513,6 +519,18 @@ requeue loop.
 Rate limiting is checked **at enqueue**: correctness is always accepted, and the submit
 response tells you immediately whether the benchmark will auto-queue and how long the
 remaining wait is. Nothing is ever silently dropped.
+
+What happens when you submit again while a benchmark of yours is outstanding depends on
+what that job is doing:
+
+- **Waiting in the queue** — the new submission replaces it and **keeps its place in the
+  queue**. The old one is marked *superseded*: correct, but never timed.
+- **Already running** — it is never interrupted. Your new submission is held and queues
+  itself automatically when the running job finishes.
+
+Either way you always end up with your newest correct code ranked, without resubmitting.
+If several of yours are held, only the newest queues; the rest are superseded. Correctness
+is never affected by any of this — it always runs, immediately, on every submission.
 
 The boilerplate ships the **generator** and a **local benchmark runner** so you can
 measure locally without touching the queue. Local numbers will not match server numbers

@@ -129,8 +129,120 @@ async fn sweep(db: &PgPool) -> anyhow::Result<()> {
             tracing::warn!("parked {} bench jobs: no healthy bench worker", parked.len());
         }
     } else {
-        // Node is back — unpark.
+        // Node is back — unpark. Position is whatever it was when it first
+        // entered the queue; parking is not a demotion.
         sqlx::query("UPDATE submissions SET state = 'bench_queued' WHERE state = 'pending_benchmark'")
+            .execute(db)
+            .await?;
+        promote_held(db).await?;
+    }
+
+    Ok(())
+}
+
+/// Seat the newest held submission of every participant whose bench slot is
+/// free.
+///
+/// Without this, `verify_passed` is a dead end. `try_enqueue_bench` is the only
+/// thing that ever seats a bench job and it runs exactly once, when
+/// verification passes; a submission held behind the participant's own running
+/// job is never reconsidered, and `clear_pending` frees the slot without
+/// looking for a successor. The participant is left reading "held: #N is being
+/// benchmarked" about a job that finished minutes ago.
+///
+/// This lives in the janitor rather than in the worker's `clear_pending` on
+/// purpose: a worker that dies between finishing a job and promoting the next
+/// one would lose the promotion permanently, whereas a sweep re-derives the
+/// right answer from the table on every tick. It costs up to 60s of latency
+/// against a bench job that takes about that long anyway.
+async fn promote_held(db: &PgPool) -> anyhow::Result<()> {
+    // Never seat fresh work during a rejudge block. Rejudge queues every
+    // finalist on one pinned seed and never sets `pending_sub`, so every slot
+    // reads free; promotions would sort behind the block (priority 1) but run
+    // immediately after it on unpinned seeds, inside the window whose whole
+    // point is that it is settled.
+    let (rejudging,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM submissions \
+         WHERE bench_seed_set IS NOT NULL AND state IN ('bench_queued','benchmarking')",
+    )
+    .fetch_one(db)
+    .await?;
+    if rejudging > 0 {
+        return Ok(());
+    }
+
+    let mut tx = db.begin().await?;
+
+    // Lock the free slots first, in a stable order. The worker takes the same
+    // lock in try_enqueue_bench, so a verify passing right now either waits for
+    // this sweep or is seen by it — never both seating a job.
+    let free: Vec<(i32,)> = sqlx::query_as(
+        "SELECT participant_id FROM bench_slots WHERE pending_sub IS NULL \
+         ORDER BY participant_id FOR UPDATE",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut promoted = Vec::new();
+    for (pid,) in free {
+        // Newest held submission wins, and the rest are superseded rather than
+        // left to accumulate. That cap is what keeps the queue fair: a
+        // participant who submits ten times while blocked contributes ONE job
+        // when their slot frees, not ten, so nobody can build a backlog that
+        // starves everyone else.
+        let held: Vec<(i64,)> = sqlx::query_as(
+            "SELECT id FROM submissions WHERE participant_id = $1 AND state = 'verify_passed' \
+             ORDER BY created_at DESC, id DESC FOR UPDATE",
+        )
+        .bind(pid)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let Some((newest,)) = held.first().copied() else { continue };
+
+        sqlx::query(
+            "UPDATE submissions SET state = 'bench_queued', bench_queued_at = now(), \
+             updated_at = now(), verify_detail = COALESCE(verify_detail, '{}'::jsonb) - 'bench_held' \
+             WHERE id = $1",
+        )
+        .bind(newest)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO bench_slots (participant_id, last_bench_at, pending_sub) \
+             VALUES ($1, now(), $2) ON CONFLICT (participant_id) \
+             DO UPDATE SET last_bench_at = now(), pending_sub = $2",
+        )
+        .bind(pid)
+        .bind(newest)
+        .execute(&mut *tx)
+        .await?;
+
+        for (older,) in held.iter().skip(1) {
+            sqlx::query(
+                "UPDATE submissions SET state = 'superseded', updated_at = now(), \
+                 verify_detail = COALESCE(verify_detail, '{}'::jsonb) \
+                   || jsonb_build_object('superseded_by', $2::bigint) \
+                 WHERE id = $1",
+            )
+            .bind(older)
+            .bind(newest)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        promoted.push((newest, held.len() - 1));
+    }
+
+    tx.commit().await?;
+
+    for (id, superseded) in promoted {
+        tracing::info!("promoted held submission {id} to the bench queue ({superseded} superseded)");
+        sqlx::query("INSERT INTO events_log (submission_id, kind, detail) VALUES ($1,$2,$3)")
+            .bind(id)
+            .bind("bench_promoted")
+            .bind(serde_json::json!({ "superseded": superseded }))
             .execute(db)
             .await?;
     }

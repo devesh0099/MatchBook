@@ -10,6 +10,7 @@ CREATE TYPE sub_state AS ENUM (
   'verifying','verify_failed','verify_timeout','verify_passed',
   'bench_queued','pending_benchmark',      -- pending_benchmark = bench node unhealthy
   'benchmarking','bench_verify_failed',    -- passed correctness, diverged on bench stream
+  'superseded',                            -- correct, but newer verified code replaced it
   'done','error');
 
 CREATE TABLE participants (                 -- preloaded roster of 18; no credentials
@@ -27,6 +28,12 @@ CREATE TABLE submissions (
   requeue_priority int NOT NULL DEFAULT 0, -- 1 = front of bench queue (steal-time requeue)
   created_at    timestamptz DEFAULT now(),
   updated_at    timestamptz DEFAULT now(),
+  -- When this submission ENTERED the bench queue, which is not when it was
+  -- created. The queue is ordered on this and never on `id`: a submission can
+  -- be held behind the participant's own running job and enter the queue much
+  -- later, and ordering by id would then seat hour-old work ahead of everyone
+  -- who queued while it waited.
+  bench_queued_at   timestamptz,
   -- correctness results
   verify_seed       bigint,
   verify_detail     jsonb,   -- progress breakdown, first-divergence reproducer, timeout flag
@@ -123,7 +130,14 @@ SELECT DISTINCT ON (s.participant_id)
        s.p99_ns,
        s.probe_cost_ns,
        s.run_p50s_ns,
-       s.updated_at
+       s.updated_at,
+       -- Exposed because it is the leaderboard's TIE-BREAK key, not for display:
+       -- equal p50s rank on the earlier submission. It has to be created_at and
+       -- not updated_at, because the rejudge (spec 4.5) re-runs every finalist
+       -- in one block at the end and rewrites updated_at into rejudge-block
+       -- order, which is arbitrary. Requeue-at-front does the same on a smaller
+       -- scale. created_at is the only timestamp that survives both.
+       s.created_at
 FROM submissions s
 JOIN participants p ON p.id = s.participant_id
 WHERE s.state = 'done' AND s.p50_ns IS NOT NULL

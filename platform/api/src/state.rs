@@ -36,62 +36,6 @@ impl Storage {
     }
 }
 
-/// Band thresholds, in nanoseconds, calibrated against the reference on the
-/// ACTUAL benchmark node.
-///
-/// These live in the `settings` table, not in the binary. The runbook's
-/// calibration step happens on the morning of the event, after the deploy
-/// freeze — a threshold that could only be changed by shipping a new build
-/// would be a step the runbook forbids itself from taking.
-///
-/// Positions are never published: the correctness gate compresses the surviving
-/// cohort — everyone left wrote a working order book — so spreads are often
-/// under 2x, and defending rank 7 against rank 9 is not honestly possible
-/// (plan section 8).
-pub const DEFAULT_BANDS: &[(&str, f64)] = &[
-    ("gold", 60.0),
-    ("silver", 90.0),
-    ("bronze", 140.0),
-];
-
-pub type Bands = Vec<(String, f64)>;
-
-pub async fn load_bands(db: &PgPool) -> Bands {
-    let row: Option<(serde_json::Value,)> =
-        sqlx::query_as("SELECT value FROM settings WHERE key = 'bands'")
-            .fetch_optional(db)
-            .await
-            .ok()
-            .flatten();
-
-    if let Some((v,)) = row {
-        if let Some(arr) = v.as_array() {
-            let parsed: Bands = arr
-                .iter()
-                .filter_map(|e| {
-                    Some((
-                        e.get("name")?.as_str()?.to_string(),
-                        e.get("max_ns")?.as_f64()?,
-                    ))
-                })
-                .collect();
-            if !parsed.is_empty() {
-                return parsed;
-            }
-        }
-    }
-    DEFAULT_BANDS.iter().map(|(n, v)| (n.to_string(), *v)).collect()
-}
-
-pub fn band_for(bands: &Bands, p50_ns: f64) -> String {
-    for (name, ceiling) in bands {
-        if p50_ns <= *ceiling {
-            return name.clone();
-        }
-    }
-    "finisher".to_string()
-}
-
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct LeaderboardRow {
     pub handle: String,
@@ -105,12 +49,12 @@ pub struct LeaderboardRow {
 #[derive(Debug, Serialize)]
 pub struct LeaderboardEntry {
     pub handle: String,
-    pub band: String,
     pub p50_ns: f64,
     pub p99_ns: Option<f64>,
     pub probe_cost_ns: Option<f64>,
-    /// Bootstrap CI across the per-run medians. Overlapping intervals mean
-    /// tied rank.
+    /// Bootstrap CI across the per-run medians. Published so a close pair can be
+    /// read honestly — it does NOT affect rank. Ranking is a strict total order
+    /// on p50, ties broken by the earlier submission.
     pub ci_low_ns: f64,
     pub ci_high_ns: f64,
     pub submission_id: i64,
@@ -120,10 +64,14 @@ pub struct LeaderboardEntry {
 /// rebuilding the Redis serving copy from it is always cheap enough to be the
 /// answer to any suspicion of drift.
 pub async fn leaderboard_from_db(db: &PgPool) -> Result<Vec<LeaderboardEntry>> {
-    let bands = load_bands(db).await;
+    // The order this returns IS the published ranking: p50 ascending, and where
+    // two scores are equal the earlier submission is above. Equal p50s are not a
+    // curiosity — if the bench node's TSC is quantised, a ranked p50 is a count
+    // of quanta and exact ties are expected. `created_at` is ordered on but not
+    // selected; the client cannot reproduce this order and must not re-sort.
     let rows: Vec<LeaderboardRow> = sqlx::query_as(
         "SELECT handle, submission_id, p50_ns, p99_ns, probe_cost_ns, run_p50s_ns \
-         FROM leaderboard ORDER BY p50_ns ASC",
+         FROM leaderboard ORDER BY p50_ns ASC, created_at ASC",
     )
     .fetch_all(db)
     .await?;
@@ -136,7 +84,6 @@ pub async fn leaderboard_from_db(db: &PgPool) -> Result<Vec<LeaderboardEntry>> {
             let (lo, hi) = bootstrap_ci(&runs, p50);
             Some(LeaderboardEntry {
                 handle: r.handle,
-                band: band_for(&bands, p50),
                 p50_ns: p50,
                 p99_ns: r.p99_ns,
                 probe_cost_ns: r.probe_cost_ns,

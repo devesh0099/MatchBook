@@ -254,6 +254,22 @@ async fn process_submission(
 /// beside it was removed. It throttled people who were already blocked behind
 /// their own job, and protected nothing the pending rule was not already
 /// protecting.
+///
+/// What the incumbent job is DOING decides what happens to the new submission:
+///
+///   * `benchmarking` — hold. The bench node has exclusive use of an isolated
+///     core and is a minute into nine timed runs; discarding that to start over
+///     with newer code throws away real measurement and gains nothing.
+///   * `bench_queued` / `pending_benchmark` — waiting, not running, so nothing
+///     is lost by replacing it. The incumbent is marked `superseded` and the
+///     new submission takes the slot AND ITS QUEUE POSITION: the participant
+///     already waited for it, holds exactly one slot either way, and nobody
+///     else is delayed by the swap.
+///   * anything else — a stale slot (the job finished but `clear_pending` did
+///     not run). Take it; there is nothing to supersede.
+///
+/// Holding is the only branch that leaves work for someone else to pick up:
+/// the janitor promotes it when the running job ends.
 async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<()> {
     let mut tx = db.begin().await?;
 
@@ -264,37 +280,64 @@ async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<
     .fetch_optional(&mut *tx)
     .await?;
 
-    let eligible = !matches!(&slot, Some((_, Some(_))));
+    // Inherit the incumbent's queue position when replacing it.
+    let mut inherited_at: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut superseded: Option<i64> = None;
 
-    if !eligible {
-        // Say so, on the submission.
-        //
-        // /submit answers the rate question at request time, but the slot is
-        // only TAKEN here, when verification passes. Between the two, an
-        // earlier submission can pass and claim it — so a participant told
-        // "will queue for the benchmark" can end up at verify_passed forever
-        // with nothing explaining why. That is exactly the silently-dropped
-        // job plan section 2 designs against, arriving by a different route.
-        let reason = match &slot {
-            Some((_, Some(pending))) => format!(
-                "held: submission #{pending} is already queued for the benchmark. \
-                 One pending benchmark job per participant."
-            ),
-            _ => "held: not eligible for the benchmark lane".to_string(),
-        };
-        sqlx::query(
-            "UPDATE submissions SET verify_detail = \
-             COALESCE(verify_detail, '{}'::jsonb) || jsonb_build_object('bench_held', $2::text), \
-             updated_at = now() WHERE id = $1",
+    if let Some((_, Some(incumbent))) = slot {
+        // Re-read the incumbent's state INSIDE this transaction, holding its
+        // row. This is the race that decides whether replacing is safe: the
+        // bench worker can claim a queued job at the same instant. If it won,
+        // the row now reads `benchmarking` and we hold. If we won, the worker's
+        // claim uses SKIP LOCKED and passes over this row to take another job.
+        let cur: Option<(SubState, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            "SELECT state, bench_queued_at FROM submissions WHERE id = $1 FOR UPDATE",
         )
-        .bind(id)
-        .bind(&reason)
-        .execute(&mut *tx)
+        .bind(incumbent)
+        .fetch_optional(&mut *tx)
         .await?;
-        tx.commit().await?;
-        log_event(db, Some(id), "bench_enqueue_declined", serde_json::json!({ "reason": reason }))
-            .await?;
-        return Ok(());
+
+        match cur {
+            Some((SubState::Benchmarking, _)) => {
+                let reason = format!(
+                    "held: submission #{incumbent} is being benchmarked right now. \
+                     A running timing job is never interrupted — this one queues \
+                     automatically when it finishes."
+                );
+                sqlx::query(
+                    "UPDATE submissions SET verify_detail = \
+                     COALESCE(verify_detail, '{}'::jsonb) || jsonb_build_object('bench_held', $2::text), \
+                     updated_at = now() WHERE id = $1",
+                )
+                .bind(id)
+                .bind(&reason)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                log_event(db, Some(id), "bench_enqueue_held", serde_json::json!({ "reason": reason }))
+                    .await?;
+                return Ok(());
+            }
+            Some((SubState::BenchQueued, queued_at)) | Some((SubState::PendingBenchmark, queued_at)) => {
+                inherited_at = queued_at;
+                sqlx::query(
+                    "UPDATE submissions SET state = 'superseded', updated_at = now(), \
+                     verify_detail = COALESCE(verify_detail, '{}'::jsonb) \
+                       || jsonb_build_object('superseded_by', $2::bigint) \
+                     WHERE id = $1",
+                )
+                .bind(incumbent)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+                // Logged after the commit, not here: this transaction can still
+                // abort, and an audit line for a supersede that never happened
+                // is worse than no line at all.
+                superseded = Some(incumbent);
+            }
+            // Stale slot, or the incumbent already reached a terminal state.
+            _ => {}
+        }
     }
 
     // If no bench worker is healthy, park rather than error: correctness keeps
@@ -305,11 +348,16 @@ async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<
             .await?;
     let target = if healthy > 0 { SubState::BenchQueued } else { SubState::PendingBenchmark };
 
-    sqlx::query("UPDATE submissions SET state = $2, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(target)
-        .execute(&mut *tx)
-        .await?;
+    // COALESCE keeps the inherited position when this replaced a queued job.
+    sqlx::query(
+        "UPDATE submissions SET state = $2, updated_at = now(), \
+         bench_queued_at = COALESCE($3, now()) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(target)
+    .bind(inherited_at)
+    .execute(&mut *tx)
+    .await?;
 
     // last_bench_at no longer gates anything — it is kept as a record of when a
     // participant last took the bench slot, which is worth having in the
@@ -325,6 +373,11 @@ async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<
     .await?;
 
     tx.commit().await?;
+
+    if let Some(old) = superseded {
+        log_event(db, Some(old), "bench_superseded", serde_json::json!({ "superseded_by": id }))
+            .await?;
+    }
     Ok(())
 }
 
@@ -337,9 +390,14 @@ pub async fn run_bench(db: PgPool, cfg: Config) -> Result<()> {
     loop {
         // Steal-time discards requeue at the FRONT, so priority leads the sort.
         let row: Option<(i64, i32, String, Option<Vec<i64>>)> = sqlx::query_as(
+            // Ordered on bench_queued_at, NOT id. A submission held behind its
+            // participant's own running job enters the queue long after it was
+            // created, and ordering by id would seat that hour-old row ahead of
+            // everyone who queued while it waited.
             "UPDATE submissions SET state = 'benchmarking', claimed_by = $1, updated_at = now() \
              WHERE id = (SELECT id FROM submissions WHERE state = 'bench_queued' \
-                         ORDER BY requeue_priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED) \
+                         ORDER BY requeue_priority DESC, bench_queued_at ASC NULLS LAST, id \
+                         LIMIT 1 FOR UPDATE SKIP LOCKED) \
              RETURNING id, participant_id, source_hash, bench_seed_set",
         )
         .bind(&cfg.worker_id)
@@ -501,7 +559,20 @@ async fn run_bench_job(
 /// Contamination detection by MEASUREMENT rather than inference: throttling,
 /// frequency drift and a mystery daemon all show up here without any per-run
 /// classification logic.
-const SPOT_CHECK_TOLERANCE: f64 = 0.02;
+///
+/// 5%, not 2%. The tolerance has to sit ABOVE the node's own run-to-run spread
+/// or it condemns a healthy node: `ops/noise-floor/analyze.py` calls a 2-5%
+/// spread workable, so a 2% tolerance fires on ordinary variance for any node
+/// that is not near-silent. That is not theoretical — on shared tenancy, and on
+/// any developer machine, 2% marks the node unhealthy within the hour and every
+/// submission parks at `pending_benchmark`.
+///
+/// The cost of the wider band is a real 3% contamination going unnoticed. That
+/// is the right trade: this check exists to catch a node that has BROKEN, and
+/// the end-of-event rejudge — one continuous block, one seed, reference runs
+/// bracketing both ends — is what actually defends the numbers that decide
+/// ranking. Tighten it only for a node whose measured spread earns it.
+const SPOT_CHECK_TOLERANCE: f64 = 0.05;
 
 async fn reference_spot_check(db: &PgPool, cfg: &Config, _sandbox: &Sandbox) -> Result<()> {
     // Long enough that the harness's derived warm-up (~3.9M events for this
@@ -509,7 +580,7 @@ async fn reference_spot_check(db: &PgPool, cfg: &Config, _sandbox: &Sandbox) -> 
     // against a SETTLED 300k-order book — the same memory-bound work a ranked
     // run does. At 2M it would time the book still filling from 50k to 130k:
     // deterministic, so the baseline would still be stable, but a number whose
-    // meaning changes with any depth retune, compared against a 2% tolerance.
+    // meaning changes with any depth retune, compared against a fixed tolerance.
     let out = tokio::process::Command::new(&cfg.harness_bin)
         .args([
             "bench", "--seed", "1", "--profile", BENCH_PROFILE, "--events", "5000000", "--runs",

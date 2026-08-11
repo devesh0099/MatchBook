@@ -36,21 +36,6 @@ The bench setup **refuses to mark the node healthy** if hygiene fails. Do not
 override it; a half-tuned node produces numbers that look fine and rank people
 wrongly.
 
-### Calibrate the bands
-
-Thresholds live in the `settings` table, not in the binary, so this is done on
-the morning without a deploy:
-
-```sql
-INSERT INTO settings (key, value) VALUES ('bands',
-  '[{"name":"gold","max_ns":X},{"name":"silver","max_ns":Y},{"name":"bronze","max_ns":Z}]'::jsonb)
-ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
-```
-
-Set them relative to the reference p50 measured on the **actual** bench node
-during the noise-floor run. Anything above the last threshold is `finisher`.
-Shipping the defaults unchanged means the bands mean nothing.
-
 ### Publish the kit
 
 ```sh
@@ -123,9 +108,14 @@ A rising rate means look now, not later.
 Every ~20 minutes the bench worker re-runs the reference by itself. The FIRST
 one after the node comes up records the morning baseline into
 `settings.bench_reference_baseline_ns`; every later one is compared against it,
-and **>2% deviation marks the node unhealthy and logs
+and **>5% deviation marks the node unhealthy and logs
 `reference_spot_check_alert`**. Jobs then park as `pending_benchmark` rather
 than being measured on a machine that has moved.
+
+The tolerance sits above the node's own run-to-run spread on purpose. A 2% gate
+fires on ordinary variance for anything that is not near-silent — `analyze.py`
+calls a 2-5% spread workable — and parks the entire queue for it. Tighten it
+only for a node whose measured spread earns it.
 
 This is contamination detection by measurement rather than by inference —
 throttling, frequency drift and a mystery daemon all show up here without any

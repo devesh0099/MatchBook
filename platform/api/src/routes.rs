@@ -250,7 +250,8 @@ async fn submit(
     .await
     .map_err(internal)?;
 
-    let (will_queue, reason, wait) = bench_eligibility(slot);
+    let inc = incumbent_state(&mut *tx, &slot).await;
+    let (will_queue, reason, wait) = bench_eligibility(slot, inc);
 
     tx.commit().await.map_err(internal)?;
 
@@ -272,21 +273,57 @@ async fn submit(
 /// number of participants, whatever anyone does — and the cooldown only added
 /// a wait for people who were already waiting behind their own job.
 ///
-/// Both `submit` (which enforces this) and `queue` (which reports it, so the
-/// editor can grey the button before the click rather than after) call here. A
-/// second copy in the browser would eventually disagree with the rule that
-/// actually decides.
+/// This reports what submitting WOULD DO; it is not permission to submit.
+/// Submitting is always allowed. Holding an outstanding benchmark used to grey
+/// the Submit button, which made the two useful cases unreachable: replacing a
+/// job that is only waiting, and letting the next one queue itself when a
+/// running job ends. A disabled button also could not be honest — "one at a
+/// time" reads as "you may not submit" when what actually happens is that your
+/// newest correct code takes the slot.
+///
+/// Both `submit` and `queue` call here, so the editor's message and the
+/// server's behaviour cannot drift apart.
 fn bench_eligibility(
     slot: Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)>,
+    incumbent_state: Option<SubState>,
 ) -> (bool, String, i64) {
-    match slot {
-        Some((_, Some(pending))) => (
+    match (slot, incumbent_state) {
+        // Being timed right now. Never interrupted; the new one is held and the
+        // janitor queues it when this finishes.
+        (Some((_, Some(pending))), Some(SubState::Benchmarking)) => (
             false,
-            format!("submission #{pending} is already queued for the benchmark"),
+            format!(
+                "submission #{pending} is being benchmarked now — a new submission queues \
+                 itself as soon as it finishes"
+            ),
+            0,
+        ),
+        // Waiting, not running: a new submission replaces it and keeps its place.
+        (Some((_, Some(pending))), _) => (
+            true,
+            format!("replaces submission #{pending}, which is still waiting, and keeps its place in the queue"),
             0,
         ),
         _ => (true, "eligible".to_string(), 0),
     }
+}
+
+/// The state of the participant's outstanding bench job, if they have one.
+async fn incumbent_state(
+    db: impl sqlx::PgExecutor<'_>,
+    slot: &Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)>,
+) -> Option<SubState> {
+    let pending = match slot {
+        Some((_, Some(p))) => *p,
+        _ => return None,
+    };
+    let row: Option<(SubState,)> = sqlx::query_as("SELECT state FROM submissions WHERE id = $1")
+        .bind(pending)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+    row.map(|r| r.0)
 }
 
 // ---------------------------------------------------------------- results
@@ -408,7 +445,8 @@ async fn queue(State(st): State<AppState>, Query(q): Query<WhoQuery>) -> ApiResu
             .fetch_optional(&st.db)
             .await
             .map_err(internal)?;
-    let (ready, reason, wait) = bench_eligibility(slot);
+    let inc = incumbent_state(&st.db, &slot).await;
+    let (ready, reason, wait) = bench_eligibility(slot, inc);
 
     Ok(Json(json!({
         "depth": depth,

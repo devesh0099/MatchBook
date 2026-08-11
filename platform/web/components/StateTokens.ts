@@ -39,6 +39,7 @@ export function toneOf(state: SubState): Tone {
     case 'verify_timeout':
       return 'slow';
     case 'pending_benchmark':
+    case 'superseded':
       return 'idle';
     case 'benchmarking':
     case 'bench_queued':
@@ -82,6 +83,8 @@ export function stateShort(state: SubState): string {
       return 'benchmarking';
     case 'bench_verify_failed':
       return 'diverged on bench';
+    case 'superseded':
+      return 'superseded';
     case 'done':
       return 'done';
     case 'error':
@@ -106,7 +109,7 @@ export function stateBlurb(state: SubState): string {
     case 'verify_timeout':
       return 'Your engine stopped producing output before the stream ended. This is a liveness bug, not a wrong answer — the output matched up to the point it stalled.';
     case 'verify_passed':
-      return 'Correct on every rule. You are eligible for ranking and the timing run has been queued.';
+      return 'Correct on every rule. The timing run is queued, unless a benchmark of yours is already running — in that case this one takes the slot automatically when that finishes.';
     case 'bench_queued':
       return 'Waiting for the benchmark node, which runs exactly one submission at a time.';
     case 'pending_benchmark':
@@ -115,6 +118,8 @@ export function stateBlurb(state: SubState): string {
       return 'Nine timed runs against a 300,000-order book on an isolated core. This page updates itself.';
     case 'bench_verify_failed':
       return 'Your engine passed correctness but produced different output while being timed. A ranked run is verified as it runs, so this cannot be scored.';
+    case 'superseded':
+      return 'Correct, but never timed: you submitted newer code that passed while this one was still waiting for the benchmark node, and it took this slot. Nothing was lost — the newer submission is the one being ranked.';
     case 'done':
       return 'Median of the nine per-run p50s. The interval below is the spread across runs, not a confidence bound.';
     case 'error':

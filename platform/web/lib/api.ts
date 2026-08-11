@@ -15,6 +15,7 @@ export type SubState =
   | 'pending_benchmark'
   | 'benchmarking'
   | 'bench_verify_failed'
+  | 'superseded'
   | 'done'
   | 'error';
 
@@ -103,7 +104,6 @@ export interface SubmitResponse {
 
 export interface LeaderboardEntry {
   handle: string;
-  band: string;
   p50_ns: number;
   p99_ns: number | null;
   probe_cost_ns: number | null;
@@ -200,6 +200,7 @@ export function isTerminal(state: SubState): boolean {
     'verify_failed',
     'verify_timeout',
     'bench_verify_failed',
+    'superseded',
     'done',
     'error',
   ].includes(state);
@@ -231,6 +232,8 @@ export function stateLabel(state: SubState): string {
       return 'Benchmarking';
     case 'bench_verify_failed':
       return 'Diverged during the benchmark run';
+    case 'superseded':
+      return 'Superseded by newer code';
     case 'done':
       return 'Done';
     case 'error':
@@ -250,6 +253,7 @@ export function stateTone(state: SubState): 'good' | 'bad' | 'warn' | 'busy' {
       return 'bad';
     case 'verify_timeout':
     case 'pending_benchmark':
+    case 'superseded':
       return 'warn';
     default:
       return 'busy';

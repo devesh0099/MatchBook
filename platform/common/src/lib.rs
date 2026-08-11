@@ -31,6 +31,11 @@ pub enum SubState {
     /// Passed correctness, diverged on the benchmark stream. Its own outcome,
     /// not a generic failure.
     BenchVerifyFailed,
+    /// Correct, but never benchmarked: newer verified code from the same
+    /// participant replaced it while it was waiting. Only ever reached from a
+    /// WAITING state — a submission that is already being timed is never
+    /// superseded.
+    Superseded,
     Done,
     Error,
 }

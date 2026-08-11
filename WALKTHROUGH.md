@@ -114,11 +114,14 @@ sequenceDiagram
     P->>DB: 'bench_queued' + take bench_slot
   else no bench worker healthy
     P->>DB: 'pending_benchmark' (held, not lost)
-  else a benchmark of theirs is already queued
+  else their job is WAITING
+    P->>DB: old one 'superseded'; new one takes the slot AND its queue position
+  else their job is RUNNING
     P->>DB: verify_detail.bench_held = why
+    Note over DB: janitor promotes it when that run ends
   end
 
-  B->>DB: claim by (requeue_priority DESC, id)
+  B->>DB: claim by (requeue_priority DESC, bench_queued_at)
   B->>B: recompile locally, then 9 ranked runs
   B->>DB: 'done' + p50 · p99 · probe · run_p50s
   U->>A: GET /submissions/:id (2s poll)
@@ -136,8 +139,12 @@ stateDiagram-v2
   verifying --> verify_timeout
   verifying --> verify_passed
   verify_passed --> bench_queued
+  verify_passed --> bench_queued: janitor, their running job ended
+  verify_passed --> superseded: they submitted newer correct code
   verify_passed --> pending_benchmark: no healthy bench node
   pending_benchmark --> bench_queued: janitor, node returns
+  pending_benchmark --> superseded: replaced while parked
+  bench_queued --> superseded: replaced while waiting
   bench_queued --> benchmarking
   benchmarking --> done
   benchmarking --> bench_verify_failed
@@ -147,6 +154,7 @@ stateDiagram-v2
   verify_failed --> [*]
   verify_timeout --> [*]
   bench_verify_failed --> [*]
+  superseded --> [*]
   done --> [*]
 ```
 
@@ -241,11 +249,11 @@ me-platform/
 |---|--:|---|
 | `db/001_schema.sql` | 112 | The whole data model. The queue is the `submissions` table. |
 | `common/src/lib.rs` | 85 | `SubState` + the harness exit codes — both cross a process boundary, so they are defined once. |
-| `api/src/routes.rs` | 395 | Participant routes. The one-pending-benchmark rule is answered **at enqueue** and returned in the response, and reported by `/queue` so the editor can grey Submit before the click. |
+| `api/src/routes.rs` | 459 | Participant routes. `bench_eligibility` reports what submitting WOULD DO — replace a waiting job, or queue behind a running one — rather than whether you may submit. Submit is never disabled. |
 | `api/src/admin.rs` | 255 | Operator router: freeze, requeue, bench health, rebuild, **rejudge** (one shared seed for everyone). |
-| `api/src/janitor.rs` | 139 | Crash recovery. Timeouts sit *above* each isolate wall-time, so it can only catch a dead worker. Every action → `events_log`. |
-| `api/src/state.rs` | 185 | Leaderboard view, runtime-loaded bands, bootstrap CI. |
-| `worker/src/roles.rs` | 773 | Both roles. Pool claims `run_jobs` first (Run is the iteration loop). Bench recompiles locally and pins a seed on rejudge. |
+| `api/src/janitor.rs` | 251 | Crash recovery, plus `promote_held`: seats each participant's newest held submission when their slot frees, superseding the rest. Timeouts sit *above* each isolate wall-time, so it can only catch a dead worker. Every action → `events_log`. |
+| `api/src/state.rs` | 132 | Leaderboard read model. Ranking is a strict total order — p50 ascending, equal scores broken by the earlier submission — plus the bootstrap CI, which is published but does not affect rank. |
+| `worker/src/roles.rs` | 916 | Both roles. Pool claims `run_jobs` first (Run is the iteration loop). `try_enqueue_bench` replaces a waiting job and never a running one. Bench recompiles locally, claims in queue-entry order, and pins a seed on rejudge. |
 | `worker/src/sandbox.rs` | 298 | isolate. Carries `--processes=N` (attached form is **required**) and `crashed()` = `SG` only, since isolate reports `RE` for any non-zero exit. |
 | `worker/tests/sandbox_integration.rs` | 229 | Four tests against real isolate, one per behaviour that was got wrong. |
 | `web/scripts/sync-assets.mjs` | 75 | Generates the editor buffer from `engine/` and vendors Monaco locally. |
