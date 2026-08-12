@@ -42,7 +42,12 @@ done
 
 echo
 echo "== systemd timers =="
-n_timers=$(systemctl list-timers --no-pager --no-legend 2>/dev/null | grep -vc '^$' || true)
+# Count only timers with a NEXT elapse time. A masked timer stays loaded in a
+# failed state and `list-timers` keeps printing a row for it, with "-" in every
+# time column — counting that row reported an armed timer that can never fire,
+# and no amount of masking would clear it. The first field is NEXT.
+n_timers=$(systemctl list-timers --no-pager --no-legend 2>/dev/null \
+  | awk 'NF && $1 != "-"' | grep -vc '^$' || true)
 if [[ "${n_timers:-0}" -gt 0 ]]; then
   fail "$n_timers systemd timer(s) armed — each one is a scheduled interruption"
   systemctl list-timers --no-pager --no-legend 2>/dev/null | awk '{print "       " $NF}' | head -8

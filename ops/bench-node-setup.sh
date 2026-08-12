@@ -44,7 +44,10 @@ export BENCH_CPU="${BENCH_CPU:-4}"
 # ISOLATED_CPUS=2-3. A hardcoded housekeeping list of 0-3 then covers every CPU
 # on the box, so IRQs land on the isolated cores and the tuning that the ranked
 # numbers depend on quietly does nothing.
-NCPU="$(nproc)"
+# --all matters: once isolcpus is in effect, a shell's affinity excludes the
+# isolated CPUs and plain `nproc` reports 2 on this 4-core node. Re-provisioning
+# would then compute BENCH_CPU=1, which is not an isolated core at all.
+NCPU="$(nproc --all)"
 declare -A _isolated=()
 IFS=',' read -ra _ranges <<< "$ISOLATED_CPUS"
 for _r in "${_ranges[@]}"; do
@@ -96,7 +99,14 @@ echo "==> removing everything that could wake up mid-measurement"
 # under snap.amazon-ssm-agent.amazon-ssm-agent.service. Checking the wrong name
 # is worse than not checking: it reports ok for the exact thing it exists to
 # catch.
-for svc in amazon-cloudwatch-agent amazon-ssm-agent unattended-upgrades snapd \
+# MASK, not disable. Two ways `disable` silently fails, both seen on this AMI:
+# a socket-activated service comes straight back (snapd.service reported
+# "disabled" while running, because snapd.socket was still enabled), and a
+# STATIC unit ignores disable entirely (systemd-tmpfiles-clean.timer re-armed on
+# the next boot). Masking symlinks the unit to /dev/null and survives reboots,
+# which is what matters now that activating CPU isolation requires one.
+for svc in amazon-cloudwatch-agent amazon-ssm-agent unattended-upgrades \
+           snapd snapd.socket snapd.seeded.service \
            snap.amazon-ssm-agent.amazon-ssm-agent.service \
            cron apt-daily.timer apt-daily-upgrade.timer motd-news.timer \
            fstrim.timer man-db.timer logrotate.timer e2scrub_all.timer \
@@ -104,7 +114,7 @@ for svc in amazon-cloudwatch-agent amazon-ssm-agent unattended-upgrades snapd \
            sysstat-collect.timer sysstat-summary.timer \
            fwupd-refresh.timer update-notifier-download.timer \
            update-notifier-motd.timer; do
-  systemctl disable --now "$svc" 2>/dev/null && echo "    disabled $svc" || true
+  systemctl mask --now "$svc" 2>/dev/null && echo "    masked $svc" || true
 done
 systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
 
@@ -122,8 +132,14 @@ systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
 remaining=$(systemctl list-timers --no-pager --no-legend 2>/dev/null | awk '{print $NF}' | grep -v '^$' || true)
 for t in $remaining; do
   unit="${t%.service}.timer"
-  systemctl disable --now "$unit" 2>/dev/null && echo "    disabled $unit (not in the explicit list — consider adding it)" || true
+  systemctl mask --now "$unit" 2>/dev/null && echo "    masked $unit (not in the explicit list — consider adding it)" || true
 done
+
+# Masking leaves the unit loaded in a failed state, where list-timers still
+# prints a row for it. reset-failed unloads it, so the hygiene count reflects
+# what can actually fire.
+systemctl reset-failed 2>/dev/null || true
+systemctl daemon-reload 2>/dev/null || true
 
 echo "==> swap off"
 # Memory limits do not affect swapped-out data, and a swap-in inside a timed
@@ -154,6 +170,31 @@ g++ --version | head -1 | tee "$PREFIX/TOOLCHAIN"
 echo "==> isolate"
 "$(dirname "${BASH_SOURCE[0]}")/install-isolate.sh"
 
+# Writing kernel parameters on an Ubuntu cloud image means writing a DROP-IN,
+# not editing /etc/default/grub.
+#
+# The AMI ships /etc/default/grub.d/50-cloudimg-settings.cfg, and update-grub
+# sources everything in that directory AFTER /etc/default/grub — so it reassigns
+# GRUB_CMDLINE_LINUX_DEFAULT and silently discards whatever was set in the main
+# file. That is exactly what happened here: /etc/default/grub read
+# "isolcpus=2-3 nohz_full=2-3 rcu_nocbs=2-3", update-grub ran without error, the
+# node rebooted, and /proc/cmdline came back with only the cloud image's own
+# console= and nvme_core.io_timeout= settings. No warning anywhere.
+#
+# 99- sorts after 50-, so this one wins. It APPENDS rather than replaces,
+# because the settings it would otherwise drop are ones EC2 needs: console=
+# feeds the serial console, and nvme_core.io_timeout keeps the root volume from
+# giving up under load.
+write_grub_params() {
+  local params="$1"
+  install -d /etc/default/grub.d
+  cat > /etc/default/grub.d/99-mebench.cfg <<EOF
+# Written by ops/bench-node-setup.sh. Appends to whatever the cloud image set.
+GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT $params"
+EOF
+  update-grub
+}
+
 if [[ "$MODE" == "metal" ]]; then
   echo "==> boot parameters (metal)"
   # isolcpus     removes cores from the load balancer — the biggest single win
@@ -168,13 +209,7 @@ if [[ "$MODE" == "metal" ]]; then
   PARAMS="$PARAMS mitigations=off nosmt audit=0 nmi_watchdog=0"
   PARAMS="$PARAMS hugepagesz=1G hugepages=8"
 
-  cp /etc/default/grub "/etc/default/grub.bak.$(date +%s)"
-  if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
-    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$PARAMS\"|" /etc/default/grub
-  else
-    echo "GRUB_CMDLINE_LINUX_DEFAULT=\"$PARAMS\"" >> /etc/default/grub
-  fi
-  update-grub
+  write_grub_params "$PARAMS"
   echo "    boot parameters written — A REBOOT IS REQUIRED before they take effect."
   echo "    $PARAMS"
 else
@@ -209,13 +244,7 @@ else
   PARAMS="isolcpus=$ISOLATED_CPUS nohz_full=$ISOLATED_CPUS rcu_nocbs=$ISOLATED_CPUS"
   PARAMS="$PARAMS nmi_watchdog=0"
 
-  cp /etc/default/grub "/etc/default/grub.bak.$(date +%s)"
-  if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
-    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$PARAMS\"|" /etc/default/grub
-  else
-    echo "GRUB_CMDLINE_LINUX_DEFAULT=\"$PARAMS\"" >> /etc/default/grub
-  fi
-  update-grub
+  write_grub_params "$PARAMS"
 
   # A marker rather than a printed instruction: ops/aws/deploy.sh reboots the
   # node and re-runs the hygiene assertions afterwards, so the isolation is
