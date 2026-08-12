@@ -104,13 +104,41 @@ resource "aws_security_group" "worker" {
   }
 }
 
-# One rule per CIDR: the modern rule resources take a single cidr_ipv4 rather
-# than a list.
-resource "aws_vpc_security_group_ingress_rule" "worker_ssh" {
-  for_each = toset(var.ssh_cidrs)
+# SSH to the workers comes from the WEB GROUP, never from the internet.
+#
+# These two nodes compile and execute participant-submitted C++, and nothing
+# outside the VPC has any reason to reach them. They still hold a public IP,
+# because the only egress path in this VPC is the internet gateway and an IGW
+# requires one — without it cloud-init cannot reach apt, rustup or GitHub, and
+# the worker cannot reach S3 to fetch submission source. A NAT gateway would
+# remove that need at about $40/month.
+#
+# Inbound and outbound are separate concerns, which is what makes this work: a
+# security group is default-deny inbound, so with no CIDR rule here nothing on
+# the internet can open a connection — packets are dropped, not refused. And
+# security groups are STATEFUL, so replies to connections the node itself opens
+# come back regardless. The public IP becomes outbound-only.
+#
+# Operator access is therefore a jump through the web node; ops/aws/lib.sh does
+# this automatically.
+resource "aws_vpc_security_group_ingress_rule" "worker_ssh_from_web" {
+  security_group_id            = aws_security_group.worker.id
+  description                  = "SSH, from the web node only — operators jump through it"
+  referenced_security_group_id = aws_security_group.web.id
+  from_port                    = 22
+  to_port                      = 22
+  ip_protocol                  = "tcp"
+}
+
+# Deliberately empty by default. This is the break-glass path for the case the
+# jump host is the thing that is broken: set it to your own /32, apply, fix the
+# web node, then set it back. Editing main.tf under time pressure is how
+# mistakes get made, so the lever exists ahead of time.
+resource "aws_vpc_security_group_ingress_rule" "worker_ssh_direct" {
+  for_each = toset(var.worker_ssh_cidrs)
 
   security_group_id = aws_security_group.worker.id
-  description       = "SSH. Key-only auth is the control here, not the CIDR."
+  description       = "SSH, direct break-glass access"
   cidr_ipv4         = each.value
   from_port         = 22
   to_port           = 22

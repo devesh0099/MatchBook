@@ -113,6 +113,20 @@ variable "web_ingress_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
+variable "worker_ssh_cidrs" {
+  description = <<-EOT
+    Break-glass direct SSH to the pool and bench nodes. Empty by default, which
+    is the point: those two nodes accept SSH only from the web security group,
+    so operators reach them by jumping through the web node and nothing on the
+    internet can open a connection to them at all.
+
+    Set this to your own /32 only when the jump host itself is what is broken.
+    ssh_cidrs still governs the web node, which must stay reachable.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
 variable "restrict_worker_egress" {
   description = <<-EOT
     Narrow the worker nodes' outbound rules to the ports they actually use

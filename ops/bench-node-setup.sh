@@ -168,7 +168,7 @@ if [[ "$MODE" == "metal" ]]; then
   PARAMS="$PARAMS mitigations=off nosmt audit=0 nmi_watchdog=0"
   PARAMS="$PARAMS hugepagesz=1G hugepages=8"
 
-  cp /etc/default/grub /etc/default/grub.bak.$(date +%s)
+  cp /etc/default/grub "/etc/default/grub.bak.$(date +%s)"
   if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
     sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$PARAMS\"|" /etc/default/grub
   else
@@ -178,9 +178,57 @@ if [[ "$MODE" == "metal" ]]; then
   echo "    boot parameters written — A REBOOT IS REQUIRED before they take effect."
   echo "    $PARAMS"
 else
-  echo "==> dedicated instance: skipping boot parameters"
-  echo "    isolcpus/nohz_full/nosmt cannot be set here. Runtime tuning below is"
-  echo "    what you get; the noise floor measurement tells you if it is enough."
+  echo "==> boot parameters (dedicated / virtualised)"
+  # An earlier version of this script said isolcpus and nohz_full "cannot be set
+  # here". That was wrong, and it cost the thing the node exists for: they are
+  # GUEST KERNEL scheduler features and the hypervisor has no say in them. On a
+  # stock Ubuntu AWS kernel CONFIG_NO_HZ_FULL, CONFIG_RCU_NOCB_CPU and
+  # CONFIG_CPUSETS are all enabled. What they need is a reboot, and skipping
+  # them left CPUs that were "isolated" in name only — with taskset and IRQ
+  # affinity doing all the work while the scheduler, RCU callbacks and the
+  # timer tick still landed on the measured cores.
+  #
+  # This is a deliberately SMALLER set than --metal writes, because most of the
+  # rest is a no-op or actively harmful in a guest:
+  #
+  #   intel_pstate=disable, processor.max_cstate, intel_idle.max_cstate
+  #       no such drivers inside an EC2 guest; the hypervisor owns frequency
+  #       and C-states. Setting them changes nothing.
+  #   nosmt
+  #       redundant — cpu_options.threads_per_core = 1 already did it at launch.
+  #   hugepagesz=1G hugepages=8
+  #       reserves 8 GB on a 16 GB node for a harness buffer of about 240 MB,
+  #       and mlockall fails inside isolate regardless.
+  #   mitigations=off
+  #       DELIBERATELY OMITTED. It works in a guest, and it is a security
+  #       decision, not a tuning one: this node runs participant-submitted C++,
+  #       and disabling speculative-execution mitigations opens side channels
+  #       against other people's submissions and the instance credentials on a
+  #       box where the source IS the prize. It also changes measured
+  #       performance in ways that favour some code over others.
+  PARAMS="isolcpus=$ISOLATED_CPUS nohz_full=$ISOLATED_CPUS rcu_nocbs=$ISOLATED_CPUS"
+  PARAMS="$PARAMS nmi_watchdog=0"
+
+  cp /etc/default/grub "/etc/default/grub.bak.$(date +%s)"
+  if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
+    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$PARAMS\"|" /etc/default/grub
+  else
+    echo "GRUB_CMDLINE_LINUX_DEFAULT=\"$PARAMS\"" >> /etc/default/grub
+  fi
+  update-grub
+
+  # A marker rather than a printed instruction: ops/aws/deploy.sh reboots the
+  # node and re-runs the hygiene assertions afterwards, so the isolation is
+  # actually in effect before any submission is measured. A message in a log
+  # nobody reads is how this got skipped in the first place.
+  if ! grep -q "isolcpus=$ISOLATED_CPUS" /proc/cmdline; then
+    touch /var/lib/mebench-reboot-required
+    echo "    boot parameters written — REBOOT REQUIRED before they take effect"
+    echo "    $PARAMS"
+  else
+    rm -f /var/lib/mebench-reboot-required
+    echo "    already active on the running kernel"
+  fi
 fi
 
 echo "==> runtime tuning"

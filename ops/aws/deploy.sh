@@ -172,6 +172,41 @@ provision_bench() {
   log "bench node presents $ncpu CPUs: 0-$((half - 1)) for the OS, $half-$((ncpu - 1)) isolated"
   node bench "cd /opt/flashmatch && sudo BENCH_CPU=$half ISOLATED_CPUS=$half-$((ncpu - 1)) \
     ops/bench-node-setup.sh --dedicated"
+
+  # isolcpus, nohz_full and rcu_nocbs only take effect on the next boot, so the
+  # reboot is part of provisioning rather than a note for someone to action
+  # later. Without it the node measures on cores the scheduler is still using
+  # and reports success either way.
+  if node bench 'test -f /var/lib/mebench-reboot-required' 2>/dev/null; then
+    echo "rebooting bench to activate CPU isolation"
+    node bench 'sudo systemctl reboot' 2>/dev/null || true
+
+    # Wait for it to go away and come back; sshd answering immediately would
+    # just be the pre-reboot session.
+    sleep 20
+    local deadline=$(( SECONDS + 300 ))
+    while (( SECONDS < deadline )); do
+      if node bench 'test -f /var/lib/cloud/flashmatch-ready' 2>/dev/null; then break; fi
+      sleep 10
+    done
+    (( SECONDS < deadline )) || { echo "bench did not come back after reboot" >&2; return 1; }
+
+    # Assert the parameters are actually on the running kernel, rather than
+    # trusting that update-grub plus a reboot did what it should.
+    local cmdline
+    cmdline="$(node bench 'cat /proc/cmdline')"
+    for want in isolcpus nohz_full rcu_nocbs; do
+      grep -q "$want=" <<<"$cmdline" || {
+        echo "after reboot, $want is STILL not on the kernel cmdline:" >&2
+        echo "  $cmdline" >&2
+        return 1
+      }
+    done
+    echo "CPU isolation active: $(grep -o 'isolcpus=[^ ]*' <<<"$cmdline")"
+
+    node bench 'cd /opt/flashmatch && sudo BENCH_CPU=$(( $(nproc) / 2 )) ops/bench-hygiene.sh' \
+      || { echo "bench-hygiene.sh failed after reboot" >&2; return 1; }
+  fi
 }
 
 if should_run build; then

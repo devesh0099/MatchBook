@@ -44,13 +44,27 @@ for port in 5432:Postgres 8081:"operator API"; do
   fi
 done
 
-for role in pool bench; do
-  ip="$(_ip_for_role "$role")"
-  if timeout 6 bash -c "</dev/tcp/$ip/80" 2>/dev/null; then
-    check_fail "$role node answers on :80 — only the web node should"
-  fi
+# The worker nodes keep a public IP for egress, but accept SSH only from the web
+# security group — so from out here every port must be dead, port 22 included.
+# Probing the PUBLIC address is the whole point: the private one is unroutable
+# from a laptop and would pass this check without testing anything.
+for pair in "pool:$POOL_PUBLIC_IP" "bench:$BENCH_PUBLIC_IP"; do
+  role="${pair%%:*}"; ip="${pair#*:}"
+  [[ -z "$ip" ]] && continue
+  for port in 22 80; do
+    if timeout 6 bash -c "</dev/tcp/$ip/$port" 2>/dev/null; then
+      check_fail "$role is REACHABLE on $ip:$port from the internet — it must not be"
+    fi
+  done
+  ok "$role sealed from the internet ($ip: 22 and 80 both dead)"
 done
-ok "worker nodes expose no HTTP"
+
+# And prove the jump still works, or the seal has locked the operator out too.
+if node pool true 2>/dev/null; then
+  ok "operator access to workers via jump through web works"
+else
+  check_fail "cannot reach the pool node through the web jump host — operator access is broken"
+fi
 
 # ------------------------------------------------------------------ the app
 

@@ -8,11 +8,29 @@ output "web_private_ip" {
 }
 
 output "pool_public_ip" {
-  value = aws_instance.pool.public_ip
+  description = "Outbound only. Nothing can connect IN — the worker group accepts SSH from the web group alone."
+  value       = aws_instance.pool.public_ip
 }
 
 output "bench_public_ip" {
-  value = aws_instance.bench.public_ip
+  description = "Outbound only, as pool."
+  value       = aws_instance.bench.public_ip
+}
+
+# The addresses operators actually reach these nodes on, via a jump through web.
+#
+# It has to be the private address. A security group rule that references
+# another security group only matches traffic arriving on a PRIVATE IP inside
+# the VPC — connect from the web node to a worker's PUBLIC IP and the packets
+# leave through the internet gateway and come back with no group membership
+# attached, so the rule does not match and the connection times out. This is a
+# quiet, confusing failure, and using the private address avoids it entirely.
+output "pool_private_ip" {
+  value = aws_instance.pool.private_ip
+}
+
+output "bench_private_ip" {
+  value = aws_instance.bench.private_ip
 }
 
 # -i is spelled out rather than relying on the agent: the key is dedicated to
