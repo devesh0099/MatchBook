@@ -29,7 +29,7 @@ if timeout 2 bash -c "</dev/tcp/127.0.0.1/$PORT" 2>/dev/null; then
     Close it, or pass a different local port: $0 <port>"
 fi
 
-mapfile -t opts < <(ssh_opts)
+mapfile -t opts < <(ssh_opts web)
 
 cat >&2 <<EOF
 

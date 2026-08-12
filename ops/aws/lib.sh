@@ -97,8 +97,11 @@ load_outputs() {
 
   WEB_IP="$(_out web_public_ip)"
   WEB_PRIVATE_IP="$(_out web_private_ip)"
-  POOL_IP="$(_out pool_public_ip)"
-  BENCH_IP="$(_out bench_public_ip)"
+  POOL_IP="$(_out pool_private_ip)"
+  BENCH_IP="$(_out bench_private_ip)"
+  # Kept only for status/verify reporting; never connected to.
+  POOL_PUBLIC_IP="$(_out pool_public_ip)"
+  BENCH_PUBLIC_IP="$(_out bench_public_ip)"
   AWS_REGION_TF="$(_out aws_region)"
   S3_BUCKET_TF="$(_out s3_bucket)"
   SSH_IDENTITY="$(_out ssh_identity)"
@@ -108,7 +111,7 @@ load_outputs() {
   # not exist. Expand it here rather than in each caller.
   SSH_IDENTITY="${SSH_IDENTITY/#\~/$HOME}"
 
-  export WEB_IP WEB_PRIVATE_IP POOL_IP BENCH_IP AWS_REGION_TF S3_BUCKET_TF SSH_IDENTITY
+  export WEB_IP WEB_PRIVATE_IP POOL_IP BENCH_IP POOL_PUBLIC_IP BENCH_PUBLIC_IP AWS_REGION_TF S3_BUCKET_TF SSH_IDENTITY
 }
 
 _out() {
@@ -122,16 +125,15 @@ _out() {
 # Could not resolve hostname".
 require_public_ips() {
   load_outputs
+  # Only the web node needs to be reachable from here: it is the jump host for
+  # the other two, which are addressed on their private IPs.
+  [[ -n "$WEB_IP" ]] || die "the web node has no public IP, so nothing is reachable.
+    Set associate_public_ip = true in infra/terraform.tfvars and re-apply."
   local missing=()
-  [[ -z "$WEB_IP"   ]] && missing+=(web)
   [[ -z "$POOL_IP"  ]] && missing+=(pool)
   [[ -z "$BENCH_IP" ]] && missing+=(bench)
-  if (( ${#missing[@]} )); then
-    die "no public IP on: ${missing[*]}.
-    The subnet does not auto-assign public IPs. Either set
-    associate_public_ip = true in infra/terraform.tfvars and re-apply, or reach
-    these nodes over a VPN/bastion and drive the setup by hand."
-  fi
+  (( ${#missing[@]} )) && die "no private IP for: ${missing[*]} — is infra/ fully applied?"
+  return 0
 }
 
 # ---------------------------------------------------------------------- ssh
@@ -144,15 +146,29 @@ require_public_ips() {
 # would actually matter.
 
 ssh_opts() {
+  local role="${1:-web}"
   mkdir -p "$STATE_DIR"
-  printf '%s\n' \
-    -i "$SSH_IDENTITY" \
-    -o "UserKnownHostsFile=$KNOWN_HOSTS" \
-    -o StrictHostKeyChecking=accept-new \
-    -o ConnectTimeout=10 \
-    -o ServerAliveInterval=15 \
-    -o ServerAliveCountMax=4 \
+
+  local -a o=(
+    -i "$SSH_IDENTITY"
+    -o "UserKnownHostsFile=$KNOWN_HOSTS"
+    -o StrictHostKeyChecking=accept-new
+    -o ConnectTimeout=10
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=4
     -o LogLevel=ERROR
+  )
+
+  # pool and bench accept SSH only from the web security group, so every
+  # connection to them is relayed by the web node. An explicit ProxyCommand
+  # rather than -J: ProxyJump does not reliably carry -i and the known-hosts
+  # file through to the jump connection, and the key here is a dedicated one
+  # that ssh will not find on its own.
+  if [[ "$role" != "web" ]]; then
+    o+=(-o "ProxyCommand=ssh -i $SSH_IDENTITY -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o LogLevel=ERROR -W %h:%p ubuntu@$WEB_IP")
+  fi
+
+  printf '%s\n' "${o[@]}"
 }
 
 _ip_for_role() {
@@ -176,7 +192,7 @@ node() {
   load_outputs
   local ip; ip="$(_ip_for_role "$role")"
   [[ -n "$ip" ]] || die "no public IP for the $role node; see require_public_ips"
-  local opts; mapfile -t opts < <(ssh_opts)
+  local opts; mapfile -t opts < <(ssh_opts "$role")
   ssh -n "${opts[@]}" "ubuntu@$ip" "$@"
 }
 
@@ -187,7 +203,7 @@ node_tty() {
   load_outputs
   local ip; ip="$(_ip_for_role "$role")"
   [[ -n "$ip" ]] || die "no public IP for the $role node"
-  local opts; mapfile -t opts < <(ssh_opts)
+  local opts; mapfile -t opts < <(ssh_opts "$role")
   ssh -t "${opts[@]}" "ubuntu@$ip" "$@"
 }
 
@@ -195,7 +211,7 @@ node_scp() {
   local role="$1" src="$2" dest="$3"
   load_outputs
   local ip; ip="$(_ip_for_role "$role")"
-  local opts; mapfile -t opts < <(ssh_opts)
+  local opts; mapfile -t opts < <(ssh_opts "$role")
   scp "${opts[@]}" "$src" "ubuntu@$ip:$dest"
 }
 

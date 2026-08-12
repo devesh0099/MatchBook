@@ -17,7 +17,7 @@ load_outputs
 ip="$(_ip_for_role "$ROLE")"
 [[ -n "$ip" ]] || die "the $ROLE node has no public IP (see associate_public_ip)"
 
-mapfile -t opts < <(ssh_opts)
+mapfile -t opts < <(ssh_opts "$ROLE")
 if (( $# )); then
   exec ssh "${opts[@]}" "ubuntu@$ip" "$@"
 else

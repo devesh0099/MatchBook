@@ -46,22 +46,32 @@ step "configuration"
 terraform -chdir="$INFRA_DIR" init -backend=false -input=false >/dev/null 2>&1 \
   || die "terraform init failed in infra/ — run it directly to see why"
 
-var() {
+# Evaluate any expression in the infra module — var.*, local.*, whatever.
+#
+# An unset optional variable prints as `tostring(null)` rather than `null`,
+# which is easy to mistake for a value: it sailed through a plain `grep -v
+# '^null$'` and became the literal instance profile name "tostring(null)", and
+# would have been exported as AWS_PROFILE too. Both spellings are filtered here.
+tfexpr() {
   local out
-  out="$(printf 'var.%s\n' "$1" | terraform -chdir="$INFRA_DIR" console 2>/dev/null)" || return 1
-  printf '%s' "$out" | tr -d '"' | grep -v '^null$' || true
+  out="$(printf '%s\n' "$1" | terraform -chdir="$INFRA_DIR" console 2>/dev/null)" || return 1
+  out="$(printf '%s' "$out" | tr -d '"')"
+  [[ "$out" == "null" || "$out" == "tostring(null)" ]] && return 1
+  printf '%s' "$out"
 }
+
+var() { tfexpr "var.$1" || true; }
 
 REGION="$(var aws_region)"
 PROFILE="$(var aws_profile)"
 VPC_ID="$(var vpc_id)"
 SUBNET_ID="$(var subnet_id)"
 AMI_ID="$(var ami_id)"
-KEY_NAME="$(var key_name)"
+KEY_NAME="$(tfexpr local.key_name || true)"
 PUBKEY_PATH="$(var public_key_path)"
 PUBKEY_PATH="${PUBKEY_PATH/#\~/$HOME}"
 BUCKET="$(var s3_bucket)"
-INSTANCE_PROFILE="$(var instance_profile)"
+INSTANCE_PROFILE="$(tfexpr local.instance_profile || true)"
 WEB_TYPE="$(var web_instance_type)"
 POOL_TYPE="$(var pool_instance_type)"
 BENCH_TYPE="$(var bench_instance_type)"
