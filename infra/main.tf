@@ -31,24 +31,44 @@ provider "aws" {
     for_each = var.deployer_role_arn == null ? [] : [1]
     content {
       role_arn     = var.deployer_role_arn
-      session_name = "me-platform-terraform"
+      session_name = "${var.name_prefix}-terraform"
     }
   }
 
+  # Project is what the deployer policy conditions on and what
+  # ops/aws/status.sh filters by, so it is not decoration.
   default_tags {
     tags = {
-      Project = "me-platform"
+      Project   = var.name_prefix
+      ManagedBy = "terraform"
     }
   }
+}
+
+# Every name this module creates. See var.name_prefix.
+locals {
+  key_name         = coalesce(var.key_name, var.name_prefix)
+  instance_profile = coalesce(var.instance_profile, "${var.name_prefix}-node")
 }
 
 # ------------------------------------------------------------------ key pair
 # Imported rather than generated: a key Terraform generates would have its
 # private half in the state file.
-
+#
+# key_name_PREFIX, not key_name. With a fixed name, pointing public_key_path at
+# a new key replaces the key pair but leaves the NAME unchanged — so the
+# instances see no change, are not replaced, and keep the old key in
+# authorized_keys. Rotation through Terraform silently did nothing. A generated
+# name changes with the material, which forces the replacement that actually
+# rotates the key, and incidentally removes the InvalidKeyPair.Duplicate failure
+# you get re-applying over a key pair someone made by hand.
 resource "aws_key_pair" "this" {
-  key_name   = var.key_name
-  public_key = file(var.public_key_path)
+  key_name_prefix = local.key_name
+  public_key      = file(var.public_key_path)
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # ------------------------------------------------------------ security groups
@@ -57,7 +77,7 @@ resource "aws_key_pair" "this" {
 # moment an instance is replaced and takes a new private IP.
 
 resource "aws_security_group" "worker" {
-  name_prefix = "me-worker-"
+  name_prefix = "${var.name_prefix}-worker-"
   description = "Pool and bench nodes. No inbound except administrative SSH."
   vpc_id      = var.vpc_id
 
@@ -69,12 +89,27 @@ resource "aws_security_group" "worker" {
     cidr_blocks = var.ssh_cidrs
   }
 
-  egress {
-    description = "apt, GitHub, S3, and Postgres on the web node"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  # One of these two applies, never both. See var.restrict_worker_egress.
+  dynamic "egress" {
+    for_each = var.restrict_worker_egress ? [] : [1]
+    content {
+      description = "apt, GitHub, S3, and Postgres on the web node"
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+
+  dynamic "egress" {
+    for_each = var.restrict_worker_egress ? local.worker_egress : {}
+    content {
+      description = egress.value.description
+      from_port   = egress.value.port
+      to_port     = egress.value.port
+      protocol    = egress.value.protocol
+      cidr_blocks = ["0.0.0.0/0"]
+    }
   }
 
   lifecycle {
@@ -82,8 +117,22 @@ resource "aws_security_group" "worker" {
   }
 }
 
+locals {
+  # Everything the worker nodes reach outbound. DNS and NTP are the two people
+  # forget: without 53 nothing resolves, and without 123 the clock drifts, which
+  # on a node whose whole output is timing is not a cosmetic problem.
+  worker_egress = {
+    http     = { port = 80, protocol = "tcp", description = "apt" }
+    https    = { port = 443, protocol = "tcp", description = "apt, rustup, GitHub, S3" }
+    postgres = { port = 5432, protocol = "tcp", description = "the job queue on the web node" }
+    dns      = { port = 53, protocol = "udp", description = "VPC resolver" }
+    dns_tcp  = { port = 53, protocol = "tcp", description = "VPC resolver, large answers" }
+    ntp      = { port = 123, protocol = "udp", description = "clock discipline" }
+  }
+}
+
 resource "aws_security_group" "web" {
-  name_prefix = "me-web-"
+  name_prefix = "${var.name_prefix}-web-"
   description = "Web node: participants reach Caddy, workers reach Postgres."
   vpc_id      = var.vpc_id
 
@@ -153,16 +202,33 @@ resource "aws_instance" "web" {
   subnet_id                   = var.subnet_id
   key_name                    = aws_key_pair.this.key_name
   vpc_security_group_ids      = [aws_security_group.web.id]
-  iam_instance_profile        = var.instance_profile
+  iam_instance_profile        = local.instance_profile
   user_data                   = local.user_data
   user_data_replace_on_change = true
+  associate_public_ip_address = var.associate_public_ip
+
+  # hop limit 2, and ONLY on this node. The API runs in a container on Docker's
+  # bridge network, so its request to 169.254.169.254 crosses the host network
+  # namespace and arrives at hop 2. At the EC2 default of 1 it is dropped, the
+  # Rust SDK's IMDSv2-only client cannot get credentials, and because the API
+  # writes submission source to S3 before doing anything else, every /run and
+  # /submit returns an opaque internal error — indistinguishable from the
+  # missing-bucket failure, and NOT reproducible with curl from the host shell,
+  # which is one hop and succeeds.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+    instance_metadata_tags      = "disabled"
+  }
 
   root_block_device {
     volume_size = var.root_volume_gb
     volume_type = "gp3"
+    encrypted   = true
   }
 
-  tags = { Name = "me-web", Role = "web" }
+  tags = { Name = "${var.name_prefix}-web", Role = "web" }
 }
 
 resource "aws_instance" "pool" {
@@ -171,16 +237,32 @@ resource "aws_instance" "pool" {
   subnet_id                   = var.subnet_id
   key_name                    = aws_key_pair.this.key_name
   vpc_security_group_ids      = [aws_security_group.worker.id]
-  iam_instance_profile        = var.instance_profile
+  iam_instance_profile        = local.instance_profile
   user_data                   = local.user_data
   user_data_replace_on_change = true
+  associate_public_ip_address = var.associate_public_ip
+
+  # This node compiles and runs participant-submitted C++. The worker is a plain
+  # systemd process, not a container, so one hop is enough — and keeping it at 1
+  # means a container started here later cannot reach the credentials by
+  # accident. http_tokens = "required" turns IMDSv1 off: with it optional, any
+  # SSRF or isolate escape reads the instance credentials with a single
+  # unauthenticated GET, and those credentials can overwrite every participant's
+  # source in the artifact bucket.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+    instance_metadata_tags      = "disabled"
+  }
 
   root_block_device {
     volume_size = var.root_volume_gb
     volume_type = "gp3"
+    encrypted   = true
   }
 
-  tags = { Name = "me-pool", Role = "pool" }
+  tags = { Name = "${var.name_prefix}-pool", Role = "pool" }
 }
 
 # The bench node. Two settings here CANNOT be changed after launch, which is
@@ -202,9 +284,10 @@ resource "aws_instance" "bench" {
   subnet_id                   = var.subnet_id
   key_name                    = aws_key_pair.this.key_name
   vpc_security_group_ids      = [aws_security_group.worker.id]
-  iam_instance_profile        = var.instance_profile
+  iam_instance_profile        = local.instance_profile
   user_data                   = local.user_data
   user_data_replace_on_change = true
+  associate_public_ip_address = var.associate_public_ip
   tenancy                     = var.bench_dedicated ? "dedicated" : "default"
 
   cpu_options {
@@ -212,10 +295,19 @@ resource "aws_instance" "bench" {
     threads_per_core = 1
   }
 
+  # As pool: untrusted code, no containers, so one hop and IMDSv2 only.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+    instance_metadata_tags      = "disabled"
+  }
+
   root_block_device {
     volume_size = var.root_volume_gb
     volume_type = "gp3"
+    encrypted   = true
   }
 
-  tags = { Name = "me-bench", Role = "bench" }
+  tags = { Name = "${var.name_prefix}-bench", Role = "bench" }
 }

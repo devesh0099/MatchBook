@@ -1,20 +1,76 @@
 # cp terraform.tfvars.example terraform.tfvars, then fill in.
-# The first three come from: terraform -chdir=bootstrap output tfvars_snippet
+# ops/aws/bootstrap.sh writes this file for you with the first two already set.
+#
+# Then: ops/aws/preflight.sh   — checks all of it against the real account
+#       ops/aws/deploy.sh      — launches and provisions everything
+
+# ---- naming
+#
+# Prefix on every AWS resource and the value of the Project tag, so the console
+# shows one recognisable group. MUST match what bootstrap was applied with: the
+# deployer policy scopes its destructive actions on `Project = <name_prefix>`.
+#
+# Changing it renames nothing that already exists — Terraform replaces the
+# resources instead, and for the S3 bucket that means a new, empty one. Pick it
+# before the first apply.
+name_prefix = "flashmatch"
+
+# ---- from bootstrap: terraform -chdir=infra/bootstrap output tfvars_snippet
+#
+# instance_profile defaults to "<name_prefix>-node", so it only needs setting if
+# bootstrap used an explicit node_role_name.
+# instance_profile = "flashmatch-node"
+s3_bucket = "flashmatch-artifacts-<account>"
 
 # Only needed when Terraform should assume a role rather than use the profile
 # credentials directly.
-# deployer_role_arn = "arn:aws:iam::<account>:role/me-platform-deployer"
-instance_profile  = "me-platform-node"
-s3_bucket         = "me-platform-artifacts-<account>"
+# deployer_role_arn = "arn:aws:iam::<account>:role/flashmatch-deployer"
 
-vpc_id     = "vpc-xxxxxxxx"
-subnet_id  = "subnet-xxxxxxxx"
-ami_id     = "ami-xxxxxxxx"       # Ubuntu 24.04 LTS x86_64
-ssh_cidrs  = ["0.0.0.0/0"]        # key-only auth is the control, not the CIDR
+# ---- account and region
+#
+# MUST match the region bootstrap ran in. The deployer policy is scoped with a
+# hard aws:RequestedRegion condition templated from bootstrap's aws_region, so a
+# mismatch fails on the very first call (ImportKeyPair) with UnauthorizedOperation
+# rather than with anything mentioning regions.
+aws_region  = "us-east-1"
+aws_profile = "iicpc"
 
+# ---- network
+vpc_id    = "vpc-xxxxxxxx"
+subnet_id = "subnet-xxxxxxxx"
+
+# The nodes are provisioned and operated over SSH from a laptop, so they need
+# public addresses. Set false only if you reach them by VPN, bastion or SSM.
+associate_public_ip = true
+
+ssh_cidrs         = ["0.0.0.0/0"] # key-only auth is the control, not the CIDR
 web_ingress_cidrs = ["0.0.0.0/0"]
 
-repo_ref = "master"
+# ---- machine image
+# Region-specific, and it goes stale. Look up the current Ubuntu 24.04 LTS
+# x86_64 AMI for THIS region with:
+#
+#   aws ssm get-parameter --region us-east-1 \
+#     --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id \
+#     --query Parameter.Value --output text
+#
+# arm64 is not an option: everything compiles -march=x86-64-v3.
+ami_id = "ami-xxxxxxxx"
 
-# Off by default. See the comment on aws_instance.bench before turning it on.
+# ---- SSH key
+# The key DEPLOYMENT.md 1 tells you to generate. Leaving this at its default
+# silently imports ~/.ssh/id_ed25519.pub instead, and if that key is not the one
+# you hold you get three healthy instances nobody can log into.
+public_key_path = "~/.ssh/flashmatch.pub"
+
+# ---- code
+repo_ref = "master" # pin a SHA so "what did we deploy" has an answer
+
+# ---- knobs with consequences
+# Off by default. See the comment on aws_instance.bench before turning it on:
+# a flat $2/hr per region, and it cannot be changed after launch.
 bench_dedicated = false
+
+# Narrows worker egress to the ports actually used. Off by default because it
+# has not been through a full provisioning run; see variables.tf.
+restrict_worker_egress = false

@@ -8,11 +8,17 @@
 # them from here is a two-line change.
 set -euxo pipefail
 
+# A failure marker, so that "still booting" and "booted and broken" are
+# distinguishable. Without it the only signal is the absence of the ready marker
+# at the end, and the documented `until ssh ... test -f ...ready` loop waits
+# forever on a node that died at apt ten minutes ago.
+trap 'echo "user_data FAILED at line $LINENO" > /var/lib/cloud/flashmatch-failed' ERR
+
 # Port 22 is open to the internet, so the authentication posture is the whole
 # control and must not be inherited. Ubuntu's AMI ships with password auth off
 # already; this states it rather than trusting it to stay that way, and covers
 # keyboard-interactive, which is a separate setting people forget.
-cat > /etc/ssh/sshd_config.d/99-me-platform.conf <<'SSHD'
+cat > /etc/ssh/sshd_config.d/99-flashmatch.conf <<'SSHD'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
@@ -29,10 +35,18 @@ SSHD
 # and that process reads the config above when it starts.
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
+
+# The lock timeout is not optional here. On a fresh 24.04 boot this races
+# cloud-init's own package handling and unattended-upgrades; losing the race
+# gives "Could not get lock /var/lib/dpkg/lock-frontend", set -e aborts, and
+# every later step never runs. Same class of failure as the socket-activated
+# sshd note above — everything looks fine until you try to use the node.
+export APT_OPTS="-o DPkg::Lock::Timeout=600"
+# shellcheck disable=SC2086
+apt-get $APT_OPTS update -y
 
 # Build toolchain for the engine, plus what isolate needs to compile.
-apt-get install -y --no-install-recommends \
+apt-get $APT_OPTS install -y --no-install-recommends \
   build-essential g++ cmake git pkg-config zip unzip curl jq \
   libcap-dev libseccomp-dev libsystemd-dev libssl-dev \
   ca-certificates gnupg
@@ -46,17 +60,27 @@ chmod a+r /etc/apt/keyrings/docker.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
 https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
   > /etc/apt/sources.list.d/docker.list
-apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+apt-get $APT_OPTS update -y
+apt-get $APT_OPTS install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 usermod -aG docker ubuntu
 
 # Rust via rustup, not apt: Cargo.lock needs a newer toolchain than the distro
 # ships, and the setup scripts install it this way too.
-su - ubuntu -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path'
+#
+# Downloaded to a file first rather than piped into sh. set -euo pipefail
+# applies to THIS shell and is not inherited across `su`, which starts a fresh
+# login shell — so in the piped form a failed curl fed `sh` an empty stdin, sh
+# exited 0, su returned 0, and the script carried on to write the ready marker
+# on a node with no Rust toolchain. The verification below is the point.
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+test -s /tmp/rustup-init.sh
+su - ubuntu -c 'sh /tmp/rustup-init.sh -y --no-modify-path'
+su - ubuntu -c '$HOME/.cargo/bin/rustc --version'
+rm -f /tmp/rustup-init.sh
 
-git clone ${repo_url} /opt/me-platform
-git -C /opt/me-platform checkout ${repo_ref}
-chown -R ubuntu:ubuntu /opt/me-platform
+git clone ${repo_url} /opt/flashmatch
+git -C /opt/flashmatch checkout ${repo_ref}
+chown -R ubuntu:ubuntu /opt/flashmatch
 
 # Polled by the guide to know when a node is ready to SSH into.
-touch /var/lib/cloud/me-platform-ready
+touch /var/lib/cloud/flashmatch-ready

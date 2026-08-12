@@ -1,4 +1,4 @@
-//! me-platform API.
+//! flashmatch API.
 //!
 //! JSON only — Next.js owns every pixel, this owns state and the queue.
 //!
@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     let s3_client = common::s3_client().await;
     let s3 = Arc::new(Storage {
         client: s3_client,
-        bucket: std::env::var("S3_BUCKET").unwrap_or_else(|_| "me-platform-artifacts".into()),
+        bucket: std::env::var("S3_BUCKET").unwrap_or_else(|_| "flashmatch-artifacts".into()),
     });
 
     let app_state = AppState { db: db.clone(), redis, s3 };

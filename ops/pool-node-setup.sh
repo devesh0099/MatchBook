@@ -13,7 +13,7 @@
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/mebench}"
-REPO="${REPO:-/opt/me-platform}"
+REPO="${REPO:-/opt/flashmatch}"
 POOL_BOXES="${POOL_BOXES:-8}"
 
 if [[ $EUID -ne 0 ]]; then
@@ -111,7 +111,7 @@ if [[ ! -f "$PREFIX/worker.env" ]]; then
 # node brought Postgres up with DB_BIND set to the same address — the compose
 # default publishes it on loopback, where this cannot reach it.
 DATABASE_URL=postgres://mebench:CHANGEME@web-node:5432/mebench
-S3_BUCKET=me-platform-artifacts
+S3_BUCKET=flashmatch-artifacts
 AWS_REGION=eu-west-1
 EOF
   chmod 600 "$PREFIX/worker.env"
