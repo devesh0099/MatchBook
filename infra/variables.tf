@@ -10,8 +10,9 @@ variable "aws_profile" {
 }
 
 variable "deployer_role_arn" {
-  description = "From `terraform -chdir=infra/bootstrap output deployer_role_arn`. In a company account, whatever ARN they hand you."
+  description = "Role to assume. Leave NULL when you were handed an IAM user whose own policy is already the restricted one — that is the normal company case, and there is nothing to assume. Set it to bootstrap's output when you own the account, so Terraform runs under the restricted policy instead of your admin credentials."
   type        = string
+  default     = null
 }
 
 variable "instance_profile" {

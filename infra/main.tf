@@ -28,9 +28,21 @@ provider "aws" {
   region  = var.aws_region
   profile = var.aws_profile
 
-  assume_role {
-    role_arn     = var.deployer_role_arn
-    session_name = "me-platform-terraform"
+  # Optional on purpose. Two real shapes:
+  #
+  #   * A company hands you an IAM USER with the Part A policy attached. Leave
+  #     deployer_role_arn null; the profile's own credentials are already the
+  #     restricted ones and there is nothing to assume.
+  #   * You own the account and hold admin. Set deployer_role_arn to the role
+  #     bootstrap created, so Terraform runs under the restricted policy rather
+  #     than as admin — which is the only way to find out the ask in Part A is
+  #     complete before sending it.
+  dynamic "assume_role" {
+    for_each = var.deployer_role_arn == null ? [] : [1]
+    content {
+      role_arn     = var.deployer_role_arn
+      session_name = "me-platform-terraform"
+    }
   }
 
   default_tags {

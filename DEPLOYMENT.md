@@ -112,9 +112,21 @@ Three notes for whoever reviews it:
 - **`s3` on the operator policy is not used by the tooling.** It is there so a
   human can inspect artifacts without a second credential. Cut it if you prefer.
 
-`infra/bootstrap/` in this repo creates all three as Terraform, if that is
-easier than clicking. `infra/bootstrap/deployer-policy.json.tftpl` is the
-policy above, templated.
+### Doing all three as Terraform
+
+`infra/bootstrap/` in this repo creates exactly these three resources and
+nothing else, and prints the values the operator needs:
+
+```sh
+terraform -chdir=infra/bootstrap apply
+```
+
+**This is the only step in the whole deployment that requires IAM write**,
+which is precisely why it is yours and not the operator's — everything in Part B
+runs under the restricted policy above and cannot create or alter a role. Run it
+once; it costs nothing (an empty bucket and three IAM objects).
+
+`infra/bootstrap/deployer-policy.json.tftpl` is the policy above, templated.
 
 ## A2. Tell us four things
 
@@ -173,15 +185,35 @@ diff <(ssh-keygen -y -f ~/.ssh/me-platform) <(cat ~/.ssh/me-platform.pub) \
 
 ## B1. Provision
 
+**First check the three things in §A1 already exist.** They require IAM write,
+so in a company account they are not yours to create — the account owner runs
+`infra/bootstrap` (or clicks) and hands you the bucket name, the instance
+profile name, and credentials. If you own the account yourself, run it now:
+
 ```sh
-cp infra/terraform.tfvars.example infra/terraform.tfvars   # fill in from §A2
+terraform -chdir=infra/bootstrap apply     # ONLY if you own the account
+```
+
+Then the platform itself, which needs no IAM permissions at all.
+
+`deployer_role_arn` in `terraform.tfvars` is what selects between the two cases:
+
+| you were given | `deployer_role_arn` | what happens |
+|---|---|---|
+| an **IAM user** with the §A1 policy | leave it **null** | the profile's credentials are already restricted; nothing is assumed |
+| **admin on your own account** | bootstrap's role ARN | Terraform runs *under* the restricted policy instead of as admin, which is how you prove the §A1 ask is complete before sending it |
+
+
+```sh
+cp infra/terraform.tfvars.example infra/terraform.tfvars   # fill in from §A1/§A2
 terraform -chdir=infra init
 terraform -chdir=infra plan          # creates nothing
 terraform -chdir=infra apply
 ```
 
-If you own the account, run `terraform -chdir=infra/bootstrap apply` first — it
-creates the three things in §A1 and prints the values for `terraform.tfvars`.
+`infra/` is deliberately unable to create IAM. If `plan` fails with an
+`AccessDenied` naming an action, that is the ask in §A1 being incomplete — send
+them the action name rather than working around it.
 
 Two settings in `infra/main.tf` are **launch-time only** and cannot be changed
 on a running instance:
