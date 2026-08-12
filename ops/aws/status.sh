@@ -31,19 +31,28 @@ instances="$(aws ec2 describe-instances \
             "Name=instance-state-name,Values=pending,running,stopping,stopped" \
   --output json 2>/dev/null)" || die "could not describe instances — check credentials"
 
-# Approximate us-east-1 on-demand rates. Deliberately a table rather than a
-# Pricing API call: the API needs a permission this deployment does not
-# otherwise grant, and is only reachable from us-east-1. Treat as an estimate.
+# Approximate on-demand rates for ap-south-1 (Mumbai), which is where this is
+# deployed. Deliberately a table rather than a Pricing API call: that API needs
+# a permission this deployment does not otherwise grant, and is only reachable
+# from us-east-1. Rates in other regions differ by a few percent for m6i and are
+# identical for c6i, so treat the total as an estimate either way.
 rate_for() {
   case "$1" in
-    m6i.large)    echo 0.096 ;;
+    m6i.large)    echo 0.101 ;;
     c6i.2xlarge)  echo 0.340 ;;
     c6i.4xlarge)  echo 0.680 ;;
-    m6i.xlarge)   echo 0.192 ;;
-    t3.medium)    echo 0.0416 ;;
+    m6i.xlarge)   echo 0.202 ;;
+    t3.medium)    echo 0.0448 ;;
     *)            echo 0 ;;
   esac
 }
+
+# Charged per running instance regardless of type, and easy to forget because it
+# is not part of the instance rate: every public IPv4 address costs $0.005/hr,
+# and a 40 GB gp3 root volume is $0.0912/GB-month whether the instance is
+# running or stopped. Stopping the nodes does NOT stop the volume charge.
+IPV4_HOURLY=0.005
+EBS_HOURLY=$(awk -v gb=40 'BEGIN{printf "%.5f", gb*0.0912/730}')
 
 now=$(date +%s)
 total_rate=0
@@ -56,11 +65,18 @@ while IFS=$'\t' read -r name itype state pubip launch; do
   up=$(( now - launch_s ))
   rate="$(rate_for "$itype")"
   if [[ "$state" == "running" ]]; then
+    # Instance + its public IPv4 + its root volume.
+    rate=$(awk -v r="$rate" -v i="$IPV4_HOURLY" -v e="$EBS_HOURLY" 'BEGIN{printf "%.4f", r+i+e}')
     cost=$(awk -v r="$rate" -v u="$up" 'BEGIN{printf "%.2f", r*u/3600}')
     total_rate=$(awk -v a="$total_rate" -v b="$rate" 'BEGIN{printf "%.4f", a+b}')
     total_cost=$(awk -v a="$total_cost" -v b="$cost" 'BEGIN{printf "%.2f", a+b}')
   else
-    cost=0.00
+    # Stopped still bills the volume, which is the trap: the instance list looks
+    # harmless and the bill does not stop.
+    rate="$EBS_HOURLY"
+    cost=$(awk -v r="$rate" -v u="$up" 'BEGIN{printf "%.2f", r*u/3600}')
+    total_rate=$(awk -v a="$total_rate" -v b="$rate" 'BEGIN{printf "%.4f", a+b}')
+    total_cost=$(awk -v a="$total_cost" -v b="$cost" 'BEGIN{printf "%.2f", a+b}')
   fi
   colour="$C_GREEN"; [[ "$state" != "running" ]] && colour="$C_YELLOW"
   printf '    %-8s %-14s %s%-10s%s %-16s %-10s $%s\n' \

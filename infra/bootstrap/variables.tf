@@ -5,9 +5,18 @@ variable "aws_region" {
 }
 
 variable "aws_profile" {
-  description = "Local AWS CLI profile with permission to create IAM roles and an S3 bucket. Only bootstrap needs this much; ../ runs as the deployer role."
+  description = <<-EOT
+    Local AWS CLI profile with permission to create IAM roles and an S3 bucket.
+    Only bootstrap needs this much; ../ runs as the deployer role.
+
+    Null by default, which means the ordinary AWS credential chain — environment
+    variables, AWS_PROFILE, the default profile, SSO. Naming a specific profile
+    here is a hard failure on any machine that does not have one by that name
+    ("failed to get shared config profile"), which is not a useful default for a
+    repo more than one person clones.
+  EOT
   type        = string
-  default     = "iicpc"
+  default     = null
 }
 
 variable "name_prefix" {

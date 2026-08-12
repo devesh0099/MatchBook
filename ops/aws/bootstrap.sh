@@ -24,6 +24,59 @@ done
 
 need_cmd terraform; need_cmd aws; need_cmd jq
 
+# --------------------------------------------------- keep the modules aligned
+#
+# bootstrap and ../ are separate root modules with separate variables, and
+# nothing in Terraform makes them agree. Three values MUST match, and each fails
+# in a way that does not mention the mismatch:
+#
+#   aws_region   the bucket is created here, and the deployer policy's
+#                aws:RequestedRegion condition is templated from it. Bootstrap
+#                in us-east-1 while ../ deploys to ap-south-1 and the first call
+#                under that role fails UnauthorizedOperation — plus every
+#                submission then crosses regions to reach S3.
+#   aws_profile  a profile name that does not exist on this machine is
+#                "failed to get shared config profile", before anything runs.
+#   name_prefix  the policy conditions destructive actions on
+#                Project = <name_prefix>; a mismatch is AccessDenied later.
+#
+# So resolve them from ../terraform.tfvars when it exists — which resolves
+# defaults properly rather than grepping — and fall back to the AWS CLI's own
+# configuration on a first run, before that file has been written.
+
+TFVARS="$INFRA_DIR/terraform.tfvars"
+BOOTSTRAP_VARS=()
+
+infra_var() {
+  [[ -f "$TFVARS" ]] || return 1
+  local out
+  out="$(printf 'var.%s\n' "$1" | terraform -chdir="$INFRA_DIR" console 2>/dev/null)" || return 1
+  out="$(printf '%s' "$out" | tr -d '"')"
+  [[ -z "$out" || "$out" == "null" ]] && return 1
+  printf '%s' "$out"
+}
+
+if [[ -f "$TFVARS" ]]; then
+  terraform -chdir="$INFRA_DIR" init -backend=false -input=false >/dev/null 2>&1 || true
+fi
+
+REGION="$(infra_var aws_region || true)"
+[[ -z "$REGION" ]] && REGION="$(aws configure get region 2>/dev/null || true)"
+[[ -n "$REGION" ]] || die "no region: set aws_region in infra/terraform.tfvars, or run 'aws configure set region <region>'"
+BOOTSTRAP_VARS+=(-var "aws_region=$REGION")
+
+PROFILE="$(infra_var aws_profile || true)"
+[[ -z "$PROFILE" && -n "${AWS_PROFILE:-}" ]] && PROFILE="$AWS_PROFILE"
+[[ -n "$PROFILE" ]] && BOOTSTRAP_VARS+=(-var "aws_profile=$PROFILE")
+
+PREFIX="$(infra_var name_prefix || true)"
+[[ -n "$PREFIX" ]] && BOOTSTRAP_VARS+=(-var "name_prefix=$PREFIX")
+
+step "settings (taken from infra/terraform.tfvars where it exists)"
+ok "region      $REGION"
+ok "profile     ${PROFILE:-<default credential chain>}"
+ok "name_prefix ${PREFIX:-flashmatch (module default)}"
+
 step "initialising infra/bootstrap"
 tf "$BOOTSTRAP_DIR" init -input=false
 tf "$BOOTSTRAP_DIR" validate
@@ -31,12 +84,12 @@ tf "$BOOTSTRAP_DIR" validate
 step "planning"
 # A non-empty plan on an existing deployment means somebody changed IAM or the
 # bucket underneath us; show it rather than applying it silently.
-if tf "$BOOTSTRAP_DIR" plan -input=false -detailed-exitcode -out=/tmp/bootstrap.tfplan >/dev/null 2>&1; then
+if tf "$BOOTSTRAP_DIR" plan -input=false "${BOOTSTRAP_VARS[@]}" -detailed-exitcode -out=/tmp/bootstrap.tfplan >/dev/null 2>&1; then
   ok "nothing to do — bootstrap resources already match the configuration"
 else
   rc=$?
   if (( rc == 1 )); then
-    tf "$BOOTSTRAP_DIR" plan -input=false   # re-run visibly to surface the error
+    tf "$BOOTSTRAP_DIR" plan -input=false "${BOOTSTRAP_VARS[@]}"   # re-run visibly to surface the error
     die "bootstrap plan failed"
   fi
   tf "$BOOTSTRAP_DIR" show /tmp/bootstrap.tfplan
