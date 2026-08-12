@@ -1,17 +1,11 @@
-# Bootstrap — the things the ACCOUNT OWNER creates, once.
+# Bootstrap — run once, before ../.
 #
-# This directory exists to be handed over. In a company account you will not
-# have IAM write, so these three resources are what you ask their cloud team
-# for; `deployer-policy.json` is the exact policy to attach to whatever they
-# give you. Running it here, in an account where you DO have admin, is how you
-# find out the ask is correct before you send it.
+# Creates the artifact bucket, the instance role every node carries, and a role
+# holding the deployment permission set. These are the only resources here that
+# require IAM write; everything in ../ runs without it.
 #
 #   terraform -chdir=infra/bootstrap init
 #   terraform -chdir=infra/bootstrap apply
-#
-# Everything else lives in ../ and runs as the deployer role this creates, so
-# a missing permission surfaces as an AccessDenied naming the action rather
-# than as a surprise on the day.
 
 terraform {
   required_version = ">= 1.5"
@@ -65,9 +59,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "artifacts" {
 }
 
 # -------------------------------------------------------------- node role
-# Attached to all three instances. This is the ONLY AWS access the platform
-# itself has: no EC2, no Secrets Manager, no CloudWatch. If you are asking a
-# cloud team for one thing, it is this.
+# Attached to all three instances, and the ONLY AWS access the running platform
+# has: read and write one bucket. No EC2, no Secrets Manager, no CloudWatch.
+# The API stores submission source in S3 before it does anything else, so
+# without this every /run and /submit returns an opaque internal error.
 
 resource "aws_iam_role" "node" {
   name = var.node_role_name
@@ -107,18 +102,15 @@ resource "aws_iam_instance_profile" "node" {
 }
 
 # ---------------------------------------------------------- deployer role
-# What YOU hold. Deliberately not admin: this is the permission set we intend
-# to ask for, and ../ runs under it so that any gap fails loudly here rather
-# than in someone else's account.
-#
-# In a company account they create this (or an equivalent user) and hand you
-# the ARN; the policy document is identical either way.
+# Deliberately not admin: it can launch and destroy the platform's instances in
+# one region and pass the node role to EC2, and nothing else. The same policy
+# document works attached to a user instead of a role.
 
 resource "aws_iam_role" "deployer" {
   name = var.deployer_role_name
 
-  # Trusted by whoever ran bootstrap. In a company account this becomes their
-  # SSO principal or your IAM user's ARN.
+  # Trusted by whoever ran bootstrap. Change this to the principal that should
+  # be able to assume the role — an SSO principal, or another user's ARN.
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -136,8 +128,8 @@ resource "aws_iam_role_policy" "deployer" {
   name = "${var.deployer_role_name}-policy"
   role = aws_iam_role.deployer.id
 
-  # Kept in its own file, templated, so it can be sent verbatim to a cloud
-  # team without them needing to read Terraform.
+  # Kept in its own file so the policy can be read, or applied by hand, without
+  # going through Terraform.
   policy = templatefile("${path.module}/deployer-policy.json.tftpl", {
     region     = var.aws_region
     account_id = data.aws_caller_identity.current.account_id

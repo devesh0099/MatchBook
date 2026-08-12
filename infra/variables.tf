@@ -10,7 +10,7 @@ variable "aws_profile" {
 }
 
 variable "deployer_role_arn" {
-  description = "Role to assume. Leave NULL when you were handed an IAM user whose own policy is already the restricted one — that is the normal company case, and there is nothing to assume. Set it to bootstrap's output when you own the account, so Terraform runs under the restricted policy instead of your admin credentials."
+  description = "Role for Terraform to assume. Leave null when the configured profile already carries the deployment policy. Set it to bootstrap's deployer_role_arn output to run under that role instead."
   type        = string
   default     = null
 }

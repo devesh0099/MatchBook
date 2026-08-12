@@ -1,18 +1,13 @@
 # The platform: three instances in one VPC, only the web node reachable.
 #
-# Runs by ASSUMING the deployer role that bootstrap/ created, not as your admin
-# credentials. That is deliberate — it is the only way to find out whether the
-# permission set we intend to ask a company for actually works, before asking.
-# A gap shows up here as an AccessDenied naming the action.
-#
-#   terraform -chdir=infra/bootstrap apply     # once, as admin
+#   terraform -chdir=infra/bootstrap apply     # once — bucket and IAM
 #   terraform -chdir=infra init
 #   terraform -chdir=infra plan                # creates nothing
 #   terraform -chdir=infra apply
 #
-# What this does NOT do: run the node setup scripts, or calibrate anything.
-# ops/*-setup.sh are the provisioning, and the calibration steps in
-# DEPLOYMENT.md 7 are measurements, not configuration.
+# This creates infrastructure only. It does not run the node setup scripts or
+# calibrate anything: ops/*-setup.sh are the provisioning, and the calibration
+# steps are measurements rather than configuration.
 
 terraform {
   required_version = ">= 1.5"
@@ -28,15 +23,10 @@ provider "aws" {
   region  = var.aws_region
   profile = var.aws_profile
 
-  # Optional on purpose. Two real shapes:
-  #
-  #   * A company hands you an IAM USER with the Part A policy attached. Leave
-  #     deployer_role_arn null; the profile's own credentials are already the
-  #     restricted ones and there is nothing to assume.
-  #   * You own the account and hold admin. Set deployer_role_arn to the role
-  #     bootstrap created, so Terraform runs under the restricted policy rather
-  #     than as admin — which is the only way to find out the ask in Part A is
-  #     complete before sending it.
+  # Assumed only when deployer_role_arn is set. Unset, the profile's own
+  # credentials are used directly — correct when those credentials already carry
+  # the deployment policy. Set, Terraform runs under the assumed role instead,
+  # which constrains an otherwise unrestricted profile to the same policy.
   dynamic "assume_role" {
     for_each = var.deployer_role_arn == null ? [] : [1]
     content {

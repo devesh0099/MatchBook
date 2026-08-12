@@ -1,8 +1,8 @@
 # cp terraform.tfvars.example terraform.tfvars, then fill in.
 # The first three come from: terraform -chdir=bootstrap output tfvars_snippet
 
-# Leave commented out if you were given an IAM user (the usual company case).
-# Uncomment only if you own the account and ran infra/bootstrap.
+# Only needed when Terraform should assume a role rather than use the profile
+# credentials directly.
 # deployer_role_arn = "arn:aws:iam::<account>:role/me-platform-deployer"
 instance_profile  = "me-platform-node"
 s3_bucket         = "me-platform-artifacts-<account>"

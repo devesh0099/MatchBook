@@ -29,7 +29,7 @@ variable "node_role_name" {
 }
 
 variable "deployer_role_name" {
-  description = "Role that ../ assumes. Carries the permission set we intend to ask a company cloud team for, and nothing more."
+  description = "Role ../ can assume. Carries the deployment permission set and nothing more."
   type        = string
   default     = "me-platform-deployer"
 }

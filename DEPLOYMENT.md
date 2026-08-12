@@ -1,40 +1,82 @@
-# Deployment
+# Deploying the matching-engine contest platform
+
+A complete deployment, start to finish. Every step here has been run on real
+AWS; where a step exists because something failed silently the first time, it
+says so.
 
 Three EC2 instances in one VPC. Only the web node is reachable by participants.
 
-| Node | Type | vCPU / RAM | Public IP |
-|---|---|---|---|
-| web | `m6i.large` | 2 / 8 GB | depends on the TLS option in §B3 |
-| pool | `c6i.2xlarge` | 8 / 16 GB | no |
-| bench | `c6i.2xlarge`, SMT off | 4 cores presented | no |
+| Node | Type | vCPU / RAM | Public IP | Runs |
+|---|---|---|---|---|
+| web | `m6i.large` | 2 / 8 GB | see §5 | Caddy, Next.js, axum API, Postgres, Redis |
+| pool | `c6i.2xlarge` | 8 / 16 GB | no | 6 correctness workers |
+| bench | `c6i.2xlarge`, SMT off | 4 cores presented | no | 1 benchmark worker |
 
-Ubuntu 24.04 LTS, **x86_64** — everything is compiled `-march=x86-64-v3`.
+Ubuntu 24.04 LTS, **x86_64** — everything is compiled `-march=x86-64-v3`, so
+arm64 is not an option.
 
-This whole sequence has been run end to end on real AWS. What follows is what
-worked, not what should work. Where a step exists because something failed
-silently the first time, it says so.
-
-**Part A is for whoever owns the AWS account.** It is written to be forwarded.
-**Part B is for the operator** running the event.
+Roughly **$0.78/hour** for all three. Under **$20** covers calibration, a
+rehearsal and the event day, provided the instances are destroyed afterwards.
+The real cost risk is forgetting to: a month of idle instances is ~$560.
 
 ---
 
-# Part A — for whoever owns the AWS account
+## What you need before starting
 
-## A1. Create three things
+- An AWS account, and a region to deploy into.
+- A **VPC id** and **subnet id**. The subnet must have a route to the internet —
+  setup pulls apt packages, the Rust toolchain and GitHub.
+- **Terraform ≥ 1.5** and the **AWS CLI**, configured with a profile.
+- A decision on how participants reach the site: a **hostname you control**, or
+  a **slot behind an existing proxy or load balancer**. See §5. Without either,
+  the platform serves plain HTTP on a bare IP — which works, but every
+  participant sees a "not secure" badge.
 
-Nothing in the platform creates these, and without them every `/run` and
-`/submit` returns an opaque `internal error`.
+Permissions needed: creating an S3 bucket, an IAM role and instance profile,
+security groups, and EC2 instances. §2 gives the exact policy if you want to
+scope it tightly rather than deploying as an administrator.
 
-### 1. An S3 bucket
+---
 
-Private, default encryption. Any name; called `<bucket>` below. It holds
-submission source and compiled binaries, keyed on sha256.
+## 1. SSH key
 
-### 2. An IAM role + instance profile named `me-platform-node`
+Generate a key dedicated to this deployment. Revoking it later then affects
+nothing else.
 
-Trusted by `ec2.amazonaws.com`, attached to all three instances, with **exactly
-this policy and nothing else**:
+```sh
+ssh-keygen -t ed25519 -f ~/.ssh/me-platform -C me-platform
+```
+
+**Verify both halves match before launching anything.** A mismatched key pair
+produces three healthy instances nobody can log into, and the only recovery is
+detaching the root volume and mounting it elsewhere.
+
+```sh
+diff <(ssh-keygen -y -f ~/.ssh/me-platform) <(cat ~/.ssh/me-platform.pub) \
+  && echo "key pair is consistent"
+```
+
+---
+
+## 2. Bucket and IAM
+
+Nothing in the platform creates these. Without them every `/run` and `/submit`
+returns an opaque `internal error`, because the API stores submission source in
+S3 before it does anything else — this is the one provisioning step with no
+error message pointing at it.
+
+```sh
+terraform -chdir=infra/bootstrap init
+terraform -chdir=infra/bootstrap apply
+```
+
+That creates three things and prints the values the next step needs.
+
+**An S3 bucket**, private and encrypted. Holds submission source and compiled
+binaries, keyed on sha256.
+
+**`me-platform-node`** — an IAM role and instance profile attached to all three
+instances. This is the entire AWS surface of the running platform:
 
 ```json
 {
@@ -47,24 +89,21 @@ this policy and nothing else**:
 }
 ```
 
-This is the entire AWS surface of the running platform. It makes no other API
-call: no EC2, no Secrets Manager, no CloudWatch, no SSM.
+No EC2, no Secrets Manager, no CloudWatch, no SSM.
 
-### 3. An IAM user for the operator, with this policy
+**`me-platform-deployer`** — a role carrying the deployment permissions. Use it
+if the rest of the deployment should run under a scoped policy rather than as an
+administrator; set `deployer_role_arn` in §3. The same document works attached
+to a user instead, if you would rather issue credentials directly:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
-    {
-      "Sid": "ReadEverythingEC2",
-      "Effect": "Allow",
-      "Action": ["ec2:Describe*"],
-      "Resource": "*"
-    },
-    {
-      "Sid": "ManageOurInstancesInOneRegion",
-      "Effect": "Allow",
+    { "Sid": "ReadEverythingEC2", "Effect": "Allow",
+      "Action": ["ec2:Describe*"], "Resource": "*" },
+
+    { "Sid": "ManageOurInstancesInOneRegion", "Effect": "Allow",
       "Action": [
         "ec2:RunInstances", "ec2:TerminateInstances",
         "ec2:StartInstances", "ec2:StopInstances",
@@ -75,31 +114,21 @@ call: no EC2, no Secrets Manager, no CloudWatch, no SSM.
         "ec2:CreateKeyPair", "ec2:ImportKeyPair", "ec2:DeleteKeyPair"
       ],
       "Resource": "*",
-      "Condition": { "StringEquals": { "aws:RequestedRegion": "<region>" } }
-    },
-    {
-      "Sid": "AttachOnlyOurRoleToInstances",
-      "Effect": "Allow",
+      "Condition": { "StringEquals": { "aws:RequestedRegion": "<region>" } } },
+
+    { "Sid": "AttachOnlyOurRoleToInstances", "Effect": "Allow",
       "Action": ["iam:PassRole"],
       "Resource": "arn:aws:iam::<account>:role/me-platform-node",
-      "Condition": { "StringEquals": { "iam:PassedToService": "ec2.amazonaws.com" } }
-    },
-    {
-      "Sid": "OurBucketOnly",
-      "Effect": "Allow",
+      "Condition": { "StringEquals": { "iam:PassedToService": "ec2.amazonaws.com" } } },
+
+    { "Sid": "OurBucketOnly", "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:GetBucketLocation"],
-      "Resource": ["arn:aws:s3:::<bucket>", "arn:aws:s3:::<bucket>/*"]
-    }
+      "Resource": ["arn:aws:s3:::<bucket>", "arn:aws:s3:::<bucket>/*"] }
   ]
 }
 ```
 
-**No IAM write. One region. One bucket.** This exact policy has been tested by
-running the deployment under it — `RunInstances` with the instance profile
-attached, `CreateSecurityGroup` and `ImportKeyPair` all pass, the same calls in
-another region are denied, and `iam:ListUsers` is denied.
-
-Three notes for whoever reviews it:
+Three things worth knowing if you trim it:
 
 - **`iam:PassRole` is the one people cut.** Launching an instance *with* an
   instance profile is handing a role to EC2, and AWS treats that as a privilege
@@ -107,251 +136,236 @@ Three notes for whoever reviews it:
   about passing a role, which reads like a malformed command rather than a
   missing permission.
 - **`ec2:Describe*` must be `"Resource": "*"`.** Describe actions do not support
-  resource-level permissions. That is an AWS constraint, not laziness — the
-  region condition on the write actions is where the scoping lives.
-- **`s3` on the operator policy is not used by the tooling.** It is there so a
-  human can inspect artifacts without a second credential. Cut it if you prefer.
+  resource-level permissions; the region condition on the write actions is where
+  the scoping lives.
+- **The `s3` block is not used by Terraform.** It is there so a human can inspect
+  artifacts without a second credential.
 
-### Doing all three as Terraform
-
-`infra/bootstrap/` in this repo creates exactly these three resources and
-nothing else, and prints the values the operator needs:
-
-```sh
-terraform -chdir=infra/bootstrap apply
-```
-
-**This is the only step in the whole deployment that requires IAM write**,
-which is precisely why it is yours and not the operator's — everything in Part B
-runs under the restricted policy above and cannot create or alter a role. Run it
-once; it costs nothing (an empty bucket and three IAM objects).
-
-`infra/bootstrap/deployer-policy.json.tftpl` is the policy above, templated.
-
-## A2. Tell us four things
-
-- **Region**, and the **VPC id** and **subnet id** to launch into. The subnet
-  must have a route to the internet — the setup pulls apt packages, the Rust
-  toolchain and GitHub.
-- **May the web node have a public IP**, or must it sit behind your load
-  balancer? This decides §B3 and who terminates TLS.
-- **A hostname**, if you want HTTPS. Any subdomain of something you already own.
-  Without one the platform serves plain HTTP on a bare IP, which works but shows
-  a "not secure" badge to every participant.
-- **How we reach the machines**: an SSH key pair, or SSM Session Manager. If
-  SSM, the `me-platform-node` role also needs `AmazonSSMManagedInstanceCore` —
-  worth deciding now rather than editing the role after launch.
-
-## A3. Things that can block us, that we cannot test for you
-
-- **Service Control Policies.** An org-level deny sits on top of the user policy
-  and no test in another account reveals it. If your org restricts regions,
-  instance types, or public IPs, say so.
-- **Permission boundaries** on the user you create — same reasoning.
-- **Dedicated tenancy**, *only if we ask*. We measured a shared instance and it
-  is fine (§C2), so this is unlikely. If it comes up it needs no quota increase
-  — Dedicated *Instances* count against the ordinary On-Demand vCPU quota.
-  Dedicated **Hosts** are a different product whose quota is often zero; do not
-  let the two be conflated.
-
-## A4. Cost
-
-Roughly **$0.78/hour** for all three nodes, so **under $20** for calibration, a
-rehearsal and the event day combined, if the instances are destroyed afterwards.
-The real cost risk is leaving them running: a forgotten week is ~$130.
+If a Service Control Policy or permission boundary applies to the account, it
+sits on top of all of this. Restrictions on regions, instance types or public IPs
+surface as an `AccessDenied` naming the action.
 
 ---
 
-# Part B — for the operator
-
-## B0. Before you start
-
-You need the account details from §A2, an SSH key pair, and Terraform ≥ 1.5.
-
-Generate a key dedicated to this rather than reusing one — revoking it later
-then touches nothing else:
+## 3. Launch the instances
 
 ```sh
-ssh-keygen -t ed25519 -f ~/.ssh/me-platform -C me-platform
+cp infra/terraform.tfvars.example infra/terraform.tfvars
 ```
 
-**Verify the halves match before launching.** A mismatched key pair produces
-three healthy instances you cannot log into:
+Fill in the region, `vpc_id`, `subnet_id`, `ami_id` (Ubuntu 24.04 LTS x86_64),
+the bucket and instance profile from §2, and `public_key_path`. Set
+`deployer_role_arn` only if Terraform should assume a role rather than use the
+profile's own credentials.
 
 ```sh
-diff <(ssh-keygen -y -f ~/.ssh/me-platform) <(cat ~/.ssh/me-platform.pub) \
-  && echo "key pair is consistent"
-```
-
-## B1. Provision
-
-**First check the three things in §A1 already exist.** They require IAM write,
-so in a company account they are not yours to create — the account owner runs
-`infra/bootstrap` (or clicks) and hands you the bucket name, the instance
-profile name, and credentials. If you own the account yourself, run it now:
-
-```sh
-terraform -chdir=infra/bootstrap apply     # ONLY if you own the account
-```
-
-Then the platform itself, which needs no IAM permissions at all.
-
-`deployer_role_arn` in `terraform.tfvars` is what selects between the two cases:
-
-| you were given | `deployer_role_arn` | what happens |
-|---|---|---|
-| an **IAM user** with the §A1 policy | leave it **null** | the profile's credentials are already restricted; nothing is assumed |
-| **admin on your own account** | bootstrap's role ARN | Terraform runs *under* the restricted policy instead of as admin, which is how you prove the §A1 ask is complete before sending it |
-
-
-```sh
-cp infra/terraform.tfvars.example infra/terraform.tfvars   # fill in from §A1/§A2
 terraform -chdir=infra init
 terraform -chdir=infra plan          # creates nothing
 terraform -chdir=infra apply
 ```
 
-`infra/` is deliberately unable to create IAM. If `plan` fails with an
-`AccessDenied` naming an action, that is the ask in §A1 being incomplete — send
-them the action name rather than working around it.
+Two settings are **launch-time only** and cannot be changed on a running
+instance:
 
-Two settings in `infra/main.tf` are **launch-time only** and cannot be changed
-on a running instance:
+- **`cpu_options { threads_per_core = 1 }`** — SMT off. A sibling thread sharing
+  a core with a timed run is exactly the contamination the design refuses. With
+  SMT off a `c6i.2xlarge` presents **4 cores**, which is what `BENCH_CPU` and
+  `ISOLATED_CPUS` must be set against in §7.
+- **`tenancy`** — shared by default, which is correct. See §11 before changing it.
 
-- `tenancy` — shared by default. See §C2 before changing it.
-- `cpu_options { threads_per_core = 1 }` — SMT off. A sibling thread sharing the
-  core with a timed run is exactly the contamination the design refuses. With
-  SMT off, `c6i.2xlarge` presents **4 cores**, which is what `BENCH_CPU` and
-  `ISOLATED_CPUS` must be set against.
+Security groups are created for you. The rule that matters is Postgres on the
+web node accepting **from the worker security group** rather than from a CIDR,
+so membership is dynamic and replacing an instance needs no rule change.
 
-Wait for cloud-init before connecting — `user_data` installs Docker, the build
-toolchain and rustup, then clones the repo:
+Wait for cloud-init before connecting. It installs Docker, the build toolchain
+and rustup, then clones the repo to `/opt/me-platform`:
 
 ```sh
 until ssh -i ~/.ssh/me-platform ubuntu@<web-ip> \
       'test -f /var/lib/cloud/me-platform-ready'; do sleep 10; done
 ```
 
-`terraform output` then gives you the SSH commands, the web node's **private
-IP**, and ready-to-paste `web_env` / `worker_env` blocks with that IP already
-substituted. Use them — a wrong private IP here is the most common way a
-three-node deployment fails silently.
+`terraform output` gives the SSH commands, the web node's **private IP**, and
+ready-to-paste environment blocks with that IP already substituted. Use them —
+a wrong private IP is the most common way a three-node deployment fails
+silently.
 
-## B2. Web node
+---
+
+## 4. Web node
 
 ```sh
+ssh -i ~/.ssh/me-platform ubuntu@<web-ip>
 cd /opt/me-platform
 
-export DB_BIND='<web private IP>'        # NOT loopback; workers cannot reach that
+export DB_BIND='<web private IP>'        # NOT loopback — workers cannot reach that
 export POSTGRES_PASSWORD='<something long>'
 export AWS_REGION='<region>'
 export S3_BUCKET='<bucket>'
-export SITE_ADDRESS='...'                # value depends on §B3 — set it first
+export SITE_ADDRESS='...'                # decided in §5 — set it before running
 
 docker compose -f platform/compose.yaml up -d --build
 ```
 
-- `POSTGRES_PASSWORD` is read **only when the cluster is first initialised**.
-  Changing it later means deleting the `pgdata` volume.
-- Every one of these must be exported on **every** later `docker compose` call
-  in this directory. Omitting `POSTGRES_PASSWORD` on a subsequent `up` restarts
-  the API against the wrong credentials and it crash-loops on
-  `password authentication failed`.
-
 The first build compiles the Rust API in release mode on the node. Expect
 several minutes.
 
-## B3. TLS and hosting
+Two things that bite:
 
-Both options put the frontend and API on **one origin**; Caddy owns the `/api/*`
-split. Keep it in the path either way or CORS breaks.
+- **`POSTGRES_PASSWORD` is read only when the database is first initialised.**
+  Changing it later means deleting the `pgdata` volume.
+- **Export all of these on every later `docker compose` call**, not just the
+  first. Omitting `POSTGRES_PASSWORD` on a subsequent `up` restarts the API
+  against the wrong credentials, and it crash-loops on
+  `password authentication failed for user "mebench"`.
+
+---
+
+## 5. How participants reach the site
+
+Both options put the frontend and the API on **one origin** — Caddy owns the
+`/api/*` split. Keep it in the path either way, or the browser starts making
+cross-origin requests and CORS breaks.
 
 ### Option A — a hostname, Caddy terminates TLS
+
+Caddy holds the certificate. One hop, nothing else to configure.
 
 ```
 browser ──https──▶ Caddy (web node) ──▶ Next.js  /*
                                     └──▶ axum    /api/*  (prefix stripped)
 ```
 
-1. A record: `matcher.example.com` → the web node's **public** IP.
-2. `export SITE_ADDRESS='matcher.example.com'` before `docker compose up`.
-3. Open **80 and 443** on `me-web`.
+1. **A record:** `matcher.example.com` → the web node's **public** IP.
+2. On the web node, before `docker compose up`:
+   ```sh
+   export SITE_ADDRESS='matcher.example.com'
+   ```
+3. Open **80 and 443** on the `me-web` security group.
 
-Caddy gets a Let's Encrypt certificate on first boot and renews it itself.
+Caddy requests a Let's Encrypt certificate on first boot and renews it itself.
 
 > **Port 80 must be reachable from the public internet for issuance.** Let's
-> Encrypt validates over HTTP-01 from its own servers. Restricted to the room's
-> IP, issuance fails with a challenge error rather than a firewall error.
+> Encrypt validates over HTTP-01 from its own servers. If 80 is restricted to
+> the venue's IP, issuance fails with a challenge error rather than a firewall
+> error, which sends you looking in the wrong place. Open it, confirm the
+> certificate, then narrow the rule if you want.
 
-Use an **Elastic IP** if you point DNS at it. EC2 public IPs change on
-stop/start, and the A record would break silently.
+Use an **Elastic IP** if DNS points at the instance. EC2 public IPs change on
+stop/start and the A record would break silently.
 
-### Option B — behind an existing proxy or ALB
+### Option B — behind an existing proxy or load balancer
+
+Your edge holds the certificate. The web node needs **no public IP**.
 
 ```
-browser ──https──▶ their proxy ──http──▶ Caddy (web node) ──▶ Next.js  /*
+browser ──https──▶ your proxy ──http──▶ Caddy (web node) ──▶ Next.js  /*
                                                           └──▶ axum    /api/*
 ```
 
-1. `export SITE_ADDRESS=':80'` — plain HTTP, no ACME, no redirect to 443.
-2. Open **80 from their proxy's security group**; drop the public IP.
+1. On the web node, before `docker compose up`:
+   ```sh
+   export SITE_ADDRESS=':80'      # plain HTTP, no ACME, no redirect to 443
+   ```
+2. Allow **80 from the proxy's security group** on `me-web`; remove any public
+   80/443 rules and the public IP.
 3. Forward the hostname to the web node's **private IP, port 80, path
-   unchanged**. Health check `/api/health`.
+   unchanged**:
 
-Constraints to pass to whoever owns the proxy:
+   ```nginx
+   location / {
+       proxy_pass http://172.31.9.101:80;
+       proxy_set_header Host              $host;
+       proxy_set_header X-Forwarded-Proto $scheme;
+   }
+   ```
+
+   ALB equivalent: target group → web node, port 80, protocol HTTP.
+4. Health check: **`/api/health`**.
+
+Constraints for whoever owns the proxy:
 
 - **Do not strip a path prefix.** Host-based routing only. Serving under
-  `example.com/matcher` needs a Next.js `basePath` at build time and is not
-  supported here.
-- **Do not proxy `/admin`.** Operator routes are on loopback `:8081`; Caddy does
-  not route them. Reaching the API container directly exposes every operator
-  route with no authentication anywhere.
-- No WebSockets, no streaming, no sticky sessions. JSON polling only.
+  `example.com/matcher` requires a Next.js `basePath` set at build time and is
+  not supported by this configuration.
+- **Do not proxy `/admin`.** Operator routes listen on loopback `:8081` and Caddy
+  does not route them. Reaching the API container directly exposes every
+  operator route, with no authentication anywhere.
+- No WebSockets, no streaming, no sticky sessions. JSON polling only; the API is
+  stateless.
 
-> `SITE_ADDRESS` reaches Caddy through an `environment:` block in
-> `compose.yaml`. Exporting it on the host alone used to do nothing, and both
-> options above failed in confusing ways — a real domain served as `localhost`,
-> or `:80` answering `308` to HTTPS with a self-signed certificate. Fixed, but
-> if you see either symptom, that variable is not reaching the container.
+### If neither
 
-### Verify
+Leave `SITE_ADDRESS=':80'` and give participants the public IP over HTTP. One
+thing degrades: the "copy reproducer" button on a failed submission uses a
+clipboard API that browsers disable outside a secure context, so it silently
+does nothing. The text remains selectable.
+
+### Verify, either way
 
 ```sh
 curl -s http://<host>/api/health          # ok
 curl -s http://<host>/api/participants    # JSON, not 500
 ```
 
-## B4. Pool node
+> `SITE_ADDRESS` reaches Caddy through an `environment:` block in
+> `compose.yaml`. If a real domain is being served as `localhost`, or `:80`
+> answers `308` redirecting to HTTPS with a self-signed certificate, that
+> variable is not reaching the container — check with
+> `docker exec me-platform-caddy-1 printenv SITE_ADDRESS`.
+
+---
+
+## 6. Pool node
 
 ```sh
+ssh -i ~/.ssh/me-platform ubuntu@<pool-ip>
+cd /opt/me-platform
 sudo ops/pool-node-setup.sh
 ```
 
-Worker count is `min(nproc - 2, POOL_BOXES)`, `POOL_BOXES` defaults to 8 — so
-**6 on a `c6i.2xlarge`**. Raise with `sudo POOL_BOXES=14 ops/pool-node-setup.sh`.
+Worker count is `min(nproc - 2, POOL_BOXES)`, and `POOL_BOXES` defaults to 8 —
+so **6 workers on a `c6i.2xlarge`**. Raise it with
+`sudo POOL_BOXES=14 ops/pool-node-setup.sh`.
 
-A Run job is ~2s of compile, so 6 slots is far more than 18 people can
-saturate. Note the slots are shared between both lanes and Run is claimed first;
-under sustained Run traffic, Submit verification queues behind it.
+Six slots is ample: a Run job is about two seconds of compile, so 18 people
+iterating cannot saturate it. The slots are shared between both lanes and Run
+jobs are claimed first, so under sustained Run traffic, Submit verification
+queues behind them by design.
 
-## B5. Bench node
+---
+
+## 7. Bench node
 
 ```sh
+ssh -i ~/.ssh/me-platform ubuntu@<bench-ip>
+cd /opt/me-platform
 sudo BENCH_CPU=2 ISOLATED_CPUS=2-3 ops/bench-node-setup.sh --dedicated
 ```
 
-`--dedicated` is the script's **tuning mode** (runtime tuning only, no boot
-parameters) and is unrelated to AWS tenancy. Use `--metal` only on bare metal.
+`BENCH_CPU` and `ISOLATED_CPUS` must match the cores the instance actually
+presents — 4 on a `c6i.2xlarge` with SMT off, so two for the OS and two isolated
+for timed runs.
 
-The script runs the hygiene assertions itself and **refuses to mark the node
-healthy if they fail**. Do not override that. On a VM these remain warnings and
-are expected: `isolcpus`, `nohz_full`, `rcu_nocbs`, `mitigations=off`, hugepages,
-and the CPU governor — there is no cpufreq driver inside an EC2 guest.
+`--dedicated` is the script's **tuning mode** — runtime tuning only, no boot
+parameters — and is unrelated to AWS tenancy. Use `--metal` only on bare metal,
+which also requires a reboot.
 
-## B6. Wire the workers
+The script runs its hygiene assertions and **refuses to mark the node healthy if
+any fail**. Do not override that; a half-tuned node produces numbers that look
+fine and rank people wrongly.
 
-On **both** worker nodes, `/opt/mebench/worker.env` — the generated file has a
-placeholder host that resolves to nothing:
+On a VM these remain warnings and are expected: `isolcpus`, `nohz_full`,
+`rcu_nocbs`, `mitigations=off`, reserved hugepages, and the CPU governor —
+there is no cpufreq driver inside an EC2 guest, because the hypervisor owns
+frequency scaling.
+
+---
+
+## 8. Connect the workers
+
+On **both** worker nodes, edit `/opt/mebench/worker.env`. The generated file
+contains a placeholder host that resolves to nothing:
 
 ```
 DATABASE_URL=postgres://mebench:<password>@<web private IP>:5432/mebench
@@ -360,12 +374,13 @@ AWS_REGION=<region>
 ```
 
 ```sh
-systemctl enable --now mebench-pool@{0..5}    # 0..N-1, N from §B4
-systemctl enable --now mebench-bench          # bench node
+sudo systemctl enable --now mebench-pool@{0..5}   # pool node, 0..N-1 from §6
+sudo systemctl enable --now mebench-bench         # bench node
 ```
 
-Confirm they registered — this is the step that proves the security group rule
-and `DB_BIND` are both right:
+Confirm they registered. This is the step that proves the security group rule
+and `DB_BIND` are both right — if either is wrong the workers simply never
+appear:
 
 ```sh
 docker exec -i me-platform-postgres-1 psql -U mebench -d mebench \
@@ -374,42 +389,92 @@ docker exec -i me-platform-postgres-1 psql -U mebench -d mebench \
 
 Seven rows, all `healthy = t`.
 
-## B7. Roster
+---
 
-There is no signup — identity is a name picked from this list.
+## 9. Load the roster
+
+There is no signup. Identity is a name picked from this list.
 
 ```sh
 docker exec -i me-platform-postgres-1 psql -U mebench -d mebench <<'SQL'
 INSERT INTO participants (handle)
-VALUES ('a.mehra'), ('b.kulkarni') /* … 18 rows … */
+VALUES ('a.mehra'), ('b.kulkarni') /* … one row per participant … */
 ON CONFLICT (handle) DO NOTHING;
 SQL
 ```
 
-## B8. Verify the deployment
+---
+
+## 10. Verify the deployment
+
+**The instance role is attached.** The AWS CLI is deliberately not installed on
+the nodes and is not needed — the SDK reads credentials from the metadata
+service:
 
 ```sh
-# instance role is attached (the AWS CLI is NOT installed and is not needed —
-# the SDK reads credentials from the metadata service)
 T=$(curl -s -X PUT http://169.254.169.254/latest/api/token \
       -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
 curl -s -H "X-aws-ec2-metadata-token: $T" \
   http://169.254.169.254/latest/meta-data/iam/security-credentials/
-
-# Postgres and the operator API must NOT be reachable from outside
-nc -zv <web-public-ip> 5432        # refused
-nc -zv <web-public-ip> 8081        # refused
 ```
 
-Then drive one submission through the frontend: **Run** should give `41/41`, and
-**Submit** should walk `received → compiling → verifying → verify_passed →
-bench_queued → benchmarking → done` in about 70 seconds.
+Prints `me-platform-node` on each instance.
 
-## B9. Operator access
+**Postgres and the operator API are not exposed.** Both must refuse:
+
+```sh
+nc -zv <web-public-ip> 5432
+nc -zv <web-public-ip> 8081
+```
+
+**A submission goes through.** Open the site, pick a handle, paste a reference
+engine:
+
+- **Run** → `41/41`
+- **Submit** → `received → compiling → verifying → verify_passed → bench_queued
+  → benchmarking → done`, about 70 seconds
+
+---
+
+## 11. Bench node tenancy
+
+Shared tenancy is enough, and this was measured rather than assumed. 200
+independent runs of the reference on a shared `c6i.2xlarge`:
+
+| | |
+|---|---|
+| single-run spread | 4.46% (max−min) |
+| single-run IQR | 1.05% |
+| **median-of-9 stability** | **±0.6%** |
+| steal-time discards | **0 / 200** |
+
+A score is the median of nine runs, so the IQR predicts stability, not max−min.
+Two engines 2% apart are ranked correctly 100% of the time; 1% apart, 98.8%.
+
+Dedicated tenancy adds a **flat $2/hour per region** on top of a ~10%
+per-instance premium — about 59× the instance premium — and roughly triples the
+bill. It is not justified for the live event.
+
+If you want it for the final rejudge block only, launch a second bench node of
+the **same instance type** at the end (~2 hours, ~$5). Three things are then
+mandatory:
+
+1. **Stop the old bench worker first.** Nothing prevents two bench workers
+   running at once, and the queue claim uses `SKIP LOCKED` — they would take
+   different jobs and benchmark concurrently, which is exactly the contamination
+   a single bench node exists to prevent.
+2. **`DELETE FROM settings WHERE key = 'bench_reference_baseline_ns';`** The
+   spot-check baseline is global, not per-node. A fresh node compares against
+   the old node's number, exceeds the 5% tolerance, and parks the whole queue.
+3. **Same instance type.** The ranked workload is calibrated to this L3.
+
+---
+
+## 12. Operator access
 
 Nine `/admin/*` routes on loopback `:8081`. **No token, no password** — access to
 the admin API *is* SSH access to the web node. That is the entire auth story;
-unreachability is the mechanism.
+unreachability is the mechanism, which is why §5 says never to proxy `/admin`.
 
 ```sh
 ssh -i ~/.ssh/me-platform -N -L 8081:127.0.0.1:8081 ubuntu@<web-ip>
@@ -420,7 +485,8 @@ curl -X POST localhost:8081/admin/bench/healthy
 curl -X POST localhost:8081/admin/bench/unhealthy
 ```
 
-If SSH keys are not permitted, the same forward over SSM:
+If SSH keys are not permitted, the same port forward over SSM — note this
+requires adding `AmazonSSMManagedInstanceCore` to the `me-platform-node` role:
 
 ```sh
 aws ssm start-session --target <instance-id> \
@@ -428,120 +494,55 @@ aws ssm start-session --target <instance-id> \
   --parameters '{"portNumber":["8081"],"localPortNumber":["8081"]}'
 ```
 
-## B10. Before the event
+---
+
+## 13. Before the event
 
 ```sh
-ops/make-boilerplate.sh          # publish dist/me-boilerplate.zip with the spec
+ops/make-boilerplate.sh          # publishes dist/me-boilerplate.zip with the spec
 ```
 
-- Drive one submission through all three nodes (§B8).
+- Drive one submission through all three nodes (§10).
 - Stop the bench worker mid-queue and confirm jobs park at `pending_benchmark`
   and unpark when it returns.
-- Warm the bench node **30 minutes under load** on the morning — a cold package
-  flatters the first submissions and nobody else.
+- **Warm the bench node for 30 minutes under load** on the morning. A cold
+  package flatters the first few submissions and nobody else.
+
+The ranked workload needs no calibration. `live_target 3780` produces 732,279
+resting orders across 14,794 price levels, and on a 54 MB L3 it separates a
+cache-conscious engine from a naive one by **5.98×** — the best of any depth
+measured. Do not raise it without also raising `BENCH_EVENTS`: warm-up is
+`n_sessions × live_target × 8` and the harness clips it to half the stream, so
+the next step up would time a book at 69% of its target.
 
 Event-day operations are in [ops/runbook.md](ops/runbook.md).
 
-## B11. Teardown
+---
+
+## 14. Teardown
 
 ```sh
 terraform -chdir=infra destroy             # stops the meter
-terraform -chdir=infra/bootstrap destroy   # only if you own the account
+terraform -chdir=infra/bootstrap destroy   # bucket and IAM
 ```
 
-`pg_dump` to S3 first if the results matter. Note `force_destroy_bucket` is
-`true` by default, which is right for a test and wrong for the real event — the
-bucket holds every submission's source.
+`pg_dump` to S3 first if the results matter. Note `force_destroy_bucket`
+defaults to `true`, which is right for a test deployment and wrong for the real
+event — the bucket holds every submission's source.
+
+---
 
 ## Checklist
 
-- [ ] Bucket, `me-platform-node` role, operator user all exist (§A1)
-- [ ] `terraform plan` succeeds under the operator's own credentials
+- [ ] Bucket, `me-platform-node` role and instance profile exist
 - [ ] SSH key halves verified to match **before** launch
 - [ ] Bench instance launched with `threads_per_core = 1`
 - [ ] `DB_BIND` is the web node's **private** IP
 - [ ] `POSTGRES_PASSWORD` exported before the first `up`, and on every later one
-- [ ] `SITE_ADDRESS` reaches the Caddy container (`docker exec … printenv`)
+- [ ] `SITE_ADDRESS` confirmed inside the Caddy container
 - [ ] `me-web` allows 5432 from the `me-worker` **security group**
-- [ ] Seven workers registered and healthy
+- [ ] Seven workers registered and `healthy = t`
 - [ ] Roster loaded
 - [ ] `ops/bench-hygiene.sh` exits 0 with `BENCH_CPU` passed explicitly
 - [ ] Postgres and `:8081` refused from the public IP
-- [ ] One submission end to end across all three nodes
-
----
-
-# Part C — what has been measured
-
-Numbers from a real deployment on `c6i.2xlarge` (Ice Lake Xeon 8375C, **54 MB
-L3**), not estimates.
-
-## C1. It works
-
-Full submission `done` in **72 s**: p50 96.6 ns, p99 360 ns, probe cost 12.4 ns,
-9 runs, **0 discards**. Run lane `41/41`.
-
-## C2. Shared tenancy is enough
-
-200 independent runs of the reference on a shared instance:
-
-| | |
-|---|---|
-| single-run spread | 4.46% (max−min) |
-| single-run IQR | 1.05% |
-| **median-of-9 stability** | **±0.6%** |
-| steal-time discards | **0 / 200** |
-
-Two engines 2% apart are ranked correctly **100%** of the time; 1% apart, 98.8%.
-
-`analyze.py` judges on single-run `max−min` and will report the middle band —
-but a score is the median of nine runs, so IQR is the number that predicts
-stability. **Do not pay for dedicated tenancy for the live event.** It adds a
-flat $2/hr per region — about 59× the per-instance premium — and roughly triples
-the bill.
-
-The cheap insurance is dedicated tenancy **for the rejudge block only**: launch
-a second bench node of the same instance type at the end, ~2 hours, ~$5. If you
-do, three things are mandatory:
-
-1. **Stop the old bench worker first.** Nothing prevents two bench workers
-   running at once, and `SKIP LOCKED` means they would take different jobs and
-   benchmark concurrently — the exact contamination the single-node design
-   exists to prevent.
-2. **`DELETE FROM settings WHERE key = 'bench_reference_baseline_ns';`** The
-   baseline is global, not per-node, so a fresh node compares against the old
-   node's number, exceeds the 5% tolerance, and parks the whole queue.
-3. **Same instance type.** The ranked depth is calibrated to this L3.
-
-## C3. The ranked depth is correct
-
-Measured at 20M events, both engines, on 54 MB L3:
-
-| `live_target` | depth | levels | reference | optimized | ratio |
-|---|---|---|---|---|---|
-| 252 | 53,116 | 12,363 | 314.5 ns | 70.3 ns | 4.47× |
-| 756 | 153,390 | 14,071 | 422.1 ns | 78.6 ns | 5.37× |
-| 1512 | 301,666 | 14,462 | 491.7 ns | 85.5 ns | 5.75× |
-| **3780** | **732,279** | **14,794** | **615.2 ns** | **102.8 ns** | **5.98×** |
-
-**Ship 3780.** On a 16 MB laptop the same config collapsed to 3.50× because both
-engines left cache; on 54 MB it is the best-discriminating depth measured.
-
-Do not raise it without also raising `BENCH_EVENTS`. Warm-up is
-`n_sessions × live_target × 8` and the harness clips it to half the stream, so
-`live_target 5670` needs 14.5M warm-up events against a 10M cap and times a
-book at ~69% of target. 3780 needs 9.68M against that cap — the deepest
-configuration 20M events can measure honestly.
-
-Levels are **98.6% saturated** (14,794 of ~15,000), so added depth goes vertical
-— 49 orders per level at 3780, 73 at 5670 — rather than wider.
-
-## C4. Still not measured
-
-- **Drift across a full day.** `ops/noise-floor/soak.sh` runs 6 hours and has
-  not been run. The rejudge block is the designed defence: it collapses every
-  final number into one short window on one machine.
-- **A cache-sensitive submission against a noisy neighbour.** The noise floor
-  measures the reference against itself. A co-tenant evicting L3 is invisible to
-  every counter available inside the guest — see `PLAN-ratio-scoring.md`.
-- **18 people at once.** Everything here was measured with one submitter.
+- [ ] One submission driven end to end across all three nodes
