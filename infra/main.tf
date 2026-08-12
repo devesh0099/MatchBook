@@ -76,45 +76,84 @@ resource "aws_key_pair" "this" {
 # ONLY from the worker group — a CIDR would either be too wide or break the
 # moment an instance is replaced and takes a new private IP.
 
+# The worker group carries NO inline ingress or egress blocks, and that is
+# deliberate. Restricted egress needs a rule whose destination is the WEB group
+# (Postgres), but the web group's own inline ingress already references this
+# one — and Terraform builds its dependency graph from the configuration, not
+# from runtime values, so an inline rule pointing back at web makes the two
+# resources depend on each other. The result is
+#
+#   Error: Cycle: aws_security_group.web, aws_security_group.worker
+#
+# and it fires even with restrict_worker_egress = false, because the reference
+# is present in the file whether or not the dynamic block produces anything.
+# Nothing can be planned or applied at all.
+#
+# A standalone rule is its own node in that graph: it depends on both groups,
+# and neither group depends on it. Inline blocks are authoritative over the
+# whole rule set, so they cannot be mixed with standalone rules on the SAME
+# group — hence SSH moves out here too. The web group keeps its inline blocks,
+# because nothing points back at it from here.
 resource "aws_security_group" "worker" {
   name_prefix = "${var.name_prefix}-worker-"
   description = "Pool and bench nodes. No inbound except administrative SSH."
   vpc_id      = var.vpc_id
 
-  ingress {
-    description = "SSH. Key-only auth is the control here, not the CIDR."
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = var.ssh_cidrs
-  }
-
-  # One of these two applies, never both. See var.restrict_worker_egress.
-  dynamic "egress" {
-    for_each = var.restrict_worker_egress ? [] : [1]
-    content {
-      description = "apt, GitHub, S3, and Postgres on the web node"
-      from_port   = 0
-      to_port     = 0
-      protocol    = "-1"
-      cidr_blocks = ["0.0.0.0/0"]
-    }
-  }
-
-  dynamic "egress" {
-    for_each = var.restrict_worker_egress ? local.worker_egress : {}
-    content {
-      description     = egress.value.description
-      from_port       = egress.value.port
-      to_port         = egress.value.port
-      protocol        = egress.value.protocol
-      cidr_blocks     = egress.key == "postgres" ? [] : ["0.0.0.0/0"]
-      security_groups = egress.key == "postgres" ? [aws_security_group.web.id] : null
-  }
-
   lifecycle {
     create_before_destroy = true
   }
+}
+
+# One rule per CIDR: the modern rule resources take a single cidr_ipv4 rather
+# than a list.
+resource "aws_vpc_security_group_ingress_rule" "worker_ssh" {
+  for_each = toset(var.ssh_cidrs)
+
+  security_group_id = aws_security_group.worker.id
+  description       = "SSH. Key-only auth is the control here, not the CIDR."
+  cidr_ipv4         = each.value
+  from_port         = 22
+  to_port           = 22
+  ip_protocol       = "tcp"
+}
+
+# Wide open, unless restrict_worker_egress says otherwise.
+resource "aws_vpc_security_group_egress_rule" "worker_all" {
+  count = var.restrict_worker_egress ? 0 : 1
+
+  security_group_id = aws_security_group.worker.id
+  description       = "apt, GitHub, S3, and Postgres on the web node"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+}
+
+# The narrowed set. Postgres is excluded here and handled below, because its
+# destination is a security group rather than a CIDR.
+resource "aws_vpc_security_group_egress_rule" "worker_port" {
+  for_each = var.restrict_worker_egress ? {
+    for k, v in local.worker_egress : k => v if k != "postgres"
+  } : {}
+
+  security_group_id = aws_security_group.worker.id
+  description       = each.value.description
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = each.value.port
+  to_port           = each.value.port
+  ip_protocol       = each.value.protocol
+}
+
+# Postgres egress aimed at the web group, so it keeps working when the web node
+# is replaced and takes a new private IP. This is the rule that cannot be
+# expressed inline; see the comment on aws_security_group.worker.
+resource "aws_vpc_security_group_egress_rule" "worker_postgres" {
+  count = var.restrict_worker_egress ? 1 : 0
+
+  security_group_id            = aws_security_group.worker.id
+  description                  = local.worker_egress.postgres.description
+  referenced_security_group_id = aws_security_group.web.id
+  from_port                    = local.worker_egress.postgres.port
+  to_port                      = local.worker_egress.postgres.port
+  ip_protocol                  = local.worker_egress.postgres.protocol
 }
 
 locals {

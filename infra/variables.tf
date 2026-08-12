@@ -4,9 +4,9 @@ variable "aws_region" {
 }
 
 variable "aws_profile" {
-  description = "Local profile used to ASSUME deployer_role_arn. It needs sts:AssumeRole and nothing else; all the real work happens under the assumed role."
+  description = "Local profile used to ASSUME deployer_role_arn. It needs sts:AssumeRole and nothing else; all the real work happens under the assumed role. Null means the ordinary AWS credential chain — naming a profile that does not exist on the machine is a hard failure, so it is not a good default."
   type        = string
-  default     = "iicpc"
+  default     = null
 }
 
 variable "deployer_role_arn" {
