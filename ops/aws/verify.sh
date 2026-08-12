@@ -137,7 +137,7 @@ fi
 # ------------------------------------------------------------ bench hygiene
 
 step "bench node hygiene"
-if out="$(node bench 'cd /opt/flashmatch && sudo BENCH_CPU=$(( $(nproc) / 2 )) ops/bench-hygiene.sh' 2>&1)"; then
+if out="$(node bench 'cd /opt/flashmatch && sudo BENCH_CPU=$(( $(nproc --all) / 2 )) ops/bench-hygiene.sh' 2>&1)"; then
   ok "bench-hygiene.sh exits 0"
 else
   check_fail "bench-hygiene.sh FAILED — do not rank anything on this node:"

@@ -164,7 +164,7 @@ provision_bench() {
   # box; on the 4-CPU box a c6i.2xlarge presents with threads_per_core=1 they
   # name a CPU that does not exist. Derive them instead of hardcoding.
   local ncpu half
-  ncpu="$(node bench nproc)"
+  ncpu="$(node bench nproc --all)"  # --all: isolcpus hides CPUs from plain nproc
   ncpu="${ncpu//[!0-9]/}"
   (( ncpu >= 2 )) || die "bench node reports $ncpu CPUs"
   half=$(( ncpu / 2 ))

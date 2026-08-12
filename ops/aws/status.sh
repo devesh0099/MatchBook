@@ -89,7 +89,7 @@ echo >&2
 printf '    running rate ~$%s/hr · accrued ~$%s · a month idle would be ~$%s\n' \
   "$total_rate" "$total_cost" \
   "$(awk -v r="$total_rate" 'BEGIN{printf "%.0f", r*730}')" >&2
-printf '    %s(estimate: us-east-1 on-demand, excludes EBS, data transfer and dedicated tenancy)%s\n' \
+printf '    %s(ap-south-1 on-demand; includes public IPv4 and the root volume.\n    Excludes S3, data transfer and dedicated tenancy. A STOPPED instance still\n    bills its volume, so only destroy.sh stops the meter.)%s\n' \
   "$C_DIM" "$C_RESET" >&2
 
 # ------------------------------------------------------------------- platform

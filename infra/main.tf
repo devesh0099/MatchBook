@@ -122,8 +122,13 @@ resource "aws_security_group" "worker" {
 # Operator access is therefore a jump through the web node; ops/aws/lib.sh does
 # this automatically.
 resource "aws_vpc_security_group_ingress_rule" "worker_ssh_from_web" {
-  security_group_id            = aws_security_group.worker.id
-  description                  = "SSH, from the web node only — operators jump through it"
+  security_group_id = aws_security_group.worker.id
+  # ASCII only, and no em dash. AWS validates rule descriptions against
+  # a-zA-Z0-9._-:/()#,@[]+=&;{}!$* and rejects anything else with
+  # InvalidParameterValue, which reads as a malformed request rather than as a
+  # stray character. Comments elsewhere in this file use em dashes freely; the
+  # description fields cannot.
+  description                  = "SSH from the web node only; operators jump through it"
   referenced_security_group_id = aws_security_group.web.id
   from_port                    = 22
   to_port                      = 22
