@@ -74,6 +74,28 @@ START_TS=$SECONDS
 LOG_DIR="$STATE_DIR/logs"
 mkdir -p "$LOG_DIR"
 
+# A stopped instance reports associate_public_ip_address = false, because its
+# address really was released. Terraform reads that as drift from the configured
+# true, and that attribute forces replacement — so applying against a paused
+# deployment silently DESTROYS the workers and rebuilds them from scratch,
+# discarding the toolchain, the isolate build and the bench node's kernel
+# parameters. The plan does say "must be replaced", but it is easy to skim past
+# when you were expecting a no-op.
+assert_nothing_stopped() {
+  command -v aws >/dev/null 2>&1 || return 0
+  local region stopped
+  region="$(terraform -chdir="$INFRA_DIR" output -raw aws_region 2>/dev/null || true)"
+  [[ -n "$region" ]] || return 0
+  stopped="$(aws ec2 describe-instances --region "$region" \
+    --filters "Name=tag:Project,Values=flashmatch" "Name=instance-state-name,Values=stopped,stopping" \
+    --query 'Reservations[].Instances[].Tags[?Key==`Name`].Value' --output text 2>/dev/null | tr '\n' ' ')"
+  [[ -z "${stopped// /}" ]] && return 0
+  die "these instances are STOPPED: ${stopped}
+    Applying now would replace them rather than update them, discarding all
+    provisioning. Bring them back first:  ops/aws/pause.sh --resume"
+}
+assert_nothing_stopped
+
 # ============================================================ phase: infra
 
 if should_run infra; then
