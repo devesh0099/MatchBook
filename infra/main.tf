@@ -104,12 +104,12 @@ resource "aws_security_group" "worker" {
   dynamic "egress" {
     for_each = var.restrict_worker_egress ? local.worker_egress : {}
     content {
-      description = egress.value.description
-      from_port   = egress.value.port
-      to_port     = egress.value.port
-      protocol    = egress.value.protocol
-      cidr_blocks = ["0.0.0.0/0"]
-    }
+      description     = egress.value.description
+      from_port       = egress.value.port
+      to_port         = egress.value.port
+      protocol        = egress.value.protocol
+      cidr_blocks     = egress.key == "postgres" ? [] : ["0.0.0.0/0"]
+      security_groups = egress.key == "postgres" ? [aws_security_group.web.id] : null
   }
 
   lifecycle {
