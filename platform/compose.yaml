@@ -2,7 +2,7 @@
 # container runtime doing background work during a ranked measurement is exactly
 # what the node was bought to avoid. Pool and bench run plain systemd units.
 
-name: me-platform
+name: flashmatch
 
 services:
   caddy:
@@ -67,7 +67,7 @@ services:
       BIND_ADDR: 0.0.0.0:8080
       ADMIN_BIND_ADDR: 0.0.0.0:8081
       AWS_REGION: ${AWS_REGION:-eu-west-1}
-      S3_BUCKET: ${S3_BUCKET:-me-platform-artifacts}
+      S3_BUCKET: ${S3_BUCKET:-flashmatch-artifacts}
     expose:
       - "8080"
     ports:

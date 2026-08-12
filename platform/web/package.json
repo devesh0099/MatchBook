@@ -1,5 +1,5 @@
 {
-  "name": "me-web",
+  "name": "flashmatch-web",
   "private": true,
   "scripts": {
     "sync": "node scripts/sync-assets.mjs",

@@ -1,4 +1,4 @@
-//! me-platform worker.
+//! flashmatch worker.
 //!
 //!   worker --role pool     compile + verify, 4-8 boxes in parallel
 //!   worker --role bench    ranked runs, strictly one at a time
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
     let s3_client = common::s3_client().await;
     let storage = Arc::new(Storage {
         client: s3_client,
-        bucket: env_or("S3_BUCKET", "me-platform-artifacts"),
+        bucket: env_or("S3_BUCKET", "flashmatch-artifacts"),
     });
 
     let hostname = env_or("HOSTNAME", "worker");

@@ -8,27 +8,46 @@
       "Resource": "*"
     },
     {
-      "Sid": "ManageOurInstancesInOneRegion",
+      "Sid": "CreateOurResourcesInOneRegion",
       "Effect": "Allow",
       "Action": [
         "ec2:RunInstances",
-        "ec2:TerminateInstances",
-        "ec2:StartInstances",
-        "ec2:StopInstances",
         "ec2:CreateTags",
-        "ec2:ModifyInstanceAttribute",
         "ec2:CreateSecurityGroup",
-        "ec2:DeleteSecurityGroup",
-        "ec2:AuthorizeSecurityGroupIngress",
-        "ec2:RevokeSecurityGroupIngress",
-        "ec2:AuthorizeSecurityGroupEgress",
-        "ec2:RevokeSecurityGroupEgress",
         "ec2:CreateKeyPair",
         "ec2:ImportKeyPair",
         "ec2:DeleteKeyPair"
       ],
       "Resource": "*",
       "Condition": { "StringEquals": { "aws:RequestedRegion": "${region}" } }
+    },
+    {
+      "Sid": "ManageOnlyResourcesWeTagged",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:TerminateInstances",
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:ModifyInstanceMetadataOptions",
+        "ec2:ModifyVolume",
+        "ec2:DeleteTags",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:AssociateIamInstanceProfile",
+        "ec2:ReplaceIamInstanceProfileAssociation",
+        "ec2:DisassociateIamInstanceProfile"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${region}",
+          "aws:ResourceTag/Project": "${project_tag}"
+        }
+      }
     },
     {
       "Sid": "AttachOnlyOurRoleToInstances",
@@ -40,8 +59,16 @@
     {
       "Sid": "OurBucketOnly",
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:GetBucketLocation"],
-      "Resource": ["arn:aws:s3:::${bucket}", "arn:aws:s3:::${bucket}/*"]
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::${bucket}",
+        "arn:aws:s3:::${bucket}/*"
+      ]
     }
   ]
 }

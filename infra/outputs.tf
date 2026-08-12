@@ -22,6 +22,25 @@ locals {
   identity = trimsuffix(var.public_key_path, ".pub")
 }
 
+# ------------------------------------------------------- consumed by scripts
+# ops/aws/*.sh derives everything from `terraform output -json`, so that no
+# script ever takes a hostname or an IP as an argument — the failure that costs
+# an event is a stale address pasted from yesterday into a command that looks
+# right. These three exist to make that possible without re-parsing tfvars.
+
+output "ssh_identity" {
+  description = "Private key path matching the imported public key. Note the value may contain a literal ~, which a shell will not expand inside a variable."
+  value       = local.identity
+}
+
+output "aws_region" {
+  value = var.aws_region
+}
+
+output "s3_bucket" {
+  value = var.s3_bucket
+}
+
 output "ssh" {
   description = "Ready-to-paste SSH commands."
   value = {

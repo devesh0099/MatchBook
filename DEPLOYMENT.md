@@ -21,6 +21,32 @@ The real cost risk is forgetting to: a month of idle instances is ~$560.
 
 ---
 
+## The short version
+
+Every step below is wrapped by a script in [`ops/aws/`](ops/aws/README.md). Read
+this document once to understand what is being built and why; run the scripts
+when you actually build it.
+
+```sh
+ops/aws/bootstrap.sh            # 2 — bucket and IAM, once per account
+$EDITOR infra/terraform.tfvars  # 3 — vpc_id, subnet_id, ami_id
+ops/aws/preflight.sh            # checks all of it before spending anything
+ops/aws/deploy.sh               # 3-8 — launch, provision all three, wire up, verify
+ops/aws/verify.sh               # 10 — the acceptance checks, re-runnable
+ops/aws/destroy.sh              # 14 — backs up first, then stops the meter
+```
+
+`preflight.sh` is the one worth running twice. It creates nothing, and it
+catches the failures that are silent or expensive: a key pair whose halves do not
+match, a subnet with no route to the internet, a vCPU quota too low for the third
+instance, an arm64 AMI, a `bench_core_count` the instance type will reject.
+
+The sections below remain the reference for what each step does, and for
+everything the scripts deliberately leave to a human — the roster, the hosting
+decision in §5, and the tenancy decision in §11.
+
+---
+
 ## What you need before starting
 
 - An AWS account, and a region to deploy into.
@@ -44,7 +70,7 @@ Generate a key dedicated to this deployment. Revoking it later then affects
 nothing else.
 
 ```sh
-ssh-keygen -t ed25519 -f ~/.ssh/me-platform -C me-platform
+ssh-keygen -t ed25519 -f ~/.ssh/flashmatch -C flashmatch
 ```
 
 **Verify both halves match before launching anything.** A mismatched key pair
@@ -52,7 +78,7 @@ produces three healthy instances nobody can log into, and the only recovery is
 detaching the root volume and mounting it elsewhere.
 
 ```sh
-diff <(ssh-keygen -y -f ~/.ssh/me-platform) <(cat ~/.ssh/me-platform.pub) \
+diff <(ssh-keygen -y -f ~/.ssh/flashmatch) <(cat ~/.ssh/flashmatch.pub) \
   && echo "key pair is consistent"
 ```
 
@@ -75,7 +101,7 @@ That creates three things and prints the values the next step needs.
 **An S3 bucket**, private and encrypted. Holds submission source and compiled
 binaries, keyed on sha256.
 
-**`me-platform-node`** — an IAM role and instance profile attached to all three
+**`flashmatch-node`** — an IAM role and instance profile attached to all three
 instances. This is the entire AWS surface of the running platform:
 
 ```json
@@ -91,7 +117,7 @@ instances. This is the entire AWS surface of the running platform:
 
 No EC2, no Secrets Manager, no CloudWatch, no SSM.
 
-**`me-platform-deployer`** — a role carrying the deployment permissions. Use it
+**`flashmatch-deployer`** — a role carrying the deployment permissions. Use it
 if the rest of the deployment should run under a scoped policy rather than as an
 administrator; set `deployer_role_arn` in §3. The same document works attached
 to a user instead, if you would rather issue credentials directly:
@@ -103,22 +129,34 @@ to a user instead, if you would rather issue credentials directly:
     { "Sid": "ReadEverythingEC2", "Effect": "Allow",
       "Action": ["ec2:Describe*"], "Resource": "*" },
 
-    { "Sid": "ManageOurInstancesInOneRegion", "Effect": "Allow",
+    { "Sid": "CreateOurResourcesInOneRegion", "Effect": "Allow",
       "Action": [
-        "ec2:RunInstances", "ec2:TerminateInstances",
-        "ec2:StartInstances", "ec2:StopInstances",
-        "ec2:CreateTags", "ec2:ModifyInstanceAttribute",
-        "ec2:CreateSecurityGroup", "ec2:DeleteSecurityGroup",
-        "ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress",
-        "ec2:AuthorizeSecurityGroupEgress", "ec2:RevokeSecurityGroupEgress",
+        "ec2:RunInstances", "ec2:CreateTags", "ec2:CreateSecurityGroup",
         "ec2:CreateKeyPair", "ec2:ImportKeyPair", "ec2:DeleteKeyPair"
       ],
       "Resource": "*",
       "Condition": { "StringEquals": { "aws:RequestedRegion": "<region>" } } },
 
+    { "Sid": "ManageOnlyResourcesWeTagged", "Effect": "Allow",
+      "Action": [
+        "ec2:TerminateInstances", "ec2:StartInstances", "ec2:StopInstances",
+        "ec2:ModifyInstanceAttribute", "ec2:ModifyInstanceMetadataOptions",
+        "ec2:ModifyVolume", "ec2:DeleteTags",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress", "ec2:RevokeSecurityGroupEgress",
+        "ec2:AssociateIamInstanceProfile",
+        "ec2:ReplaceIamInstanceProfileAssociation",
+        "ec2:DisassociateIamInstanceProfile"
+      ],
+      "Resource": "*",
+      "Condition": { "StringEquals": {
+        "aws:RequestedRegion": "<region>",
+        "aws:ResourceTag/Project": "flashmatch" } } },
+
     { "Sid": "AttachOnlyOurRoleToInstances", "Effect": "Allow",
       "Action": ["iam:PassRole"],
-      "Resource": "arn:aws:iam::<account>:role/me-platform-node",
+      "Resource": "arn:aws:iam::<account>:role/flashmatch-node",
       "Condition": { "StringEquals": { "iam:PassedToService": "ec2.amazonaws.com" } } },
 
     { "Sid": "OurBucketOnly", "Effect": "Allow",
@@ -128,7 +166,14 @@ to a user instead, if you would rather issue credentials directly:
 }
 ```
 
-Three things worth knowing if you trim it:
+The split matters. Creation cannot be conditioned on a tag the resource does not
+have yet, so it is scoped by region; everything destructive is additionally
+scoped to `Project = flashmatch`, which is why that tag is applied by
+`default_tags` and is not decoration. Change `name_prefix` and the condition
+changes with it — but a deployment applied under the *old* prefix then becomes
+unmanageable by the new policy, so rename before you create rather than after.
+
+Four things worth knowing if you trim it:
 
 - **`iam:PassRole` is the one people cut.** Launching an instance *with* an
   instance profile is handing a role to EC2, and AWS treats that as a privilege
@@ -140,6 +185,9 @@ Three things worth knowing if you trim it:
   the scoping lives.
 - **The `s3` block is not used by Terraform.** It is there so a human can inspect
   artifacts without a second credential.
+- **`ec2:ModifyVolume` looks droppable and is not.** Raising `root_volume_gb` is
+  an in-place resize, and 40 GB is not generous once Docker images, a release
+  build and `pgdata` are all on it.
 
 If a Service Control Policy or permission boundary applies to the account, it
 sits on top of all of this. Restrictions on regions, instance types or public IPs
@@ -177,12 +225,36 @@ Security groups are created for you. The rule that matters is Postgres on the
 web node accepting **from the worker security group** rather than from a CIDR,
 so membership is dynamic and replacing an instance needs no rule change.
 
+> **The security groups are Terraform-owned.** Their rules are declared inline,
+> which makes them authoritative: a rule added or removed in the console is
+> silently reverted by the next `terraform apply`. That matters most in the
+> direction §5 Option B asks for — closing public 80/443 by hand is undone on the
+> next apply, re-opening the node to the world. Change `web_ingress_cidrs` and
+> `ssh_cidrs` in `terraform.tfvars` instead.
+
+Three settings are worth knowing about because they are not visible in a
+console screenshot:
+
+- **`http_tokens = "required"`** on all three nodes — IMDSv1 off. The worker
+  nodes execute participant-submitted C++, and with IMDSv1 enabled any sandbox
+  escape reads the instance credentials with one unauthenticated GET. Those
+  credentials can overwrite every participant's source in the artifact bucket.
+- **`http_put_response_hop_limit = 2` on the web node only.** The API runs in a
+  container on Docker's bridge network, so its metadata request arrives at hop 2
+  and is dropped at the EC2 default of 1. The Rust SDK is IMDSv2-only with no
+  fallback, so credential resolution fails and every `/run` and `/submit` returns
+  an opaque internal error — identical to the missing-bucket symptom in §2, and
+  *not* reproducible with the `curl` check in §10, which runs on the host and is
+  one hop.
+- **Root volumes are encrypted.** `pgdata` on the web node is every submission
+  and every score.
+
 Wait for cloud-init before connecting. It installs Docker, the build toolchain
-and rustup, then clones the repo to `/opt/me-platform`:
+and rustup, then clones the repo to `/opt/flashmatch`:
 
 ```sh
-until ssh -i ~/.ssh/me-platform ubuntu@<web-ip> \
-      'test -f /var/lib/cloud/me-platform-ready'; do sleep 10; done
+until ssh -i ~/.ssh/flashmatch ubuntu@<web-ip> \
+      'test -f /var/lib/cloud/flashmatch-ready'; do sleep 10; done
 ```
 
 `terraform output` gives the SSH commands, the web node's **private IP**, and
@@ -195,8 +267,8 @@ silently.
 ## 4. Web node
 
 ```sh
-ssh -i ~/.ssh/me-platform ubuntu@<web-ip>
-cd /opt/me-platform
+ssh -i ~/.ssh/flashmatch ubuntu@<web-ip>
+cd /opt/flashmatch
 
 export DB_BIND='<web private IP>'        # NOT loopback — workers cannot reach that
 export POSTGRES_PASSWORD='<something long>'
@@ -241,7 +313,7 @@ browser ──https──▶ Caddy (web node) ──▶ Next.js  /*
    ```sh
    export SITE_ADDRESS='matcher.example.com'
    ```
-3. Open **80 and 443** on the `me-web` security group.
+3. Open **80 and 443** on the `flashmatch-web` security group.
 
 Caddy requests a Let's Encrypt certificate on first boot and renews it itself.
 
@@ -267,7 +339,7 @@ browser ──https──▶ your proxy ──http──▶ Caddy (web node) ─
    ```sh
    export SITE_ADDRESS=':80'      # plain HTTP, no ACME, no redirect to 443
    ```
-2. Allow **80 from the proxy's security group** on `me-web`; remove any public
+2. Allow **80 from the proxy's security group** on `flashmatch-web`; remove any public
    80/443 rules and the public IP.
 3. Forward the hostname to the web node's **private IP, port 80, path
    unchanged**:
@@ -312,15 +384,15 @@ curl -s http://<host>/api/participants    # JSON, not 500
 > `compose.yaml`. If a real domain is being served as `localhost`, or `:80`
 > answers `308` redirecting to HTTPS with a self-signed certificate, that
 > variable is not reaching the container — check with
-> `docker exec me-platform-caddy-1 printenv SITE_ADDRESS`.
+> `docker exec flashmatch-caddy-1 printenv SITE_ADDRESS`.
 
 ---
 
 ## 6. Pool node
 
 ```sh
-ssh -i ~/.ssh/me-platform ubuntu@<pool-ip>
-cd /opt/me-platform
+ssh -i ~/.ssh/flashmatch ubuntu@<pool-ip>
+cd /opt/flashmatch
 sudo ops/pool-node-setup.sh
 ```
 
@@ -338,14 +410,24 @@ queues behind them by design.
 ## 7. Bench node
 
 ```sh
-ssh -i ~/.ssh/me-platform ubuntu@<bench-ip>
-cd /opt/me-platform
+ssh -i ~/.ssh/flashmatch ubuntu@<bench-ip>
+cd /opt/flashmatch
 sudo BENCH_CPU=2 ISOLATED_CPUS=2-3 ops/bench-node-setup.sh --dedicated
 ```
 
 `BENCH_CPU` and `ISOLATED_CPUS` must match the cores the instance actually
 presents — 4 on a `c6i.2xlarge` with SMT off, so two for the OS and two isolated
-for timed runs.
+for timed runs. `ops/aws/deploy.sh` derives both from `nproc` rather than making
+you get this right by hand.
+
+The script's own defaults (`BENCH_CPU=4 ISOLATED_CPUS=4-7`) describe an 8-CPU
+box and name CPUs that do not exist here. It now **refuses to run** on a
+mismatch rather than half-applying the tuning: it checks that `BENCH_CPU` is
+inside `ISOLATED_CPUS`, that it exists at all, and that something is left for the
+OS. Everything that steers work away from the measured cores — IRQ affinity in
+particular — is computed from `ISOLATED_CPUS` instead of assuming an 8-CPU
+layout, which is what previously pinned interrupts to *every* CPU on a 4-CPU
+node while reporting success.
 
 `--dedicated` is the script's **tuning mode** — runtime tuning only, no boot
 parameters — and is unrelated to AWS tenancy. Use `--metal` only on bare metal,
@@ -383,7 +465,7 @@ and `DB_BIND` are both right — if either is wrong the workers simply never
 appear:
 
 ```sh
-docker exec -i me-platform-postgres-1 psql -U mebench -d mebench \
+docker exec -i flashmatch-postgres-1 psql -U mebench -d mebench \
   -c 'SELECT id, role, healthy, now()-last_seen FROM workers ORDER BY role;'
 ```
 
@@ -396,7 +478,7 @@ Seven rows, all `healthy = t`.
 There is no signup. Identity is a name picked from this list.
 
 ```sh
-docker exec -i me-platform-postgres-1 psql -U mebench -d mebench <<'SQL'
+docker exec -i flashmatch-postgres-1 psql -U mebench -d mebench <<'SQL'
 INSERT INTO participants (handle)
 VALUES ('a.mehra'), ('b.kulkarni') /* … one row per participant … */
 ON CONFLICT (handle) DO NOTHING;
@@ -418,7 +500,7 @@ curl -s -H "X-aws-ec2-metadata-token: $T" \
   http://169.254.169.254/latest/meta-data/iam/security-credentials/
 ```
 
-Prints `me-platform-node` on each instance.
+Prints `flashmatch-node` on each instance.
 
 **Postgres and the operator API are not exposed.** Both must refuse:
 
@@ -477,7 +559,7 @@ the admin API *is* SSH access to the web node. That is the entire auth story;
 unreachability is the mechanism, which is why §5 says never to proxy `/admin`.
 
 ```sh
-ssh -i ~/.ssh/me-platform -N -L 8081:127.0.0.1:8081 ubuntu@<web-ip>
+ssh -i ~/.ssh/flashmatch -N -L 8081:127.0.0.1:8081 ubuntu@<web-ip>
 
 curl -s  localhost:8081/admin/queue | jq       # workers, queue depth
 curl -X POST localhost:8081/admin/freeze       # freeze the standings
@@ -486,7 +568,7 @@ curl -X POST localhost:8081/admin/bench/unhealthy
 ```
 
 If SSH keys are not permitted, the same port forward over SSM — note this
-requires adding `AmazonSSMManagedInstanceCore` to the `me-platform-node` role:
+requires adding `AmazonSSMManagedInstanceCore` to the `flashmatch-node` role:
 
 ```sh
 aws ssm start-session --target <instance-id> \
@@ -522,25 +604,37 @@ Event-day operations are in [ops/runbook.md](ops/runbook.md).
 ## 14. Teardown
 
 ```sh
+ops/aws/destroy.sh          # pg_dump to S3, then destroy the instances
+ops/aws/destroy.sh --all    # also the bucket and IAM
+```
+
+The script backs up before it destroys anything, and refuses to skip that
+quietly. By hand it is:
+
+```sh
 terraform -chdir=infra destroy             # stops the meter
 terraform -chdir=infra/bootstrap destroy   # bucket and IAM
 ```
 
-`pg_dump` to S3 first if the results matter. Note `force_destroy_bucket`
-defaults to `true`, which is right for a test deployment and wrong for the real
-event — the bucket holds every submission's source.
+`pg_dump` to S3 first if the results matter — the database holds every
+submission, every state transition and the events log, not just the leaderboard.
+Note `force_destroy_bucket` defaults to `true`, which is right for a test
+deployment and wrong for the real event.
+
+The instances are the entire cost. Bootstrap's bucket and roles are close to
+free, so `--all` is for cleaning up an account rather than for saving money.
 
 ---
 
 ## Checklist
 
-- [ ] Bucket, `me-platform-node` role and instance profile exist
+- [ ] Bucket, `flashmatch-node` role and instance profile exist
 - [ ] SSH key halves verified to match **before** launch
 - [ ] Bench instance launched with `threads_per_core = 1`
 - [ ] `DB_BIND` is the web node's **private** IP
 - [ ] `POSTGRES_PASSWORD` exported before the first `up`, and on every later one
 - [ ] `SITE_ADDRESS` confirmed inside the Caddy container
-- [ ] `me-web` allows 5432 from the `me-worker` **security group**
+- [ ] `flashmatch-web` allows 5432 from the `flashmatch-worker` **security group**
 - [ ] Seven workers registered and `healthy = t`
 - [ ] Roster loaded
 - [ ] `ops/bench-hygiene.sh` exits 0 with `BENCH_CPU` passed explicitly

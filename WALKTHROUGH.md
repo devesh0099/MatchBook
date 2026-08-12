@@ -167,7 +167,7 @@ the participant's debugging time.
 ## 4. Repo structure
 
 ```
-me-platform/
+flashmatch/
 ├── spec/SPEC.md                    the normative specification
 ├── STATUS.md · WALKTHROUGH.md
 │

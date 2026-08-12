@@ -14,7 +14,7 @@ path.** What remains is provisioning and calibration on the real bench node
 ## 1. What exists
 
 ```
-me-platform/
+flashmatch/
 ├── spec/SPEC.md                   559   the published, normative specification
 ├── engine/                             C++20 — the contest itself
 │   ├── include/mebench/           286   frozen headers: the participant contract
@@ -309,7 +309,7 @@ seven workers heartbeating across three machines.
 |---|---|---|
 | **Noise floor** | 200 runs on a **shared** instance | 4.46% single-run spread but **1.05% IQR**, median-of-9 stable to **±0.6%**, **0/200** steal-time discards. Engines 2% apart rank correctly 100% of the time. **Shared tenancy is enough** — dedicated adds a flat $2/hr per region and roughly triples the bill. |
 | **Ranked depth** | sweep at 20M events, both engines | **3780 → 732,279 orders, 5.98×** discrimination — the best of any depth measured, against 3.50× for the same config on a 16 MB laptop. The 750k bet was right. Ship it. |
-| **S3 bucket + instance role** | `infra/bootstrap/` | Terraform, tested. `me-platform-node` is the platform's entire AWS surface. |
+| **S3 bucket + instance role** | `infra/bootstrap/` | Terraform, tested. `flashmatch-node` is the platform's entire AWS surface. |
 | **`bench-hygiene.sh` exits 0** | on a shared EC2 VM | Passes. Two checks were wrong for a VM and are fixed: the governor check hard-failed where no cpufreq driver exists, and the SSM check tested a unit name Ubuntu does not use, so it reported `ok` while the agent ran through every measurement. |
 
 ### Open

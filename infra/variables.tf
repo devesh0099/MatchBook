@@ -15,10 +15,31 @@ variable "deployer_role_arn" {
   default     = null
 }
 
-variable "instance_profile" {
-  description = "Instance profile attached to all three nodes. From bootstrap."
+variable "name_prefix" {
+  description = <<-EOT
+    Prefix on every AWS resource and the value of the Project tag. MUST match
+    the name_prefix bootstrap was applied with: the deployer policy scopes its
+    destructive actions with a condition on `Project = <name_prefix>`, so a
+    mismatch fails at the first tagged write with AccessDenied rather than with
+    anything mentioning names.
+
+    Does not rename `mebench` — the Postgres user, the systemd units,
+    /opt/mebench and the MEBENCH_* variables are the application's own identity
+    and are invisible in the AWS console.
+  EOT
   type        = string
-  default     = "me-platform-node"
+  default     = "flashmatch"
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{1,20}$", var.name_prefix))
+    error_message = "name_prefix must be lowercase letters, digits and hyphens, starting with a letter."
+  }
+}
+
+variable "instance_profile" {
+  description = "Instance profile attached to all three nodes. From bootstrap; defaults to <name_prefix>-node."
+  type        = string
+  default     = null
 }
 
 variable "s3_bucket" {
@@ -30,11 +51,42 @@ variable "s3_bucket" {
 
 variable "vpc_id" {
   type = string
+
+  validation {
+    condition     = can(regex("^vpc-[0-9a-f]{8,17}$", var.vpc_id))
+    error_message = "vpc_id must look like vpc-0123456789abcdef0."
+  }
 }
 
 variable "subnet_id" {
   description = "Must have a route to the internet: the setup scripts pull apt packages, the Rust toolchain and GitHub."
   type        = string
+
+  validation {
+    condition     = can(regex("^subnet-[0-9a-f]{8,17}$", var.subnet_id))
+    error_message = "subnet_id must look like subnet-0123456789abcdef0."
+  }
+}
+
+variable "associate_public_ip" {
+  description = <<-EOT
+    Give each node a public IP, explicitly rather than inheriting the subnet's
+    map_public_ip_on_launch.
+
+    Left to the subnet, a private subnet behind NAT satisfies everything
+    DEPLOYMENT.md asks for ("a route to the internet") and still produces
+    instances with no public address. Nothing errors: aws_instance.public_ip is
+    an empty string, apply reports success, and the outputs print
+    `ssh -i ~/.ssh/flashmatch ubuntu@` — so the readiness poll spins forever
+    against nodes that are perfectly healthy.
+
+    True is what the documented deployment assumes, because provisioning and
+    operator access are over SSH from a laptop. Set it false only if you reach
+    the nodes another way (VPN, bastion, SSM), in which case ops/aws/*.sh will
+    tell you they cannot find a public IP rather than failing at the ssh call.
+  EOT
+  type        = bool
+  default     = true
 }
 
 variable "ssh_cidrs" {
@@ -61,6 +113,26 @@ variable "web_ingress_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
+variable "restrict_worker_egress" {
+  description = <<-EOT
+    Narrow the worker nodes' outbound rules to the ports they actually use
+    (HTTP/HTTPS for apt, rustup and S3; 5432 to the web node; DNS and NTP)
+    instead of allowing everything.
+
+    These two nodes compile and execute participant-submitted C++. isolate
+    denies the sandbox a network namespace, so this is defence in depth against
+    an escape rather than the primary control — but wide-open egress is also the
+    exfiltration and command-and-control path an escape would use.
+
+    Default false because it changes network behaviour that the current
+    deployment has been tested with, and a missing port here fails at apt or
+    rustup during provisioning rather than at plan time. Turn it on, run a full
+    ops/aws/deploy.sh, and leave it on if provisioning succeeds.
+  EOT
+  type        = bool
+  default     = false
+}
+
 # ----------------------------------------------------------------- instances
 
 variable "ami_id" {
@@ -69,8 +141,9 @@ variable "ami_id" {
 }
 
 variable "key_name" {
-  type    = string
-  default = "me-platform"
+  description = "Base name for the imported EC2 key pair; a unique suffix is appended. Defaults to <name_prefix>."
+  type        = string
+  default     = null
 }
 
 variable "public_key_path" {

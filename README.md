@@ -93,15 +93,15 @@ Create the bucket the API writes submissions into — nothing does this for you,
 and without it every `/run` and `/submit` returns an opaque `internal error`:
 
 ```sh
-docker run --rm --network me-platform_default --entrypoint sh minio/mc -c \
+docker run --rm --network flashmatch_default --entrypoint sh minio/mc -c \
   "mc alias set l http://minio:9000 mebench mebench123 >/dev/null && \
-   mc mb --ignore-existing l/me-platform-artifacts"
+   mc mb --ignore-existing l/flashmatch-artifacts"
 ```
 
 Load a roster — there is no signup, identity is a name picked from this list:
 
 ```sh
-docker exec -i me-platform-postgres-1 psql -U mebench -d mebench <<'SQL'
+docker exec -i flashmatch-postgres-1 psql -U mebench -d mebench <<'SQL'
 INSERT INTO participants (handle)
 VALUES ('a.mehra'), ('b.kulkarni'), ('c.natarajan')
 ON CONFLICT (handle) DO NOTHING;
@@ -124,7 +124,7 @@ cat > /tmp/worker.env <<EOF
 DATABASE_URL=postgres://mebench:mebench@127.0.0.1:15432/mebench
 REDIS_URL=redis://127.0.0.1:6379
 S3_ENDPOINT=http://127.0.0.1:19000
-S3_BUCKET=me-platform-artifacts
+S3_BUCKET=flashmatch-artifacts
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=mebench
 AWS_SECRET_ACCESS_KEY=mebench123
