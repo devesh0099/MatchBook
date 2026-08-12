@@ -18,7 +18,12 @@ OUT="${2:-noise-floor.jsonl}"
 PREFIX="${PREFIX:-/opt/mebench}"
 HARNESS="${MEBENCH_HARNESS:-$PREFIX/bin/harness}"
 REFERENCE="${MEBENCH_REFERENCE_SO:-$PREFIX/lib/libreference_engine.so}"
-EVENTS="${EVENTS:-10000000}"
+# 20M, matching the ranked configuration, NOT 10M. The harness derives warm-up
+# from the profile's depth and then clips it to half the stream: cancel_heavy
+# needs ~9.7M warm-up events, so a 10M stream is clipped to 5M and the timed
+# region runs against a book at roughly half fill. The spread measured that way
+# is still a valid stability signal, but it is not the workload being ranked.
+EVENTS="${EVENTS:-20000000}"
 PROFILE="${PROFILE:-cancel_heavy}"
 SEED="${SEED:-20260808}"
 

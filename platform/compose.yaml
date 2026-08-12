@@ -8,6 +8,14 @@ services:
   caddy:
     image: caddy:2.8-alpine
     restart: unless-stopped
+    # Without this the Caddyfile's {$SITE_ADDRESS:localhost} ALWAYS falls back
+    # to localhost, because exporting a variable on the host does not put it
+    # inside a container. Both hosting options in DEPLOYMENT.md 3 then break in
+    # ways that look like something else: a real domain gets served as
+    # localhost, and ':80' behind a proxy answers with a 308 to HTTPS carrying
+    # a self-signed localhost certificate.
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
     ports:
       - "80:80"
       - "443:443"

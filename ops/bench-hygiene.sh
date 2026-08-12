@@ -25,7 +25,12 @@ warn() { printf '  \033[33mwarn\033[0m %s\n' "$1"; }
 echo "== processes that must not exist =="
 # "Pull metrics between runs; never let an agent push continuously." A default
 # Ubuntu AMI has several timers that will fire mid-measurement.
+# The snap unit is listed alongside the plain name because Ubuntu's AWS AMI
+# ships the SSM agent as a snap: `systemctl is-active amazon-ssm-agent` returns
+# "inactive" for a unit that does not exist, so this check passed while the
+# agent was running through every measurement.
 for svc in amazon-cloudwatch-agent amazon-ssm-agent unattended-upgrades cron crond \
+           snap.amazon-ssm-agent.amazon-ssm-agent.service \
            snapd apt-daily.timer apt-daily-upgrade.timer motd-news.timer \
            fstrim.timer man-db.timer logrotate.timer filebeat fluentd; do
   if systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -59,9 +64,21 @@ else
   warn "intel_pstate/no_turbo not present (not an Intel P-state system?)"
 fi
 
+# Frequency control is not the guest's to hold on a virtual machine. There is
+# no cpufreq driver inside an EC2 instance — the hypervisor owns the P-states —
+# so scaling_governor does not exist and this can never be satisfied, no matter
+# how the node is provisioned. Failing on it condemns every VM permanently,
+# which is not a verdict about the node.
+#
+# The turbo check immediately above already degrades to a warning when its file
+# is absent; this one hard-failed on the identical situation. On metal, where
+# the governor genuinely is ours to set, it stays fatal.
+virt=$(systemd-detect-virt 2>/dev/null || echo none)
 gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)
 if [[ "$gov" == "performance" ]]; then
   pass "governor=performance"
+elif [[ "$virt" != "none" ]]; then
+  warn "governor=$gov — no cpufreq inside a $virt guest; the hypervisor owns the clock"
 else
   fail "governor=$gov (want performance)"
 fi

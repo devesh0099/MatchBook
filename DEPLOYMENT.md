@@ -54,12 +54,21 @@ three** instances:
 }
 ```
 
-Verify on each instance once it is up:
+Verify on each instance once it is up. The AWS CLI is **not installed** —
+nothing on a node needs it, because the API and worker read credentials from
+the instance metadata service through the SDK. Ask the metadata service
+directly instead:
 
 ```sh
-aws sts get-caller-identity          # shows the ROLE, not a user
-aws s3 ls s3://me-platform-artifacts
+T=$(curl -s -X PUT http://169.254.169.254/latest/api/token \
+      -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+curl -s -H "X-aws-ec2-metadata-token: $T" \
+  http://169.254.169.254/latest/meta-data/iam/security-credentials/
 ```
+
+That prints the role name attached to the instance. The real proof is a
+submission reaching `verifying`, which means source was written to S3 and read
+back.
 
 ### Security groups
 

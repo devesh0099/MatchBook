@@ -39,12 +39,40 @@ export BENCH_CPU="${BENCH_CPU:-4}"
 echo "==> removing everything that could wake up mid-measurement"
 # A default Ubuntu AMI has several timers that WILL fire during a run. Pull
 # metrics between runs; never let an agent push continuously.
+# amazon-ssm-agent appears TWICE on purpose. Ubuntu's AWS AMI ships it as a
+# SNAP, so the plain name is not a unit at all and `systemctl is-active
+# amazon-ssm-agent` cheerfully answers "inactive" while the agent runs happily
+# under snap.amazon-ssm-agent.amazon-ssm-agent.service. Checking the wrong name
+# is worse than not checking: it reports ok for the exact thing it exists to
+# catch.
 for svc in amazon-cloudwatch-agent amazon-ssm-agent unattended-upgrades snapd \
+           snap.amazon-ssm-agent.amazon-ssm-agent.service \
            cron apt-daily.timer apt-daily-upgrade.timer motd-news.timer \
-           fstrim.timer man-db.timer logrotate.timer e2scrub_all.timer; do
+           fstrim.timer man-db.timer logrotate.timer e2scrub_all.timer \
+           systemd-tmpfiles-clean.timer dpkg-db-backup.timer \
+           sysstat-collect.timer sysstat-summary.timer \
+           fwupd-refresh.timer update-notifier-download.timer \
+           update-notifier-motd.timer; do
   systemctl disable --now "$svc" 2>/dev/null && echo "    disabled $svc" || true
 done
 systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+
+# Belt and braces. The list above is what a 24.04 EC2 AMI shipped on the day
+# this was written, and the hygiene check fails on ANY armed timer — so a timer
+# added by a future image, or pulled in as a dependency of something we
+# install, would fail the node with no clue as to which. Disable whatever is
+# still armed, and say what was caught, so the list above can be updated rather
+# than silently drifting.
+#
+# Nothing here is load-bearing for a machine whose whole job is to run one
+# benchmark at a time: they are log rotation, metrics collection and update
+# checks. sysstat-collect is the worst of them — every 10 minutes, straight
+# through a timed run.
+remaining=$(systemctl list-timers --no-pager --no-legend 2>/dev/null | awk '{print $NF}' | grep -v '^$' || true)
+for t in $remaining; do
+  unit="${t%.service}.timer"
+  systemctl disable --now "$unit" 2>/dev/null && echo "    disabled $unit (not in the explicit list — consider adding it)" || true
+done
 
 echo "==> swap off"
 # Memory limits do not affect swapped-out data, and a swap-in inside a timed
