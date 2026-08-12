@@ -295,15 +295,31 @@ A full ranked job on this box, at the shipped 300k-order profile:
 
 ## 6. Remaining — on AWS
 
-Everything left is provisioning and calibration on real hardware.
+**The deployment has been run end to end on real AWS and the calibration
+questions are answered.** `DEPLOYMENT.md` Part C carries the numbers; this is
+what is left.
 
-| | What | Why it blocks |
+Measured on `c6i.2xlarge` (Ice Lake Xeon 8375C, **54 MB L3**): a full submission
+`done` in 72 s at p50 96.6 ns with 0 discards, `41/41` on the Run lane, and
+seven workers heartbeating across three machines.
+
+### Settled
+
+| | What | Answer |
 |---|---|---|
-| **1** | **Noise floor + soak.** `ops/noise-floor/{measure,soak,analyze}.py` exist and were validated against synthetic tight and noisy machines. | Settles plan §16 q1 (drift correction) and q2 (metal vs dedicated). Run it **before** provisioning for real — the `isolcpus`/`nohz_full` boot parameters only apply if metal is what the numbers call for. |
-| **2** | **Measure the TSC granularity.** This box steps in 38 ticks — exactly 10 ns. | If the bench node does the same, a ranked p50 is a *count of quanta*, so **exact ties between participants are expected, not rare**. The presentation is settled — sorted p50, earlier submission above — but this number says how often the tiebreak actually decides a position, and whether the quantum is coarse enough that the ranking is measuring less than it appears to. |
-| **3** | **Confirm or move the 300k depth.** Re-run the sweep in `PLAN-book-depth.md` §7. | 300k is calibrated to *this* box's 16 MB L3. Note the ceiling: the price band is **99.1% saturated**, so more depth goes vertical, and widening it means moving the injection band at price 20,000 first. |
-| **4** | **`bench-hygiene.sh` must exit 0.** | The setup script refuses to mark the node healthy otherwise. Do not override it. `swap off` is **load-bearing**, not tidiness: isolate forces `RLIMIT_MEMLOCK` to 0, so `mlockall` always fails in a ranked run and unreclaimable anonymous memory is the whole guarantee. |
-| **5** | **S3 bucket and an instance role for the web node.** | Nothing in the platform creates either. Without them every `/run` and `/submit` returns an opaque `internal error` — the API stores source in S3 before it does anything else. This is the one provisioning step with no error message pointing at it. |
+| **Noise floor** | 200 runs on a **shared** instance | 4.46% single-run spread but **1.05% IQR**, median-of-9 stable to **±0.6%**, **0/200** steal-time discards. Engines 2% apart rank correctly 100% of the time. **Shared tenancy is enough** — dedicated adds a flat $2/hr per region and roughly triples the bill. |
+| **Ranked depth** | sweep at 20M events, both engines | **3780 → 732,279 orders, 5.98×** discrimination — the best of any depth measured, against 3.50× for the same config on a 16 MB laptop. The 750k bet was right. Ship it. |
+| **S3 bucket + instance role** | `infra/bootstrap/` | Terraform, tested. `me-platform-node` is the platform's entire AWS surface. |
+| **`bench-hygiene.sh` exits 0** | on a shared EC2 VM | Passes. Two checks were wrong for a VM and are fixed: the governor check hard-failed where no cpufreq driver exists, and the SSM check tested a unit name Ubuntu does not use, so it reported `ok` while the agent ran through every measurement. |
+
+### Open
+
+| | What | Why it still matters |
+|---|---|---|
+| **1** | **Measure the TSC granularity.** This box steps in 38 ticks — exactly 10 ns. | If the bench node does the same, a ranked p50 is a *count of quanta*, so **exact ties are expected, not rare**. The presentation is settled — sorted p50, earlier submission above — but this says how often the tiebreak decides a position, and whether the quantum is coarse enough that the ranking measures less than it appears to. |
+| **2** | **Soak.** `ops/noise-floor/soak.sh` runs 6 hours and has not been run. | Catches drift across a day, which the 25-minute spread test cannot see. Lower stakes than it looks: the rejudge block collapses every final number into one short window on one machine, which is the designed defence against drift. |
+| **3** | **18 people at once.** Everything measured so far used one submitter. | Six pool slots against 18 iterating participants is far from saturation on paper, and a Run is ~2s — but it is arithmetic, not a measurement. |
+| **4** | **A dedicated bench node for the rejudge block**, if you want it. ~2 h, ~$5. | Cheap insurance on the numbers that decide ranking. Three hard requirements in `DEPLOYMENT.md` §C2: stop the old bench worker first (nothing prevents two running concurrently), delete the global spot-check baseline, and use the same instance type. |
 
 ## 7. Remaining — does not need hardware
 
