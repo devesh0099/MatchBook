@@ -1,0 +1,18 @@
+# cp terraform.tfvars.example terraform.tfvars, then fill in.
+# The first three come from: terraform -chdir=bootstrap output tfvars_snippet
+
+deployer_role_arn = "arn:aws:iam::<account>:role/me-platform-deployer"
+instance_profile  = "me-platform-node"
+s3_bucket         = "me-platform-artifacts-<account>"
+
+vpc_id     = "vpc-xxxxxxxx"
+subnet_id  = "subnet-xxxxxxxx"
+ami_id     = "ami-xxxxxxxx"       # Ubuntu 24.04 LTS x86_64
+ssh_cidrs  = ["0.0.0.0/0"]        # key-only auth is the control, not the CIDR
+
+web_ingress_cidrs = ["0.0.0.0/0"]
+
+repo_ref = "master"
+
+# Off by default. See the comment on aws_instance.bench before turning it on.
+bench_dedicated = false

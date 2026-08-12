@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Stage 1 only: prerequisites and the source. Nothing platform-specific runs
+# here.
+#
+# The node setup is ops/pool-node-setup.sh and ops/bench-node-setup.sh, and on
+# a first deployment you want to watch them rather than read their exit codes
+# out of a log an hour later. Once they are known good on this AMI, calling
+# them from here is a two-line change.
+set -euxo pipefail
+
+# Port 22 is open to the internet, so the authentication posture is the whole
+# control and must not be inherited. Ubuntu's AMI ships with password auth off
+# already; this states it rather than trusting it to stay that way, and covers
+# keyboard-interactive, which is a separate setting people forget.
+cat > /etc/ssh/sshd_config.d/99-me-platform.conf <<'SSHD'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin no
+SSHD
+
+# No reload. Ubuntu 24.04 SOCKET-ACTIVATES ssh: ssh.service is not running, so
+# `systemctl reload ssh` fails with "not active, cannot reload" and there is no
+# sshd.service to fall back to. Under `set -e` that aborted this script before
+# a single package was installed, which is how the first launch produced three
+# instances with nothing on them.
+#
+# It is also unnecessary: every connection spawns a fresh sshd from ssh.socket,
+# and that process reads the config above when it starts.
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+
+# Build toolchain for the engine, plus what isolate needs to compile.
+apt-get install -y --no-install-recommends \
+  build-essential g++ cmake git pkg-config zip unzip curl jq \
+  libcap-dev libseccomp-dev libsystemd-dev libssl-dev \
+  ca-certificates gnupg
+
+# Docker, from Docker's own repo. The distro package lags and does not ship the
+# compose plugin under the name the commands here use.
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+usermod -aG docker ubuntu
+
+# Rust via rustup, not apt: Cargo.lock needs a newer toolchain than the distro
+# ships, and the setup scripts install it this way too.
+su - ubuntu -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path'
+
+git clone ${repo_url} /opt/me-platform
+git -C /opt/me-platform checkout ${repo_ref}
+chown -R ubuntu:ubuntu /opt/me-platform
+
+# Polled by the guide to know when a node is ready to SSH into.
+touch /var/lib/cloud/me-platform-ready
