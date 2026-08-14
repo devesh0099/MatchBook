@@ -2,7 +2,7 @@
 //
 // Expected outputs are built with the out:: helpers from the frozen header, so
 // every field is compared, including the ones that must be zeroed. That is
-// deliberate: the benchmark digest folds every field too (SPEC §5.2), so a test
+// deliberate: the benchmark digest folds every field too (SPEC §4 Contest rules), so a test
 // that ignored `maker` on an Ack would pass code that fails the ranked run.
 
 #include "tests/spec_tests.h"
@@ -144,7 +144,7 @@ std::string t_ack_before_trades(IMatchingEngine& e) {
 
 // ---------------------------------------------------------------- core matching
 
-// §3.1: the trade price is the RESTING order's price, never the aggressor's.
+// §1.1 Core: the trade price is the RESTING order's price, never the aggressor's.
 // The single most common first-submission failure.
 std::string t_trade_price_is_resting(IMatchingEngine& e) {
   Rec r;
@@ -155,7 +155,7 @@ std::string t_trade_price_is_resting(IMatchingEngine& e) {
                      out::trade(2, rf(7, 12, 7), rf(3, 77, 3), 9999, 100, Side::Buy)});
 }
 
-// §3.1: best price first.
+// §1.1 Core: best price first.
 std::string t_price_priority(IMatchingEngine& e) {
   Rec r;
   e.on_new(ord(1, Side::Sell, 10002, 50, 1, 1, 1), r);
@@ -167,7 +167,7 @@ std::string t_price_priority(IMatchingEngine& e) {
                      out::trade(3, rf(1, 1, 1), rf(2, 3, 2), 10002, 50, Side::Buy)});
 }
 
-// §3.1: within a level, lowest seq first. "Time" means arrival sequence.
+// §1.1 Core: within a level, lowest seq first. "Time" means arrival sequence.
 std::string t_time_priority_fifo(IMatchingEngine& e) {
   Rec r;
   e.on_new(ord(1, Side::Sell, 10000, 30, 1, 1, 1), r);
@@ -181,7 +181,7 @@ std::string t_time_priority_fifo(IMatchingEngine& e) {
                      out::trade(4, rf(1, 3, 1), rf(2, 9, 2), 10000, 30, Side::Buy)});
 }
 
-// §3.1: an aggressor smaller than the resting order takes part of it; the
+// §1.1 Core: an aggressor smaller than the resting order takes part of it; the
 // resting order stays at the head of its level with the remainder.
 std::string t_partial_fill_resting_survives(IMatchingEngine& e) {
   Rec r;
@@ -211,7 +211,7 @@ std::string t_marketable_limit_rests_remainder(IMatchingEngine& e) {
   return expect_book(e, 1, 0, 60, 1);  // 60 resting as a bid, asks empty
 }
 
-// §3.1: a limit order never trades through its own limit price.
+// §1.1 Core: a limit order never trades through its own limit price.
 std::string t_limit_price_bound(IMatchingEngine& e) {
   Rec r;
   e.on_new(ord(1, Side::Sell, 10000, 50, 1, 1, 1), r);
@@ -226,7 +226,7 @@ std::string t_limit_price_bound(IMatchingEngine& e) {
   return expect_book(e, 1, 1, 100, 2);  // 50 rests as bid @10000, ask @10001 untouched
 }
 
-// Invariant (§4): the remainder rests at its own limit price, so the book is
+// Invariant (book invariant): the remainder rests at its own limit price, so the book is
 // never left crossed.
 std::string t_book_never_crossed(IMatchingEngine& e) {
   Rec r;
@@ -341,7 +341,7 @@ std::string t_ioc_full_fill_no_expired(IMatchingEngine& e) {
 
 // ---------------------------------------------------------------- cancel
 
-// §3.4: cancel of a live order — CancelAck carrying its remaining quantity.
+// §1.4 Cancel: cancel of a live order — CancelAck carrying its remaining quantity.
 std::string t_cancel_live(IMatchingEngine& e) {
   Rec r;
   e.on_new(ord(1, Side::Buy, 10000, 100, 4, 55, 4), r);
@@ -351,7 +351,7 @@ std::string t_cancel_live(IMatchingEngine& e) {
   return expect_book(e, 0, 0, 0, 0);
 }
 
-// §3.4: the CancelAck carries the REMAINDER, not the original quantity. This is
+// §1.4 Cancel: the CancelAck carries the REMAINDER, not the original quantity. This is
 // the only case where a cancel carries a meaningful quantity.
 std::string t_cancel_partially_filled_carries_remainder(IMatchingEngine& e) {
   Rec r;
@@ -362,14 +362,14 @@ std::string t_cancel_partially_filled_carries_remainder(IMatchingEngine& e) {
   return diff(r.ev, {out::cancel_ack(3, rf(1, 1, 1), 70, Side::Sell)});
 }
 
-// §3.4: unknown id — Reject/UnknownOrder. Not silent, not fatal.
+// §1.4 Cancel: unknown id — Reject/UnknownOrder. Not silent, not fatal.
 std::string t_cancel_unknown(IMatchingEngine& e) {
   Rec r;
   e.on_cancel(rf(9, 999, 9), 1, r);
   return diff(r.ev, {out::reject(1, rf(9, 999, 9), RejectReason::UnknownOrder, Side::Buy)});
 }
 
-// §3.4: already fully filled is indistinguishable from never existed.
+// §1.4 Cancel: already fully filled is indistinguishable from never existed.
 std::string t_cancel_already_filled(IMatchingEngine& e) {
   Rec r;
   e.on_new(ord(1, Side::Sell, 10000, 100, 1, 1, 1), r);
@@ -379,7 +379,7 @@ std::string t_cancel_already_filled(IMatchingEngine& e) {
   return diff(r.ev, {out::reject(3, rf(1, 1, 1), RejectReason::UnknownOrder, Side::Buy)});
 }
 
-// §3.4: the second cancel of the same order is an unknown-order reject.
+// §1.4 Cancel: the second cancel of the same order is an unknown-order reject.
 std::string t_double_cancel(IMatchingEngine& e) {
   Rec r;
   e.on_new(ord(1, Side::Buy, 10000, 100, 1, 1, 1), r);
@@ -389,7 +389,7 @@ std::string t_double_cancel(IMatchingEngine& e) {
   return diff(r.ev, {out::reject(3, rf(1, 1, 1), RejectReason::UnknownOrder, Side::Buy)});
 }
 
-// §1: identity is the (session_id, client_order_id) PAIR. Two sessions using
+// Terminology: identity is the (session_id, client_order_id) PAIR. Two sessions using
 // client_order_id = 1 concurrently is a deliberate adversarial case; keying a
 // map on the id alone cancels the wrong order here.
 std::string t_cancel_identity_is_the_pair(IMatchingEngine& e) {
@@ -402,7 +402,7 @@ std::string t_cancel_identity_is_the_pair(IMatchingEngine& e) {
   return expect_book(e, 1, 0, 100, 1);  // session 3's 100 must still be resting
 }
 
-// §3.1: cancelling the last order at a level removes the level.
+// §1.1 Core: cancelling the last order at a level removes the level.
 std::string t_cancel_last_order_at_level(IMatchingEngine& e) {
   Rec r;
   e.on_new(ord(1, Side::Sell, 10000, 100, 1, 1, 1), r);
@@ -414,7 +414,7 @@ std::string t_cancel_last_order_at_level(IMatchingEngine& e) {
   return {};
 }
 
-// §2.4: front_seq exposes the head of each level's queue — the only cheap way
+// engine.h: front_seq exposes the head of each level's queue — the only cheap way
 // to catch a LIFO level queue, since aggregates look identical.
 std::string t_snapshot_front_seq_is_fifo(IMatchingEngine& e) {
   Rec r;
@@ -487,7 +487,7 @@ std::string t_stp_emission_order_interleaved(IMatchingEngine& e) {
                      out::trade(4, rf(3, 3, 7), rf(4, 4, 5), 10000, 30, Side::Buy)});
 }
 
-// §3.4: an order removed by STP is gone; cancelling it later is an
+// §1.4 Cancel: an order removed by STP is gone; cancelling it later is an
 // unknown-order reject like any other dead order.
 std::string t_cancel_after_stp_removal(IMatchingEngine& e) {
   Rec r;
@@ -669,13 +669,13 @@ std::string t_sell_market_sweeps_bids_high_first(IMatchingEngine& e) {
 const Case kCases[] = {
     {"ack_only_for_non_marketable_limit", "A1, A4", t_ack_only},
     {"ack_precedes_trades", "A1", t_ack_before_trades},
-    {"trade_price_is_the_resting_price", "§3.1", t_trade_price_is_resting},
-    {"price_priority_best_first", "§3.1", t_price_priority},
-    {"time_priority_fifo_within_level", "§3.1", t_time_priority_fifo},
-    {"partial_fill_resting_order_survives", "§3.1", t_partial_fill_resting_survives},
+    {"trade_price_is_the_resting_price", "§1.1 Core", t_trade_price_is_resting},
+    {"price_priority_best_first", "§1.1 Core", t_price_priority},
+    {"time_priority_fifo_within_level", "§1.1 Core", t_time_priority_fifo},
+    {"partial_fill_resting_order_survives", "§1.1 Core", t_partial_fill_resting_survives},
     {"marketable_limit_rests_remainder_silently", "A4", t_marketable_limit_rests_remainder},
-    {"limit_order_respects_its_limit_price", "§3.1", t_limit_price_bound},
-    {"book_is_never_left_crossed", "§4 invariants", t_book_never_crossed},
+    {"limit_order_respects_its_limit_price", "§1.1 Core", t_limit_price_bound},
+    {"book_is_never_left_crossed", "invariants", t_book_never_crossed},
     {"market_order_acks_on_receipt", "M1, M4", t_market_acks},
     {"market_sweeps_at_each_resting_price", "M2", t_market_sweeps_at_resting_prices},
     {"market_into_empty_book_expires", "M3, M4", t_market_into_empty_book},
@@ -684,19 +684,19 @@ const Case kCases[] = {
     {"ioc_with_no_liquidity_expires", "A4", t_ioc_no_liquidity},
     {"ioc_partial_fill_expires_remainder", "A2, A4", t_ioc_partial},
     {"ioc_full_fill_emits_no_expired", "A4", t_ioc_full_fill_no_expired},
-    {"cancel_live_order", "§3.4", t_cancel_live},
-    {"cancel_carries_remaining_not_original", "§3.4", t_cancel_partially_filled_carries_remainder},
-    {"cancel_unknown_id_rejects", "§3.4", t_cancel_unknown},
-    {"cancel_already_filled_rejects", "§3.4", t_cancel_already_filled},
-    {"second_cancel_of_same_order_rejects", "§3.4", t_double_cancel},
-    {"cancel_identity_is_session_plus_coid", "§1", t_cancel_identity_is_the_pair},
-    {"cancelling_last_order_removes_level", "§3.1", t_cancel_last_order_at_level},
-    {"snapshot_front_seq_proves_fifo", "§2.4", t_snapshot_front_seq_is_fifo},
+    {"cancel_live_order", "§1.4 Cancel", t_cancel_live},
+    {"cancel_carries_remaining_not_original", "§1.4 Cancel", t_cancel_partially_filled_carries_remainder},
+    {"cancel_unknown_id_rejects", "§1.4 Cancel", t_cancel_unknown},
+    {"cancel_already_filled_rejects", "§1.4 Cancel", t_cancel_already_filled},
+    {"second_cancel_of_same_order_rejects", "§1.4 Cancel", t_double_cancel},
+    {"cancel_identity_is_session_plus_coid", "identity", t_cancel_identity_is_the_pair},
+    {"cancelling_last_order_removes_level", "§1.1 Core", t_cancel_last_order_at_level},
+    {"snapshot_front_seq_proves_fifo", "engine.h", t_snapshot_front_seq_is_fifo},
     {"stp_keys_on_firm_not_session", "S1", t_stp_across_sessions_same_firm},
     {"stp_cancels_resting_aggressor_continues", "S2, S3",
      t_stp_cancels_resting_aggressor_continues},
     {"stp_cancelack_interleaved_in_walk_order", "S5", t_stp_emission_order_interleaved},
-    {"cancel_after_stp_removal_rejects", "§3.4", t_cancel_after_stp_removal},
+    {"cancel_after_stp_removal_rejects", "§1.4 Cancel", t_cancel_after_stp_removal},
     {"ioc_meeting_only_own_liquidity_expires_full", "I1", t_ioc_stp_expires_full_qty},
     {"fok_fillable_commits", "F3, F4", t_fok_fillable},
     {"fok_unfillable_rejects_with_no_ack", "F2, A3", t_fok_unfillable_rejects_without_ack},
@@ -707,7 +707,7 @@ const Case kCases[] = {
     {"fok_exact_fill", "F4", t_fok_exact_fill},
     {"fok_against_empty_book_rejects", "F2", t_fok_empty_book_rejects},
     {"fok_fills_across_multiple_levels", "F1, F3", t_fok_multi_level_fill},
-    {"sell_side_aggressor_mirrors_buy_side", "§3.1", t_sell_aggressor_mirrors},
+    {"sell_side_aggressor_mirrors_buy_side", "§1.1 Core", t_sell_aggressor_mirrors},
     {"sell_market_sweeps_bids_highest_first", "M2", t_sell_market_sweeps_bids_high_first},
 };
 

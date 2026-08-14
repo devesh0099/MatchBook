@@ -76,22 +76,6 @@ ssh -N -L 8081:127.0.0.1:8081 web-node    # then curl localhost:8081/admin/...
 
 ---
 
-## Timeline
-
-| Time | Action |
-|---|---|
-| 0:00 | Kickoff, spec walkthrough (30 min, mandatory). Walk through the FOK 60/50/100 example — nobody arrives knowing that rule. |
-| 0:30 | Publish the zip. Coding opens. Both lanes live — see below. |
-| 5:15 | `POST /admin/freeze` |
-| 6:00 | Submissions close. Rejudge block. Reveal. |
-
-The benchmark lane is open from the start. Holding it back until 1:30 was meant
-to prevent premature optimisation, but the correctness gate already does that —
-nothing reaches the bench queue until it has passed verification — so a clock
-would only have penalised whoever got correct early.
-
----
-
 ## During
 
 Watch, in order of how early they warn you:

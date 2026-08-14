@@ -11,11 +11,11 @@
 
 #include <cstdint>
 
-namespace mebench {
+// EvType, Side and TIF live in order.h: an engine needs them and never needs
+// anything else from this file.
+#include "mebench/order.h"
 
-enum class EvType : uint8_t { New = 0, Cancel = 1 };
-enum class Side : uint8_t { Buy = 0, Sell = 1 };
-enum class TIF : uint8_t { Day = 0, IOC = 1, FOK = 2, Market = 3 };
+namespace mebench {
 
 // Exactly 24 bytes. Packed: this is a file layout, not a hot-path struct.
 struct __attribute__((packed)) WireEvent {

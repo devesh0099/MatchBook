@@ -7,9 +7,14 @@
 
 #include <cstdint>
 
-#include "mebench/wire.h"
-
 namespace mebench {
+
+// Two event types, and that is the whole input vocabulary. There is no Modify
+// and no cancel-replace: a cancel always removes the entire remaining quantity.
+// Do not implement one.
+enum class EvType : uint8_t { New = 0, Cancel = 1 };
+enum class Side : uint8_t { Buy = 0, Sell = 1 };
+enum class TIF : uint8_t { Day = 0, IOC = 1, FOK = 2, Market = 3 };
 
 // 16 bytes, pass by value.
 //
@@ -30,6 +35,11 @@ struct OrderRef {
 static_assert(sizeof(OrderRef) == 16 && alignof(OrderRef) == 8);
 
 // 32 bytes, naturally aligned.
+//
+// Prices are int32_t INTEGER TICKS throughout. There is no floating-point price
+// anywhere in this contest: `double` arithmetic with FMA contraction is
+// build-dependent, so a price comparison could come out differently on two
+// correct compilers and correctness would depend on the toolchain.
 struct Order {
   uint64_t seq;  // global sequence — use for time priority
   uint64_t client_order_id;

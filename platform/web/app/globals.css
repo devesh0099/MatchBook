@@ -354,3 +354,95 @@ pre.code {
   border-left: 3px solid var(--color-accent);
   color: var(--app-ink-2);
 }
+
+/* ---------------------------------------------------------------- spec page
+   A normative document is a long read by nature. The rail makes it navigable;
+   the column rules stop the rule lists from being 60 lines of single-file
+   scrolling on a wide screen. */
+
+.spec-layout {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: var(--space-8);
+  /* NO align-items: start. A sticky grid item sticks within its grid AREA, and
+     `start` sizes that area to the item's own content — so the rail scrolled
+     away after ~460px of a 6000px document while appearing to be sticky. The
+     default stretch gives the area the full row height, which is the range
+     sticky needs. */
+}
+
+.spec-toc {
+  position: sticky;
+  /* Clears the top bar, so a heading jumped to is never hidden under it. */
+  top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-right: 1px solid var(--app-line);
+  padding-right: var(--space-3);
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
+}
+
+.spec-toc-link {
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--app-ink-3);
+  text-decoration: none;
+  padding: 4px 0 4px 8px;
+  border-left: 2px solid transparent;
+}
+.spec-toc-link:hover { color: var(--app-ink); }
+.spec-toc-link.is-active {
+  color: var(--color-accent);
+  border-left-color: var(--color-accent);
+  font-weight: 700;
+}
+
+/* The column itself is wide; the PROSE inside it is not. Capping paragraphs
+   rather than the container keeps the reading measure at ~78ch while letting
+   the things that genuinely want width — rule tables, code blocks, and the
+   two-column rule lists below — actually use it. Capping the container instead
+   left a third of the page empty and squeezed the tables. */
+.spec-body { max-width: 1100px; }
+.spec-body > p,
+.spec-body > blockquote { max-width: 78ch; }
+.spec-body li { max-width: 82ch; }
+
+/* Anchored headings land below the sticky rail rather than flush with the
+   viewport top, where the first line reads as cut off. */
+.spec-body h2,
+.spec-body h3 { scroll-margin-top: 20px; }
+
+/* The numbered rule blocks (A1-A4, M1-M5, S1-S5, F1-F4) are short, independent
+   items — exactly what columns are for. break-inside keeps a rule whole rather
+   than splitting it across the fold. */
+/* The numbered rule blocks (A1-A4, M1-M5, S1-S5, F1-F4) are short, independent
+   items — exactly what columns are for, and the single biggest reduction in
+   scrolling on this page. break-inside keeps a rule whole rather than splitting
+   it across the fold. */
+@media (min-width: 1360px) {
+  .spec-body ol { columns: 2; column-gap: var(--space-8); }
+  .spec-body ol > li { break-inside: avoid; margin-bottom: var(--space-3); max-width: none; }
+  /* A list containing a table cannot be columnised — the table would be
+     shredded, and it is the widest element in the document. */
+  .spec-body ol:has(table) { columns: 1; }
+}
+
+@media (max-width: 1100px) {
+  .spec-layout { grid-template-columns: minmax(0, 1fr); }
+  .spec-toc { display: none; }
+}
+
+/* The document's own h1 duplicates the page heading above it, and its opening
+   normative sentence duplicates the paragraph beside it — both are useful in
+   the zip and redundant on screen. Hidden rather than removed from the source,
+   because spec/SPEC.md ships verbatim and should read as a standalone document.
+   Nothing normative is hidden: h1 is a title, and the sentence is restated
+   immediately above it. */
+.spec-body > h1 { display: none; }
+.spec-body > h1 + p { display: none; }
+
+/* Give the spec more room than the app's default column. The rail costs 210px
+   and the rule tables were already the widest thing on the page. */
+.spec-page { max-width: 1440px; }

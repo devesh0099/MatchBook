@@ -34,7 +34,7 @@ uint32_t ReferenceEngine::fillable_qty(const Book& book, const Order& o) const {
 
 // ---------------------------------------------------------------- matching
 
-// Walks the opposite book best price first, FIFO within each level (SPEC §3.1),
+// Walks the opposite book best price first, FIFO within each level (SPEC §1.1 Core),
 // emitting Trades and STP CancelAcks in book-walk order (S5).
 template <class Book>
 void ReferenceEngine::match(Book& book, const Order& o, uint32_t& remaining,
@@ -61,7 +61,7 @@ void ReferenceEngine::match(Book& book, const Order& o, uint32_t& remaining,
         continue;
       }
 
-      // SPEC §3.1: trade price is the RESTING order's price, always.
+      // SPEC §1.1 Core: trade price is the RESTING order's price, always.
       const uint32_t q = remaining < r.remaining ? remaining : r.remaining;
       sink.emit(out::trade(o.seq, r.o.ref(), o.ref(), r.o.px, q, o.side));
       remaining -= q;
@@ -165,7 +165,7 @@ void ReferenceEngine::on_cancel(OrderRef ref, uint64_t seq, OutSink& sink) noexc
 
   auto it = index_.find(key_of(ref));
   if (it == index_.end()) {
-    // SPEC §3.4: unknown or already-filled — the engine cannot tell the two
+    // SPEC §1.4 Cancel: unknown or already-filled — the engine cannot tell the two
     // apart without a graveyard, and is not asked to.
     sink.emit(out::reject(seq, ref, RejectReason::UnknownOrder, Side::Buy));
     return;

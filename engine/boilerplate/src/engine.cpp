@@ -1,16 +1,17 @@
-// engine.cpp — your submission. This is the only file you write.
+// engine.cpp — your submission. The only file you write, and the only file the
+// server compiles: one translation unit against the read-only headers in
+// include/mebench/.
 //
-// It is also the only file the server compiles: one translation unit, against
-// the read-only headers in include/mebench/. Everything below the line marked
-// YOUR CODE STARTS HERE is yours to restructure completely — the data
-// structures here are a starting point, not a required design.
+// Everything below YOUR CODE STARTS HERE is yours to restructure completely.
+// The data structures above it are a starting point, not a required design.
 //
-// Read SPEC.md first. Every rule referenced in a // TODO below is numbered
-// there, and the numbers are the contract.
+// Each TODO names the rule it implements — [A1], [F1], [S2] and so on. Those
+// ids are in the spec, one click away in the editor. The headers themselves
+// document every struct and field.
 //
-// Run     = the ~30 visible tests in tests/. Fast, unlimited, teaches the rules.
-// Submit  = hidden-seed differential fuzzing against the reference. That is the
-//           gate. Passing the visible tests does not mean passing it.
+//   Run     the visible tests in tests/. Fast, unlimited, teaches the rules.
+//   Submit  hidden-seed differential fuzzing against a reference engine. That
+//           is the gate; passing the visible tests does not mean passing it.
 
 #include <algorithm>
 #include <cstdint>
@@ -25,21 +26,16 @@ using namespace mebench;
 
 namespace {
 
-// A resting order is the original order plus how much of it is left. An order
-// that is partially filled keeps its place in the queue (price-time priority is
-// on arrival sequence, and a partial fill does not change arrival time).
+// An order plus how much of it is left. A partial fill does not change arrival
+// time, so a partially filled order keeps its place in the queue.
 struct RestingOrder {
   Order o;
   uint32_t remaining;
 };
 
-// One price level: orders in arrival order, oldest at the front.
-//
-// FIFO is not decoration. The snapshot exposes front_seq precisely so that a
-// LIFO queue is detectable — the aggregate quantity and order count look
-// identical either way, so nothing else would catch it.
+// One price level, oldest at the front.
 struct PriceLevel {
-  std::vector<RestingOrder> orders;  // front() is the head of the queue
+  std::vector<RestingOrder> orders;
   uint64_t total_qty = 0;
 
   void push(const Order& o, uint32_t qty) {
@@ -49,7 +45,7 @@ struct PriceLevel {
 
   bool empty() const { return orders.empty(); }
 
-  // Remove by index, preserving arrival order of everything behind it.
+  // Removal preserves the arrival order of everything behind it.
   void erase_at(size_t i) {
     total_qty -= orders[i].remaining;
     orders.erase(orders.begin() + static_cast<long>(i));
@@ -61,16 +57,14 @@ struct PriceLevel {
   }
 };
 
-// Bids are best-first at the HIGHEST price, asks at the LOWEST. Each map's own
-// comparator makes begin() the touch.
+// Each map's own comparator makes begin() the touch: bids highest price first,
+// asks lowest first.
 using Bids = std::map<int32_t, PriceLevel, std::greater<int32_t>>;
 using Asks = std::map<int32_t, PriceLevel, std::less<int32_t>>;
 
-// Cancel identity is the (session_id, client_order_id) PAIR, never the id
-// alone: client order ids are unique only within a session, and the stream
-// deliberately contains two sessions using the same value at the same time.
-// Keying on the id alone will cancel the wrong order and look correct for a
-// long time first.
+// Keyed on the PAIR, never client_order_id alone — see the note on OrderRef in
+// order.h. Keying on the id alone cancels the wrong order and looks correct for
+// a long time first.
 //
 // This index is where most of the latency spread in this contest comes from.
 // std::map is a correct starting point and a slow one.
@@ -99,98 +93,50 @@ struct Location {
 class Engine final : public IMatchingEngine {
  public:
   void on_new(const Order& o, OutSink& out) noexcept override {
-    // ---- FOK is checked BEFORE anything is mutated and BEFORE the Ack -------
-    // An unfillable FOK emits only the Reject, with no Ack at all (SPEC A3/F2).
     if (o.tif == TIF::FOK) {
-      // TODO (SPEC F1): read-only walk of the opposite side, best price first,
-      // bounded by o.px, summing the remaining quantity of resting orders whose
-      // participant_id DIFFERS from o.participant_id.
-      //
-      // The same-firm exclusion is the subtle part and it is not industry
-      // practice — see the worked 60/50/100 example in SPEC section 3.6.
-      // Counting your own resting liquidity makes a FOK commit and then
-      // partially fill, which F4 forbids.
-      //
-      //   if (fillable < o.qty) {
-      //     out.emit(out::reject(o.seq, o.ref(), RejectReason::FokUnfillable, o.side));
-      //     return;                       // book untouched: no trades, no STP
-      //   }
+      // TODO [F1]: read-only walk of the opposite side summing only OTHER
+      // firms' resting quantity. If it is short of o.qty, emit the Reject and
+      // return with the book untouched — no Ack. [F2, A3]
     }
 
-    // ---- every accepted order acks first (SPEC A1) --------------------------
+    // [A1] every accepted order acks first, before any other output.
     out.emit(out::ack(o.seq, o.ref(), o.px, o.side));
 
     uint32_t remaining = o.qty;
 
-    // ---- match against the opposite side -----------------------------------
-    // TODO (SPEC section 3.1): walk the opposite book best price first, and
-    // within each level in arrival order, while `remaining > 0` and the level's
-    // price is acceptable:
-    //
-    //   a market order (TIF::Market) accepts every price
-    //   a buy accepts levels priced <= o.px
-    //   a sell accepts levels priced >= o.px
-    //
-    // For each resting order reached:
-    //
-    //   same participant_id  -> SPEC S2: remove the RESTING order, emit
-    //                           out::stp_cancel_ack(...) carrying its remaining
-    //                           quantity, and CONTINUE matching with the
-    //                           aggressor's quantity unchanged. No trade.
-    //   otherwise            -> trade min(remaining, resting.remaining) at the
-    //                           RESTING order's price, never the aggressor's.
-    //                           This is the most common first-submission bug.
-    //
-    // Emission is book-walk order, so an STP CancelAck appears interleaved
-    // exactly where the resting order sat (SPEC S5).
+    // TODO [1.1 Core]: walk the opposite book best price first, arrival order
+    // within a level, while remaining > 0 and the level price is acceptable.
+    // Same participant_id is [S2], not a trade. Trade price is the RESTING
+    // order's price.
     (void)remaining;
 
-    // ---- what happens to the remainder -------------------------------------
-    // TODO: dispatch on time-in-force. Every branch is a numbered rule.
     switch (o.tif) {
       case TIF::Day:
-        // TODO: rest the remainder silently — no second Ack, no Expired. The
-        // Ack already covered acceptance (SPEC A4). Remember to record it in
-        // the cancel index.
+        // TODO: rest the remainder silently and record it in the index. [A4]
         break;
 
       case TIF::IOC:
       case TIF::Market:
-        // TODO (SPEC M3 / I1): emit exactly one Expired carrying the
-        // remainder, if any. This INCLUDES quantity that met only same-firm
-        // liquidity which STP just cancelled. A fully filled IOC emits no
-        // Expired at all.
+        // TODO: one Expired carrying the remainder, if any. [M3, I1]
         break;
 
       case TIF::FOK:
-        // Nothing to do: F3 guarantees an accepted FOK filled completely, and
-        // F4 forbids it from ever emitting Expired.
+        // Nothing to do. [F3, F4]
         break;
     }
   }
 
   void on_cancel(OrderRef ref, uint64_t seq, OutSink& out) noexcept override {
-    // TODO (SPEC section 3.4):
-    //
-    //   found     -> remove it and emit out::cancel_ack(seq, ref, REMAINING,
-    //                side). The remaining quantity, not the original: this is
-    //                the only case where a cancel carries a meaningful number.
-    //   not found -> out::reject(seq, ref, RejectReason::UnknownOrder,
-    //                Side::Buy). "Already fully filled" and "never existed" are
-    //                indistinguishable, and you are not asked to tell them
-    //                apart. An order removed earlier by STP is also gone.
-    //
-    // Look it up by the (session_id, client_order_id) pair. See the note on
-    // OrderKey above.
+    // TODO [1.4 Cancel]: look up the (session_id, client_order_id) pair.
+    // Found -> remove it and cancel_ack the REMAINING quantity. Not found ->
+    // reject with UnknownOrder.
     (void)ref;
     (void)seq;
     (void)out;
   }
 
-  // Called OUTSIDE the timed region — correctness snapshots only. It costs you
-  // nothing at benchmark time, so write it straightforwardly. It is what
-  // catches a silently dropped resting order, and a book that disagrees with
-  // your own output fails the gate.
+  // Outside the timed region, so it costs nothing at benchmark time. Write it
+  // straightforwardly: it is what catches a silently dropped resting order.
   void snapshot(BookSnapshot& snap) const override {
     snap = BookSnapshot{};
     snap.at_seq = last_seq_;
@@ -209,7 +155,6 @@ class Engine final : public IMatchingEngine {
     }
     snap.n_asks = n;
 
-    // These cover the WHOLE book, not just the levels written above.
     snap.resting_qty_total = resting_qty_total_;
     snap.resting_order_count = resting_order_count_;
   }
@@ -235,6 +180,6 @@ class Engine final : public IMatchingEngine {
 
 }  // namespace
 
-// The server dlopen()s your compiled engine and looks up this symbol, so it
-// must keep C linkage and this exact name.
+// The server dlopen()s your engine and looks up this symbol, so it must keep C
+// linkage and this exact name.
 extern "C" mebench::IMatchingEngine* create_engine() { return new Engine(); }

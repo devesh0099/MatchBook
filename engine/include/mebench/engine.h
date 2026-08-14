@@ -34,12 +34,18 @@ inline constexpr uint32_t kSnapshotLevels = 16;
 class IMatchingEngine {
  public:
   // noexcept on the hot path lets the compiler skip unwind-table setup and
-  // keeps exception machinery out of the timing.
+  // keeps exception machinery out of the timing. Do not throw: noexcept means a
+  // throw terminates the process outright and the run fails.
   virtual void on_new(const Order& o, OutSink& out) noexcept = 0;
   virtual void on_cancel(OrderRef ref, uint64_t seq, OutSink& out) noexcept = 0;
 
-  // Called outside the timed region — correctness snapshots only.
-  // Fill at most kSnapshotLevels per side, best first. resting_qty_total and
+  // Called outside the timed region — correctness snapshots only. It costs
+  // nothing at benchmark time, so implement it straightforwardly: this is what
+  // catches a silently dropped resting order.
+  //
+  // Fill at most kSnapshotLevels per side, BEST PRICE FIRST — highest price
+  // first for bids, lowest first for asks. Set n_bids / n_asks to the number of
+  // levels actually written, capped at kSnapshotLevels. resting_qty_total and
   // resting_order_count cover the WHOLE book, not just the levels written.
   virtual void snapshot(BookSnapshot& out) const = 0;
 

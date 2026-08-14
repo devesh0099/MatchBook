@@ -151,154 +151,7 @@ separates F1 from the naive count.
 
 ---
 
-## 2. Data contracts
-
-### 2.1 Hot-path structs
-
-These are what your engine sees. They are frozen; the headers are read-only and shipped
-with the boilerplate verbatim.
-
-```cpp
-struct OrderRef {                    // 16 bytes, pass by value
-  uint64_t client_order_id;
-  uint16_t session_id;
-  uint16_t participant_id;
-  uint32_t _pad;
-  bool operator==(const OrderRef&) const = default;
-};
-
-struct Order {                       // 32 bytes, naturally aligned
-  uint64_t seq;                      // global sequence — use for time priority
-  uint64_t client_order_id;
-  int32_t  px;
-  uint32_t qty;
-  uint16_t session_id;
-  uint16_t participant_id;
-  Side     side;
-  TIF      tif;
-  uint16_t _pad;
-
-  OrderRef ref() const { return {client_order_id, session_id, participant_id, 0}; }
-};
-static_assert(sizeof(Order) == 32 && alignof(Order) == 8);
-```
-
-`seq` is the global arrival sequence number and the basis of time priority (§1.1).
-
-Prices are `int32_t` **integer ticks**. There are no floating-point prices; `double`
-arithmetic with FMA contraction is build-dependent, which would make correctness depend
-on the compiler.
-
-### 2.2 Enumerations
-
-```cpp
-enum class EvType : uint8_t { New = 0, Cancel = 1 };
-enum class Side   : uint8_t { Buy = 0, Sell = 1 };
-enum class TIF    : uint8_t { Day = 0, IOC = 1, FOK = 2, Market = 3 };
-
-enum class OutType : uint8_t {
-  Trade = 0, Ack = 1, Reject = 2, CancelAck = 3, Expired = 4
-};
-
-enum class RejectReason : uint8_t {
-  None = 0, UnknownOrder = 1, FokUnfillable = 2
-};
-```
-
-There is **no `Modify`** event. There is no cancel-replace. Do not implement one.
-
-`RejectReason` has exactly three values and every one is reachable by a rule below. There
-is no `SelfTrade` reason (STP never rejects — S4), no `DuplicateId` and no
-`InvalidQty` (the generator cannot produce those inputs — §2.5).
-
-### 2.3 Output events
-
-```cpp
-struct OutEvent {                    // 56 bytes
-  uint64_t in_seq;                   // which input event caused this
-  OrderRef maker;                    // zeroed for non-trade events
-  OrderRef taker;
-  int32_t  px;
-  uint32_t qty;
-  OutType  type;
-  Side     aggressor_side;
-  RejectReason reason;
-  uint8_t  _pad[5];
-};
-static_assert(sizeof(OutEvent) == 56);
-
-class OutSink {
-public:
-  virtual void emit(const OutEvent&) noexcept = 0;
-  virtual ~OutSink() = default;
-};
-```
-
-Field rules for every emitted event:
-
-| Field | Rule |
-|---|---|
-| `in_seq` | The `seq` of the input event being processed. Always set. |
-| `maker` | The resting order, on `Trade` and on STP `CancelAck`. Zeroed otherwise. |
-| `taker` | The order named by the input event: the aggressor on `Trade`, the subject order on `Ack` / `Reject` / `Expired`, and the cancelled order on an ordinary `CancelAck`. |
-| `px` | `Trade`: the **resting** order's price. `Ack`: the order's own price (`0` for market). `Expired` / `CancelAck` / `Reject`: `0`. |
-| `qty` | `Trade`: quantity traded. `Expired`: quantity expiring. `CancelAck`: the **remaining** quantity of the cancelled order. `Ack` / `Reject`: `0`. |
-| `aggressor_side` | The side of the order named by the input event. On a `Cancel` input, the side of the resting order being cancelled; on a `Reject`/`UnknownOrder` where no such order exists, `Side::Buy`. |
-| `reason` | `RejectReason::None` on everything except `Reject`. |
-| `_pad` | Zeroed. |
-
-"Zeroed" means all bytes zero. The digest that verifies your run folds every field, so a
-garbage `maker` on an `Ack` is a correctness failure like any other.
-
-### 2.4 Engine interface
-
-```cpp
-class IMatchingEngine {
-public:
-  virtual void on_new(const Order& o, OutSink& out) noexcept = 0;
-  virtual void on_cancel(OrderRef ref, uint64_t seq, OutSink& out) noexcept = 0;
-
-  // Called outside the timed region — correctness snapshots only.
-  virtual void snapshot(BookSnapshot& out) const = 0;
-  virtual ~IMatchingEngine() = default;
-};
-
-IMatchingEngine* create_engine();    // you implement this
-```
-
-`on_new` and `on_cancel` are `noexcept`. Do not throw. Do not allocate in a way that can
-throw `std::bad_alloc` on the hot path if you can avoid it — but note that if you do
-throw, `noexcept` terminates the process and your run fails.
-
-`snapshot` is called **outside** the timed region. It costs you nothing at benchmark
-time, so implement it straightforwardly; it is what catches a silently dropped resting
-order.
-
-```cpp
-struct LevelSnapshot {
-  int32_t  px;
-  uint64_t total_qty;
-  uint32_t order_count;
-  uint64_t front_seq;      // seq of the order at the head of the queue
-};
-
-struct BookSnapshot {
-  uint64_t at_seq;
-  uint32_t n_bids, n_asks;
-  LevelSnapshot bids[16];  // best first
-  LevelSnapshot asks[16];
-  uint64_t resting_qty_total;
-  uint32_t resting_order_count;
-};
-```
-
-Fill at most 16 levels per side, **best price first** (highest price first for bids,
-lowest first for asks). Set `n_bids`/`n_asks` to the number of levels actually written,
-capped at 16. `resting_qty_total` and `resting_order_count` cover the **whole** book, not
-just the levels written. `front_seq` is the `seq` of the order at the head of that level's
-queue — this is what proves your level queue is FIFO and not LIFO.
-
-### 2.5 Input guarantees
+## 2. Input guarantees
 
 The stream generator guarantees the following. You need not defend against these cases,
 and there is no reject reason for them:
@@ -317,57 +170,9 @@ and cancels for orders that never existed.
 
 ---
 
-## 3. Correctness
+## 3. Benchmark and scoring
 
-Three layers. Only layer 2 and layer 3 gate the leaderboard.
-
-**Layer 1 — visible unit tests.** ~30 hand-written cases, one per rule above, shipped in
-the boilerplate and run by the editor's **Run** button. These teach; they do not grade.
-Passing all of them does not mean you pass the gate.
-
-**Layer 2 — differential fuzzing (the gate).** A seeded stream is run through your engine
-and the reference side by side and compared event by event. **The seed is fresh on every
-submission**, so it cannot be reverse-engineered. The book is also snapshotted every N
-events and diffed — a silently dropped resting order produces identical trades until it
-suddenly does not, possibly millions of events later.
-
-**Layer 3 — invariants.** These hold regardless of the oracle and catch bugs the
-reference might share:
-
-- The book is never crossed: `best_bid < best_ask`
-- `Σ traded + Σ resting + Σ cancelled == Σ submitted`
-- Every trade price lies between both orders' limit prices
-- No zero-quantity or negative-quantity resting order
-- No self-trade ever: `maker.participant_id != taker.participant_id` on every `Trade`
-- Within a level, `front_seq` ordering matches arrival order
-
-**Correctness is binary for leaderboard eligibility.** You will still see a progress
-breakdown (`price-time ✓  partial fills ✓  IOC ✗`) so you know where you stand.
-
-On failure you get the **first** divergence only, shrunk by binary search to a reproducer
-usually under ten events:
-
-```
-divergence at output #8,341 (input seq 4,182)
-
-  input:    NEW sell 100 @ 9998  session=3 coid=77
-  expected: TRADE 100 @ 9999  maker=(s7,c12)  taker=(s3,c77)
-  actual:   TRADE 100 @ 9998  maker=(s7,c12)  taker=(s3,c77)
-                          ^^^ trade price should be the resting order's
-```
-
-Only the first is shown, deliberately. Fixing by pattern-matching against a list of 400
-failures is not debugging.
-
-A **timeout** is reported distinctly from a wrong-output failure. They are different bugs.
-
----
-
----
-
-## 4. Benchmark and scoring
-
-### 4.1 What is measured
+### 3.1 What is measured
 
 ```
 Generate (offline)  →  Load + decode + warm up  →  [ TIMED LOOP ]  →  Verify + flush
@@ -404,92 +209,24 @@ model is explicit:
   per-event latency, not overlapped stream throughput.** Cross-event memory-level-
   parallelism tricks earn no credit — by definition of the metric.
 
-### 4.2 Sink
+### 3.2 How you are scored
 
-The benchmark run uses a **checksum-only sink** costing a few nanoseconds, with no
-volume-dependent memory traffic, so sink cost is identical for everyone and cancels in the
-ranking. The checksum folds **every field** of every `OutEvent`, field by field:
+- **Within one run:** ~10.3M per-event latencies → HdrHistogram → **p50 is your score for
+  that run**. p99 and p99.9 are reported but not ranked.
+- **Across runs:** the run is repeated 9 times → **your score is the median of the nine
+  per-run p50s**.
 
-```cpp
-class HashSink : public OutSink {
-  uint64_t h_ = 0xcbf29ce484222325ull;
-public:
-  void emit(const OutEvent& e) noexcept override {
-    auto mix = [&](uint64_t v) { h_ = (h_ ^ v) * 0x100000001b3ull; };
-    mix(e.in_seq);
-    mix(e.maker.client_order_id);
-    mix((uint64_t)e.maker.session_id << 16 | e.maker.participant_id);
-    mix(e.taker.client_order_id);
-    mix((uint64_t)e.taker.session_id << 16 | e.taker.participant_id);
-    mix((uint64_t)(uint32_t)e.px << 32 | e.qty);
-    mix((uint64_t)e.type << 16 | (uint64_t)e.aggressor_side << 8
-        | (uint64_t)e.reason);
-  }
-  uint64_t digest() const noexcept { return h_; }
-};
-```
+Per-event latencies are never averaged across runs.
 
-The digest from your benchmark run must equal the digest from your correctness run on the
-same stream. **Verification happens inside the timed run**, which is what makes it
-pointless to go faster by doing less work.
-
-### 4.3 Metric
-
-Two nested distributions:
-
-- **Within one run:** ~10.3M per-event latencies → HdrHistogram → **p50 is ranked**; p99
-  and p99.9 are reported but unranked.
-- **Across runs:** the run is repeated 9 times → **score = median of the per-run p50s**.
-
-Per-event latencies are never averaged across runs; that would destroy the tail.
-
-Ranking is on **p50, not p99**: sporadic hypervisor or thermal interference contaminates
-tails but barely moves a median over ten million events. Mean is not used — a single 50 µs page
-fault vanishes into it.
-
-### 4.4 Presentation and ties
-
-Positions are exact: **sorted by score, ascending.** You are ranked on your **best**
+Positions are exact, **sorted by score ascending**. You are ranked on your **best**
 submission, not your latest — a later experiment that measures worse costs you nothing.
+Identical scores break on the **earlier submission**: if two engines measure the same, the
+one that got there first is placed above.
 
-**Identical scores break on the earlier submission.** If two engines measure the same, the
-one that got there first is placed above. Exact ties are not a corner case: if the bench
-node's clock advances in fixed steps, a score is a count of those steps and equal scores
-are expected.
+A confidence interval across your nine per-run medians is published beside each score. It
+shows how separated a close pair really is; it does **not** affect rank.
 
-A bootstrap confidence interval across your per-run medians is published beside each
-score. It is information about how separated a close pair really is — it does **not**
-affect rank.
-
-The leaderboard **freezes at 5:15** (ICPC style) and is revealed at the end.
-
-### 4.5 Rejudge
-
-Every participant's final submission is **rejudged in one continuous block** on the same
-machine in the same short window before results are announced. The live leaderboard during
-the event is indicative; **the rejudge is authoritative.** A reference run brackets the
-block on both sides; if the two disagree, the block is rerun.
-
-### 4.6 Machine health
-
-Two checks, both on signals your code cannot cause:
-
-1. **Steal time** — `/proc/stat` delta across the run. Non-zero → the run is discarded and
-   requeued **at the front** of the queue, not the back. You already waited once and it
-   was not your fault.
-2. **Reference spot check** — the reference implementation is run every ~20 minutes;
-   >5% deviation from the morning baseline raises an alert.
-
-Checks on context switches, page faults, and frequency are deliberately **not** applied:
-your own engine can legitimately cause those (a heap-growing engine page-faults — that is
-its latency, not contamination), and discarding on them would put you in an infinite
-requeue loop.
-
----
-
----
-
-## 5. Contest rules
+## 4. Contest rules
 
 - **You submit one file**: `engine.cpp`, a single translation unit. It may include the
   frozen headers and the C++20 standard library. Nothing else.
@@ -541,7 +278,7 @@ is what iteration needs.
 
 ---
 
-## 6. The environment
+## 5. The environment
 
 The benchmark node is tuned to be unrealistically quiet: isolated cores, no scheduler
 tick, fixed frequency, no turbo, one job at a time. This is so the measurement is of

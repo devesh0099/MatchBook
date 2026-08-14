@@ -19,7 +19,7 @@ enum class OutType : uint8_t { Trade = 0, Ack = 1, Reject = 2, CancelAck = 3, Ex
 //
 // There is no DuplicateId or InvalidQty: the generator never emits a New that
 // duplicates a live (session_id, client_order_id) in the same session, and never
-// emits a zero quantity (SPEC §2.5).
+// emits a zero quantity (SPEC §2 Input guarantees).
 enum class RejectReason : uint8_t { None = 0, UnknownOrder = 1, FokUnfillable = 2 };
 
 // 56 bytes.
@@ -27,17 +27,25 @@ enum class RejectReason : uint8_t { None = 0, UnknownOrder = 1, FokUnfillable = 
 // in_seq is what makes counterexample shrinking possible: every output points
 // back at the input event that caused it.
 //
-// Field rules (SPEC §2.3):
+// Field rules (SPEC the field rules above):
 //   in_seq          always the seq of the input event being processed
 //   maker           the resting order on Trade and on an STP CancelAck; zeroed otherwise
-//   taker           the order named by the input event
-//   px              Trade: the RESTING order's price. Ack: the order's own price.
-//                   Expired / CancelAck / Reject: 0
+//   taker           the order named by the input event: the aggressor on Trade,
+//                   the subject order on Ack / Reject / Expired, and the
+//                   cancelled order on an ordinary CancelAck
+//   px              Trade: the RESTING order's price. Ack: the order's own price
+//                   (0 for a market order). Expired / CancelAck / Reject: 0
 //   qty             Trade: quantity traded. Expired: quantity expiring.
 //                   CancelAck: the REMAINING quantity. Ack / Reject: 0
-//   aggressor_side  side of the order named by the input event
+//   aggressor_side  side of the order named by the input event. On a Cancel
+//                   input that is the side of the resting order being
+//                   cancelled; on a Reject/UnknownOrder, where no such order
+//                   exists, it is Side::Buy
 //   reason          None on everything except Reject
 //   _pad            zeroed
+//
+// "Zeroed" means every byte zero. The digest that verifies a run folds EVERY
+// field, so a garbage maker on an Ack is a correctness failure like any other.
 struct OutEvent {
   uint64_t in_seq;
   OrderRef maker;
