@@ -69,25 +69,69 @@ fi
 # ------------------------------------------------------------------ the app
 
 step "the site answers"
-if health="$(curl -fsS --max-time 10 "http://$WEB_IP/api/health" 2>/dev/null)"; then
-  ok "GET /api/health → ${health:0:60}"
-else
-  check_fail "GET http://$WEB_IP/api/health failed — Caddy or the API is not up"
-fi
-
-if curl -fsS --max-time 10 "http://$WEB_IP/api/participants" >/dev/null 2>&1; then
-  ok "GET /api/participants → 200 (not a 500, so the DB and S3 wiring hold)"
-else
-  check_fail "GET /api/participants failed — usually the API cannot reach Postgres or S3"
-fi
 
 # SITE_ADDRESS reaching the container is the difference between a real domain
-# being served correctly and it being served as localhost.
+# being served correctly and it being served as localhost. Read it first,
+# because it also decides WHERE to send the checks below.
 sa="$(node web 'docker exec flashmatch-caddy-1 printenv SITE_ADDRESS' 2>/dev/null || true)"
 if [[ -n "$sa" ]]; then
   ok "Caddy sees SITE_ADDRESS=$sa"
 else
   check_fail "SITE_ADDRESS is not set inside the Caddy container — a real domain would be served as localhost"
+fi
+
+# The Caddyfile is a single site block bound to {$SITE_ADDRESS}. Once that is a
+# hostname, Caddy serves ONLY that name and a request to the bare IP matches no
+# site and 404s — so checking the IP would report a broken deployment that is in
+# fact perfectly healthy. Ask for whatever origin is actually configured.
+case "$sa" in
+  ""|:*|localhost) BASE="http://$WEB_IP"; TLS=0 ;;
+  *)               BASE="https://$sa";    TLS=1 ;;
+esac
+log "checking $BASE"
+
+if health="$(curl -fsS --max-time 15 "$BASE/api/health" 2>/dev/null)"; then
+  ok "GET /api/health → ${health:0:60}"
+else
+  check_fail "GET $BASE/api/health failed — Caddy or the API is not up"
+fi
+
+if curl -fsS --max-time 15 "$BASE/api/participants" >/dev/null 2>&1; then
+  ok "GET /api/participants → 200 (not a 500, so the DB and S3 wiring hold)"
+else
+  check_fail "GET $BASE/api/participants failed — usually the API cannot reach Postgres or S3"
+fi
+
+# With TLS configured, a certificate that has quietly failed to renew is the
+# failure nobody notices until a participant does.
+if (( TLS )); then
+  # Capture first, THEN grep. Piping curl straight into `grep -m1` makes grep
+  # close the pipe on its first match, curl fails the write and exits 23, and
+  # pipefail turns that into a failed command — so this check silently did
+  # nothing while appearing to pass.
+  cert_info="$(curl -sSv --max-time 15 "$BASE/api/health" 2>&1 || true)"
+  expiry="$(sed -n 's/.*expire date: //p' <<<"$cert_info" | head -1)"
+  if [[ -n "$expiry" ]]; then
+    days=$(( ( $(date -d "$expiry" +%s 2>/dev/null || echo 0) - $(date +%s) ) / 86400 ))
+    if (( days > 0 )); then
+      ok "TLS certificate valid, expires in $days day(s)"
+    else
+      check_fail "TLS certificate expired or unreadable ($expiry)"
+    fi
+  else
+    check_fail "could not read a TLS certificate from $BASE"
+  fi
+  grep -q 'SSL certificate verify ok' <<<"$cert_info" \
+    && ok "certificate chain verifies (not self-signed or staging)" \
+    || warn "certificate does NOT verify — staging or self-signed cert in use"
+  # Plain HTTP must still answer: Let's Encrypt renews over HTTP-01 on port 80,
+  # so a redirect or a 200 is fine, a refusal means renewal will fail silently.
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://$sa/" 2>/dev/null || echo 000)"
+  if [[ "$code" == "000" ]]; then
+    check_fail "port 80 does not answer on $sa — ACME renewal will fail when the cert comes up for renewal"
+  else
+    ok "port 80 answers ($code) — HTTP-01 renewal path is open"
+  fi
 fi
 
 # ----------------------------------------------------------------- workers
