@@ -71,6 +71,16 @@ pub struct Config {
     /// Where baked streams and solutions live. On the real fleet this is AMI
     /// content; in dev the agent bakes lazily on first use.
     pub bake_dir: String,
+    /// The participant -> box binding (PLAN-measurement-redesign §6): when
+    /// set, this agent claims ONLY that participant's jobs, which is the
+    /// entire routing story on the fleet. Unset (the compose stack), it
+    /// serves everyone through the identical code path.
+    pub participant_id: Option<i32>,
+    /// CPU steering on an isolated-core box (§7): measured runs pin to the
+    /// isolated core, compiles to the spare cores, via taskset around the
+    /// sandbox invocation. Both unset in dev.
+    pub bench_cpus: Option<String>,
+    pub compile_cpus: Option<String>,
     pub storage: Arc<Storage>,
 }
 
@@ -131,6 +141,9 @@ async fn main() -> Result<()> {
             "MEBENCH_BAKE",
             &std::env::temp_dir().join("mebench-bake").to_string_lossy(),
         ),
+        participant_id: std::env::var("MEBENCH_PARTICIPANT_ID").ok().and_then(|v| v.trim().parse().ok()),
+        bench_cpus: std::env::var("MEBENCH_BENCH_CPUS").ok().filter(|v| !v.trim().is_empty()),
+        compile_cpus: std::env::var("MEBENCH_COMPILE_CPUS").ok().filter(|v| !v.trim().is_empty()),
         storage,
     };
 
@@ -142,15 +155,18 @@ async fn main() -> Result<()> {
 }
 
 /// Registration goes to the BOX REGISTRY — the table the future admin
-/// dashboard watches. Participant binding is NULL until M4 ties each agent to
-/// its student's box.
+/// dashboard watches — carrying the participant binding when this agent has
+/// one.
 async fn register(db: &sqlx::PgPool, cfg: &Config) -> Result<()> {
     sqlx::query(
-        "INSERT INTO boxes (id, role, last_seen, healthy) VALUES ($1, $2, now(), true) \
-         ON CONFLICT (id) DO UPDATE SET role = $2, last_seen = now(), healthy = true",
+        "INSERT INTO boxes (id, role, participant_id, last_seen, healthy) \
+         VALUES ($1, $2, $3, now(), true) \
+         ON CONFLICT (id) DO UPDATE SET role = $2, participant_id = $3, \
+         last_seen = now(), healthy = true",
     )
     .bind(&cfg.worker_id)
     .bind(&cfg.role)
+    .bind(cfg.participant_id)
     .execute(db)
     .await?;
     Ok(())

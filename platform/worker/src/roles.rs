@@ -108,13 +108,18 @@ pub async fn run_agent(db: PgPool, cfg: Config) -> Result<()> {
 }
 
 async fn claim_run_job(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Result<bool> {
+    // The participant binding IS the routing: a bound agent's claim matches
+    // only its own participant's rows, so nothing of anyone else's can ever
+    // run here. NULL binding (dev) matches everything.
     let row: Option<(i64, String)> = sqlx::query_as(
         "UPDATE run_jobs SET state = 'running', claimed_by = $1, updated_at = now() \
          WHERE id = (SELECT id FROM run_jobs WHERE state = 'received' \
+                     AND ($2::int IS NULL OR participant_id = $2) \
                      ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) \
          RETURNING id, source_hash",
     )
     .bind(&cfg.worker_id)
+    .bind(cfg.participant_id)
     .fetch_optional(db)
     .await?;
 
@@ -168,10 +173,12 @@ async fn claim_submission(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Resul
     let row: Option<(i64, i32, String)> = sqlx::query_as(
         "UPDATE submissions SET state = 'compiling', claimed_by = $1, updated_at = now() \
          WHERE id = (SELECT id FROM submissions WHERE state = 'received' \
+                     AND ($2::int IS NULL OR participant_id = $2) \
                      ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) \
          RETURNING id, participant_id, source_hash",
     )
     .bind(&cfg.worker_id)
+    .bind(cfg.participant_id)
     .fetch_optional(db)
     .await?;
 
@@ -387,6 +394,7 @@ async fn run_visible_tests(
 /// inherited descriptor, chain out. Shared by Phase I (runs=N) and each
 /// ladder level (runs=1).
 async fn gated_bench(
+    cfg: &Config,
     sandbox: &Sandbox,
     b: &sandbox::Box_,
     baked: &Baked,
@@ -399,10 +407,15 @@ async fn gated_bench(
         .with_context(|| format!("reading solution {}", baked.solution.display()))?;
     sandbox::place(b, sol_name, &sol_bytes).await?;
 
+    // Measured runs pin to the isolated core (§7); everything else on the box
+    // steers clear of it, so nothing shares the core with a timed event.
+    let mut opts = RunOpts::for_bench(BENCH_BOX_WALL_S);
+    opts.cpus = cfg.bench_cpus.clone();
+
     let out = sandbox
         .run_with_stream(
             b,
-            &RunOpts::for_bench(BENCH_BOX_WALL_S),
+            &opts,
             &[
                 "./harness",
                 "bench",
@@ -462,7 +475,7 @@ async fn run_phase1(
 ) -> Result<serde_json::Value> {
     let baked = ensure_baked(cfg, cfg.seed1, p1.events, p1.live_target).await?;
     stage_harness(cfg, b).await?;
-    let (exit, r) = gated_bench(sandbox, b, &baked, p1.runs, p1.deadline_ms, "phase1.sol").await?;
+    let (exit, r) = gated_bench(cfg, sandbox, b, &baked, p1.runs, p1.deadline_ms, "phase1.sol").await?;
 
     let mut out = bench_outcome(exit, &r, false);
     let o = out.as_object_mut().unwrap();
@@ -483,7 +496,7 @@ async fn run_level(
     lv: &LevelCfg,
 ) -> Result<serde_json::Value> {
     let baked = ensure_baked(cfg, cfg.seed2, lv.events, lv.live_target).await?;
-    let (exit, r) = gated_bench(sandbox, b, &baked, 1, lv.deadline_ms, "level.sol").await?;
+    let (exit, r) = gated_bench(cfg, sandbox, b, &baked, 1, lv.deadline_ms, "level.sol").await?;
 
     let crashed = !matches!(
         exit,
@@ -638,6 +651,9 @@ async fn compile_in_box(
 
     let mut opts = RunOpts::for_compile();
     opts.env.push(("PATH".into(), "/usr/bin:/bin".into()));
+    // Compiles go to the spare cores, never the isolated one: a cc1plus
+    // sharing L3 is tolerable, one sharing the measurement core is not.
+    opts.cpus = cfg.compile_cpus.clone();
     sandbox.run(b, &opts, &refs).await
 }
 

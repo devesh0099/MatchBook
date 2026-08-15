@@ -121,7 +121,16 @@ impl Sandbox {
         stream: Option<std::fs::File>,
     ) -> Result<RunOutcome> {
         let meta_path = std::env::temp_dir().join(format!("isolate-meta-{}", b.id));
-        let mut cmd = std::process::Command::new(&self.binary);
+        // taskset wraps isolate rather than living inside the box: affinity is
+        // inherited across exec, and the box has no taskset binary of its own.
+        let mut cmd = match &opts.cpus {
+            Some(cpus) => {
+                let mut c = std::process::Command::new("taskset");
+                c.arg("-c").arg(cpus).arg(&self.binary);
+                c
+            }
+            None => std::process::Command::new(&self.binary),
+        };
         cmd.arg("--cg")
             .args(["--box-id", &b.id.to_string()])
             .args(["--meta", meta_path.to_str().unwrap()])
@@ -224,6 +233,13 @@ pub struct RunOpts {
     pub inherit_fds: bool,
     pub env: Vec<(String, String)>,
     pub binds: Vec<String>,
+    /// CPU list handed to `taskset -c` AROUND the isolate invocation, so the
+    /// affinity is inherited through isolate into the harness and the
+    /// submission (the same mechanism the old bench node used and
+    /// bench-hygiene.sh asserts). On an isolated-core box, measured runs pin
+    /// to the isolated core and compiles to the spare cores; None (dev) runs
+    /// unpinned.
+    pub cpus: Option<String>,
 }
 
 impl Default for RunOpts {
@@ -239,6 +255,7 @@ impl Default for RunOpts {
             inherit_fds: false,
             env: Vec::new(),
             binds: Vec::new(),
+            cpus: None,
         }
     }
 }

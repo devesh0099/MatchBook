@@ -97,11 +97,9 @@ load_outputs() {
 
   WEB_IP="$(_out web_public_ip)"
   WEB_PRIVATE_IP="$(_out web_private_ip)"
-  POOL_IP="$(_out pool_private_ip)"
-  BENCH_IP="$(_out bench_private_ip)"
-  # Kept only for status/verify reporting; never connected to.
-  POOL_PUBLIC_IP="$(_out pool_public_ip)"
-  BENCH_PUBLIC_IP="$(_out bench_public_ip)"
+  # The fleet: AGENT_IPS[0] is agent-1, bound to participant 1.
+  mapfile -t AGENT_IPS < <(printf '%s' "$_TF_JSON" | jq -r '.agent_private_ips.value[]? // empty')
+  GOLDEN_IP="$(_out golden_private_ip)"
   AWS_REGION_TF="$(_out aws_region)"
   S3_BUCKET_TF="$(_out s3_bucket)"
   SSH_IDENTITY="$(_out ssh_identity)"
@@ -111,7 +109,8 @@ load_outputs() {
   # not exist. Expand it here rather than in each caller.
   SSH_IDENTITY="${SSH_IDENTITY/#\~/$HOME}"
 
-  export WEB_IP WEB_PRIVATE_IP POOL_IP BENCH_IP POOL_PUBLIC_IP BENCH_PUBLIC_IP AWS_REGION_TF S3_BUCKET_TF SSH_IDENTITY
+  export WEB_IP WEB_PRIVATE_IP GOLDEN_IP AWS_REGION_TF S3_BUCKET_TF SSH_IDENTITY
+  export AGENT_COUNT="${#AGENT_IPS[@]}"
 }
 
 _out() {
@@ -126,13 +125,10 @@ _out() {
 require_public_ips() {
   load_outputs
   # Only the web node needs to be reachable from here: it is the jump host for
-  # the other two, which are addressed on their private IPs.
+  # the fleet, which is addressed on private IPs.
   [[ -n "$WEB_IP" ]] || die "the web node has no public IP, so nothing is reachable.
     Set associate_public_ip = true in infra/terraform.tfvars and re-apply."
-  local missing=()
-  [[ -z "$POOL_IP"  ]] && missing+=(pool)
-  [[ -z "$BENCH_IP" ]] && missing+=(bench)
-  (( ${#missing[@]} )) && die "no private IP for: ${missing[*]} — is infra/ fully applied?"
+  (( AGENT_COUNT > 0 )) || die "no agent boxes in the terraform outputs — is infra/ fully applied?"
   return 0
 }
 
@@ -173,10 +169,14 @@ ssh_opts() {
 
 _ip_for_role() {
   case "$1" in
-    web)   printf '%s' "$WEB_IP" ;;
-    pool)  printf '%s' "$POOL_IP" ;;
-    bench) printf '%s' "$BENCH_IP" ;;
-    *) die "unknown role '$1' (want: web, pool, bench)" ;;
+    web)      printf '%s' "$WEB_IP" ;;
+    golden)   printf '%s' "$GOLDEN_IP" ;;
+    agent[0-9]*)
+      local n="${1#agent}"
+      (( n >= 1 && n <= AGENT_COUNT )) || die "no such box: $1 (fleet has $AGENT_COUNT)"
+      printf '%s' "${AGENT_IPS[$((n - 1))]}"
+      ;;
+    *) die "unknown role '$1' (want: web, agentN, golden)" ;;
   esac
 }
 

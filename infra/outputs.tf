@@ -3,34 +3,29 @@ output "web_public_ip" {
 }
 
 output "web_private_ip" {
-  description = "This is DB_BIND on the web node and the host in DATABASE_URL on both workers. Getting it wrong — leaving it on loopback — is the single most common way a three-node deployment fails."
+  description = "This is DB_BIND on the web node and the host in DATABASE_URL on every agent. Getting it wrong — leaving it on loopback — is the single most common way a multi-node deployment fails."
   value       = aws_instance.web.private_ip
 }
 
-output "pool_public_ip" {
-  description = "Outbound only. Nothing can connect IN — the worker group accepts SSH from the web group alone."
-  value       = aws_instance.pool.public_ip
-}
-
-output "bench_public_ip" {
-  description = "Outbound only, as pool."
-  value       = aws_instance.bench.public_ip
-}
-
-# The addresses operators actually reach these nodes on, via a jump through web.
+# The addresses operators actually reach the boxes on, via a jump through web.
 #
 # It has to be the private address. A security group rule that references
 # another security group only matches traffic arriving on a PRIVATE IP inside
-# the VPC — connect from the web node to a worker's PUBLIC IP and the packets
+# the VPC — connect from the web node to a box's PUBLIC IP and the packets
 # leave through the internet gateway and come back with no group membership
-# attached, so the rule does not match and the connection times out. This is a
-# quiet, confusing failure, and using the private address avoids it entirely.
-output "pool_private_ip" {
-  value = aws_instance.pool.private_ip
+# attached, so the rule does not match and the connection times out.
+output "agent_private_ips" {
+  description = "Index 0 is agent-1, bound to participant 1."
+  value       = aws_instance.agent[*].private_ip
 }
 
-output "bench_private_ip" {
-  value = aws_instance.bench.private_ip
+output "agent_public_ips" {
+  description = "Outbound only. Nothing can connect IN — the worker group accepts SSH from the web group alone."
+  value       = aws_instance.agent[*].public_ip
+}
+
+output "golden_private_ip" {
+  value = one(aws_instance.golden[*].private_ip)
 }
 
 # -i is spelled out rather than relying on the agent: the key is dedicated to
@@ -44,7 +39,7 @@ locals {
 # ops/aws/*.sh derives everything from `terraform output -json`, so that no
 # script ever takes a hostname or an IP as an argument — the failure that costs
 # an event is a stale address pasted from yesterday into a command that looks
-# right. These three exist to make that possible without re-parsing tfvars.
+# right.
 
 output "ssh_identity" {
   description = "Private key path matching the imported public key. Note the value may contain a literal ~, which a shell will not expand inside a variable."
@@ -60,35 +55,13 @@ output "s3_bucket" {
 }
 
 output "ssh" {
-  description = "Ready-to-paste SSH commands."
+  description = "Ready-to-paste SSH. Agents are reached through the web node: ops/aws/ssh.sh agent1."
   value = {
-    web   = "ssh -i ${local.identity} ubuntu@${aws_instance.web.public_ip}"
-    pool  = "ssh -i ${local.identity} ubuntu@${aws_instance.pool.public_ip}"
-    bench = "ssh -i ${local.identity} ubuntu@${aws_instance.bench.public_ip}"
+    web = "ssh -i ${local.identity} ubuntu@${aws_instance.web.public_ip}"
   }
 }
 
 output "admin_tunnel" {
   description = "The operator API has no authentication. Reaching it IS SSH access to the web node."
   value       = "ssh -i ${local.identity} -N -L 8081:127.0.0.1:8081 ubuntu@${aws_instance.web.public_ip}"
-}
-
-output "worker_env" {
-  description = "Paste into /opt/mebench/worker.env on BOTH workers, after setting the Postgres password."
-  value       = <<-EOT
-    DATABASE_URL=postgres://mebench:<POSTGRES_PASSWORD>@${aws_instance.web.private_ip}:5432/mebench
-    S3_BUCKET=${var.s3_bucket}
-    AWS_REGION=${var.aws_region}
-  EOT
-}
-
-output "web_env" {
-  description = "Export on the web node BEFORE the first `docker compose up`. POSTGRES_PASSWORD is read only when the cluster is first initialised; changing it later means deleting the pgdata volume."
-  value       = <<-EOT
-    export DB_BIND='${aws_instance.web.private_ip}'
-    export AWS_REGION='${var.aws_region}'
-    export S3_BUCKET='${var.s3_bucket}'
-    export POSTGRES_PASSWORD='<something long>'
-    export SITE_ADDRESS=':80'
-  EOT
 }

@@ -172,28 +172,34 @@ variable "web_instance_type" {
   default     = "m6i.large"
 }
 
-variable "pool_instance_type" {
-  description = "Correctness lane. Concurrency is min(nproc - 2, POOL_BOXES=8), so 8 vCPU gives 6 parallel jobs. A Run is ~2s of compile, so that is far more than 18 people can saturate."
+variable "fleet_size" {
+  description = "One box per participant (PLAN-measurement-redesign §7). agent-N serves participant N. ~$0.34/hr each in ap-south-1; a 20-box fleet over an 8h event is ~$55 of compute."
+  type        = number
+  default     = 2
+}
+
+variable "agent_instance_type" {
+  description = "Every box measures, so every box is the calibrated type. The size that matters is L3 — the ladder's depth rungs are calibrated against it. Do not change without re-running M5."
   type        = string
   default     = "c6i.2xlarge"
 }
 
-variable "bench_instance_type" {
-  description = "One job at a time. The cores are for isolating the runner, not for speed. The size that matters is L3, because the ranked depth is calibrated against it — do not change this without re-running the depth sweep."
-  type        = string
-  default     = "c6i.2xlarge"
-}
-
-variable "bench_core_count" {
-  description = "Physical cores for the bench node, with SMT off. c6i.2xlarge has 4. Must match the instance type or the launch fails."
+variable "agent_core_count" {
+  description = "Physical cores with SMT off. c6i.2xlarge has 4: OS+agent on 0, measurement isolated on 1, compiles on 2-3. Must match the instance type or the launch fails."
   type        = number
   default     = 4
 }
 
-variable "bench_dedicated" {
-  description = "Dedicated tenancy for the bench node. Off by default: it adds a flat $2/hr per region, which is ~59x the per-instance premium and roughly triples the bill. Turn it on only if the noise floor says so. Cannot be changed after launch."
+variable "golden_count" {
+  description = "The golden box for the Phase III rejudge (M6). 0 until the event's final phase — it is launched for its one decisive hour, not left running all day."
+  type        = number
+  default     = 0
+}
+
+variable "golden_dedicated" {
+  description = "Dedicated tenancy for the golden box: the flat regional fee that was too expensive fleet-wide is nothing for one box for one hour, and it removes co-tenancy from the only numbers that are final. Cannot be changed after launch."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "root_volume_gb" {

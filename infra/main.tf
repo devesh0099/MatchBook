@@ -303,9 +303,23 @@ resource "aws_instance" "web" {
   tags = { Name = "${var.name_prefix}-web", Role = "web" }
 }
 
-resource "aws_instance" "pool" {
+# The fleet: one box per participant (PLAN-measurement-redesign §7). Every box
+# measures, so every box gets the settings the old bench node had — and two of
+# them CANNOT be changed after launch:
+#
+#   * threads_per_core = 1 — SMT off from boot. A sibling thread sharing the
+#     measurement core is exactly the contamination the design refuses. With
+#     SMT off a c6i.2xlarge presents 4 whole cores: 0 for the OS and agent,
+#     1 isolated for measurement, 2-3 for compiles.
+#
+#   * tenancy stays default for the fleet — the measured noise floor says
+#     shared tenancy is fine for pass/fail rungs, and the golden box is where
+#     dedicated tenancy buys its one decisive hour (M6).
+resource "aws_instance" "agent" {
+  count = var.fleet_size
+
   ami                         = var.ami_id
-  instance_type               = var.pool_instance_type
+  instance_type               = var.agent_instance_type
   subnet_id                   = var.subnet_id
   key_name                    = aws_key_pair.this.key_name
   vpc_security_group_ids      = [aws_security_group.worker.id]
@@ -313,61 +327,17 @@ resource "aws_instance" "pool" {
   user_data                   = local.user_data
   user_data_replace_on_change = true
   associate_public_ip_address = var.associate_public_ip
-
-  # This node compiles and runs participant-submitted C++. The worker is a plain
-  # systemd process, not a container, so one hop is enough — and keeping it at 1
-  # means a container started here later cannot reach the credentials by
-  # accident. http_tokens = "required" turns IMDSv1 off: with it optional, any
-  # SSRF or isolate escape reads the instance credentials with a single
-  # unauthenticated GET, and those credentials can overwrite every participant's
-  # source in the artifact bucket.
-  metadata_options {
-    http_endpoint               = "enabled"
-    http_tokens                 = "required"
-    http_put_response_hop_limit = 1
-    instance_metadata_tags      = "disabled"
-  }
-
-  root_block_device {
-    volume_size = var.root_volume_gb
-    volume_type = "gp3"
-    encrypted   = true
-  }
-
-  tags = { Name = "${var.name_prefix}-pool", Role = "pool" }
-}
-
-# The bench node. Two settings here CANNOT be changed after launch, which is
-# the main reason this file exists at all:
-#
-#   * tenancy — "dedicated" costs a flat $2/hr per region on top of a ~10%
-#     instance premium, so it is off by default. Turn it on only if
-#     ops/noise-floor/analyze.py says the spread justifies it. A cheaper plan
-#     is to leave it off all day and launch a second, dedicated bench node for
-#     the rejudge block alone: same instance type, roughly two hours, ~$5.
-#
-#   * threads_per_core = 1 — SMT off. A sibling thread sharing the core with
-#     the timed run is exactly the contamination the whole design refuses.
-#     With SMT off a c6i.2xlarge presents 4 cores, which is what BENCH_CPU and
-#     ISOLATED_CPUS must be set against.
-resource "aws_instance" "bench" {
-  ami                         = var.ami_id
-  instance_type               = var.bench_instance_type
-  subnet_id                   = var.subnet_id
-  key_name                    = aws_key_pair.this.key_name
-  vpc_security_group_ids      = [aws_security_group.worker.id]
-  iam_instance_profile        = local.instance_profile
-  user_data                   = local.user_data
-  user_data_replace_on_change = true
-  associate_public_ip_address = var.associate_public_ip
-  tenancy                     = var.bench_dedicated ? "dedicated" : "default"
 
   cpu_options {
-    core_count       = var.bench_core_count
+    core_count       = var.agent_core_count
     threads_per_core = 1
   }
 
-  # As pool: untrusted code, no containers, so one hop and IMDSv2 only.
+  # These boxes compile and run participant-submitted C++. The agent is a
+  # plain systemd process, not a container, so one hop is enough — and
+  # http_tokens = "required" turns IMDSv1 off: with it optional, any SSRF or
+  # isolate escape reads the instance credentials with a single
+  # unauthenticated GET.
   metadata_options {
     http_endpoint               = "enabled"
     http_tokens                 = "required"
@@ -381,5 +351,45 @@ resource "aws_instance" "bench" {
     encrypted   = true
   }
 
-  tags = { Name = "${var.name_prefix}-bench", Role = "bench" }
+  # 1-based: agent-1 serves participant 1, which is how deploy.sh writes the
+  # binding into each box's worker.env.
+  tags = { Name = "${var.name_prefix}-agent-${count.index + 1}", Role = "agent" }
+}
+
+# The golden box (M6): identical layout, dedicated tenancy for the one
+# decisive hour. Count 0 until the rejudge lands — launched for the event's
+# final phase, not left running all day.
+resource "aws_instance" "golden" {
+  count = var.golden_count
+
+  ami                         = var.ami_id
+  instance_type               = var.agent_instance_type
+  subnet_id                   = var.subnet_id
+  key_name                    = aws_key_pair.this.key_name
+  vpc_security_group_ids      = [aws_security_group.worker.id]
+  iam_instance_profile        = local.instance_profile
+  user_data                   = local.user_data
+  user_data_replace_on_change = true
+  associate_public_ip_address = var.associate_public_ip
+  tenancy                     = var.golden_dedicated ? "dedicated" : "default"
+
+  cpu_options {
+    core_count       = var.agent_core_count
+    threads_per_core = 1
+  }
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+    instance_metadata_tags      = "disabled"
+  }
+
+  root_block_device {
+    volume_size = var.root_volume_gb
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  tags = { Name = "${var.name_prefix}-golden", Role = "golden" }
 }
