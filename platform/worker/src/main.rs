@@ -1,15 +1,14 @@
-//! flashmatch worker.
+//! flashmatch agent (PLAN-measurement-redesign §7).
 //!
-//!   worker --role pool     compile + verify, 4-8 boxes in parallel
-//!   worker --role bench    ranked runs, strictly one at a time
+//!   worker --role agent    the per-box agent: Run and Submit pipelines,
+//!                          phases 0 -> I -> II, one job at a time
 //!
-//! Both roles poll Postgres directly. Nothing containerized ever runs on the
-//! benchmark node: these are plain systemd units.
+//! (`--role pool` is accepted as an alias while the compose stack stands in
+//! for the fleet; the golden-box role arrives with the rejudge in M6.)
 //!
-//! The bench role is never scaled. Two submissions on different physical cores
-//! still share L3, memory bandwidth and the memory controller, and an order
-//! book is memory-latency-bound — a neighbour thrashing L3 reintroduces exactly
-//! the noisy-neighbour problem the dedicated node was bought to avoid.
+//! The agent polls Postgres directly — no broker. On the real fleet each
+//! agent is bound to its participant's box; on the compose stack one agent
+//! serves everyone, which exercises the identical code path.
 
 mod roles;
 mod sandbox;
@@ -62,20 +61,16 @@ pub struct Config {
     pub harness_bin: String,
     pub gen_bin: String,
     pub reference_so: String,
-    /// Fixed seed for ranked runs, from MEBENCH_BENCH_SEED. None means a fresh
-    /// random seed per submission, which is the original behaviour.
-    ///
-    /// Randomising is what makes the hidden stream ungameable: an engine tuned
-    /// to one book shape gains nothing when the next submission draws another.
-    /// The cost is that two submissions are measured on DIFFERENT workloads, so
-    /// the live leaderboard compares them only loosely — measured at 11% spread
-    /// on p50 for one identical engine across eleven seeds. That is why the
-    /// rejudge pins one seed for everyone and is the authoritative ranking.
-    ///
-    /// Set this to make the live board directly comparable, accepting that a
-    /// participant who submits repeatedly can now tune to the one stream.
-    /// A rejudge still overrides it: pinned_seed takes precedence.
-    pub bench_seed: Option<u64>,
+    /// The fixed measurement seeds (PLAN-measurement-redesign §4). SEED1
+    /// drives Phase I and the hidden verify's 50k prefix; SEED2 drives every
+    /// ladder level. SEED3 is the sealed rejudge seed and never reaches an
+    /// agent box — it arrives with the golden role in M6. Fixed seeds are
+    /// what let streams and solutions be baked once and judged by lookup.
+    pub seed1: u64,
+    pub seed2: u64,
+    /// Where baked streams and solutions live. On the real fleet this is AMI
+    /// content; in dev the agent bakes lazily on first use.
+    pub bake_dir: String,
     pub storage: Arc<Storage>,
 }
 
@@ -99,8 +94,11 @@ async fn main() -> Result<()> {
             role = args[i + 1].clone();
         }
     }
-    if role != "pool" && role != "bench" {
-        anyhow::bail!("usage: worker --role pool|bench");
+    if role == "pool" {
+        role = "agent".into(); // compose-era alias
+    }
+    if role != "agent" {
+        anyhow::bail!("usage: worker --role agent");
     }
 
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
@@ -125,8 +123,14 @@ async fn main() -> Result<()> {
         harness_bin: env_or("MEBENCH_HARNESS", "/opt/mebench/bin/harness"),
         gen_bin: env_or("MEBENCH_GEN", "/opt/mebench/bin/gen"),
         reference_so: env_or("MEBENCH_REFERENCE_SO", "/opt/mebench/lib/libreference_engine.so"),
-        // Unset or unparseable means random-per-submission, as before.
-        bench_seed: std::env::var("MEBENCH_BENCH_SEED").ok().and_then(|v| v.trim().parse().ok()),
+        // Dev defaults; the event's seeds are chosen before kickoff and set in
+        // the environment. Never published.
+        seed1: env_or("MEBENCH_SEED1", "101").trim().parse().unwrap_or(101),
+        seed2: env_or("MEBENCH_SEED2", "202").trim().parse().unwrap_or(202),
+        bake_dir: env_or(
+            "MEBENCH_BAKE",
+            &std::env::temp_dir().join("mebench-bake").to_string_lossy(),
+        ),
         storage,
     };
 
@@ -134,15 +138,15 @@ async fn main() -> Result<()> {
     spawn_heartbeat(db.clone(), cfg.worker_id.clone());
 
     tracing::info!("worker {} starting as {role}", cfg.worker_id);
-    match role.as_str() {
-        "pool" => roles::run_pool(db, cfg).await,
-        _ => roles::run_bench(db, cfg).await,
-    }
+    roles::run_agent(db, cfg).await
 }
 
+/// Registration goes to the BOX REGISTRY — the table the future admin
+/// dashboard watches. Participant binding is NULL until M4 ties each agent to
+/// its student's box.
 async fn register(db: &sqlx::PgPool, cfg: &Config) -> Result<()> {
     sqlx::query(
-        "INSERT INTO workers (id, role, last_seen, healthy) VALUES ($1, $2, now(), true) \
+        "INSERT INTO boxes (id, role, last_seen, healthy) VALUES ($1, $2, now(), true) \
          ON CONFLICT (id) DO UPDATE SET role = $2, last_seen = now(), healthy = true",
     )
     .bind(&cfg.worker_id)
@@ -152,20 +156,16 @@ async fn register(db: &sqlx::PgPool, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// The API marks a worker unhealthy after 90s of silence, and bench jobs then
-/// park as pending_benchmark rather than erroring — losing the bench node must
-/// not kill the event.
+/// The janitor marks a box unhealthy after 90s of silence. A box condemned
+/// for silence is healthy again the moment it speaks; a verdict recorded as
+/// `held` (the operator's) is NOT undone here.
 fn spawn_heartbeat(db: sqlx::PgPool, worker_id: String) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(15));
         loop {
             ticker.tick().await;
-            // A worker the janitor marked unhealthy for silence is healthy again
-            // the moment it speaks — otherwise a transient database blip
-            // condemns it for the rest of the event. A verdict recorded as
-            // `held` (spot-check deviation, or the operator) is NOT undone here.
             if let Err(e) = sqlx::query(
-                "UPDATE workers SET last_seen = now(), \
+                "UPDATE boxes SET last_seen = now(), \
                  healthy = CASE WHEN COALESCE(detail->>'held','false') = 'true' \
                                 THEN healthy ELSE true END \
                  WHERE id = $1",

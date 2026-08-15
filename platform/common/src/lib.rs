@@ -16,26 +16,25 @@ pub enum SubState {
     Received,
     Compiling,
     CompileFailed,
+    /// Phase 0: the visible spec tests. All must pass.
+    Testing,
+    TestsFailed,
+    /// Phase 0: the hidden differential verify, on a fixed 50k prefix of the
+    /// Phase I stream (PLAN-measurement-redesign §4).
     Verifying,
     VerifyFailed,
     /// Distinct from VerifyFailed on purpose: a timeout and a wrong answer are
     /// different bugs, and conflating them under one red X wastes participant
-    /// time (plan section 2).
+    /// time.
     VerifyTimeout,
-    VerifyPassed,
-    BenchQueued,
-    /// The bench node is unhealthy. Submissions park here rather than erroring,
-    /// so losing the node does not kill the event.
-    PendingBenchmark,
-    Benchmarking,
-    /// Passed correctness, diverged on the benchmark stream. Its own outcome,
-    /// not a generic failure.
-    BenchVerifyFailed,
-    /// Correct, but never benchmarked: newer verified code from the same
-    /// participant replaced it while it was waiting. Only ever reached from a
-    /// WAITING state — a submission that is already being timed is never
-    /// superseded.
-    Superseded,
+    /// Phase I: the bulk run — 3 gated runs, median percentile chain.
+    Phase1,
+    /// Missed the Phase I deadline or diverged on its stream.
+    Phase1Failed,
+    /// Phase II: the ladder. A climb that stops at rung k is still `done` —
+    /// the level reached IS the result, so phase2 has no failure state of its
+    /// own; only a worker error lands in `error`.
+    Phase2,
     Done,
     Error,
 }
@@ -46,9 +45,10 @@ impl SubState {
         matches!(
             self,
             SubState::CompileFailed
+                | SubState::TestsFailed
                 | SubState::VerifyFailed
                 | SubState::VerifyTimeout
-                | SubState::BenchVerifyFailed
+                | SubState::Phase1Failed
                 | SubState::Done
                 | SubState::Error
         )
@@ -67,6 +67,9 @@ pub mod harness_exit {
     pub const TIMEOUT: i32 = 3;
     /// The node, not the submission.
     pub const UNHEALTHY: i32 = 4;
+    /// The gate: correct as far as it got, too slow to finish in the budget.
+    /// A deadline is never a score (PLAN-measurement-redesign §3).
+    pub const DEADLINE: i32 = 5;
 }
 
 /// Build the S3 client.

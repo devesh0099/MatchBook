@@ -16,13 +16,6 @@ use sha2::{Digest, Sha256};
 use common::SubState;
 use crate::state::{leaderboard_from_db, AppState, Storage};
 
-/// One benchmark run per participant per 15 minutes, checked at enqueue.
-
-/// Rough seconds per benchmark job, used only for the queue ETA. Measured
-/// against the reference; the bench worker writes back real per-run wall times,
-/// so this is a starting estimate and not a claim.
-const BENCH_JOB_SECS: i64 = 45;
-
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
 
 pub fn router(state: AppState) -> Router {
@@ -136,15 +129,24 @@ async fn store_source(st: &AppState, source: &str) -> Result<String, String> {
 
 // ---------------------------------------------------------------- run
 
-/// LeetCode "Run": compile the draft and execute the visible tests. Unlimited,
-/// returns in seconds, creates no submission. This is the iteration loop, so
-/// the pool claims run_jobs ahead of submissions.
+/// "Run": Phase 0's visible tests + Phase I, feedback only — the exact
+/// instrument that will judge them, on every iteration. Unlimited, creates no
+/// submission, and the agent claims run_jobs ahead of submissions.
+///
+/// Rejected while a Submit is evaluating: the box is theirs, but the
+/// measurement core is single-file (PLAN-measurement-redesign §3 mechanics).
 async fn run(
     State(st): State<AppState>,
     Json(body): Json<DraftBody>,
 ) -> ApiResult<serde_json::Value> {
     if body.source.len() > MAX_SOURCE_BYTES {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "source exceeds 256 KB"));
+    }
+    if let Some(active) = active_submission(&st, body.participant_id).await? {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!("submission #{active} is being evaluated — Run is available again the moment it finishes"),
+        ));
     }
     let hash = store_source(&st, &body.source).await.map_err(|e| internal(e))?;
 
@@ -188,20 +190,14 @@ async fn run_result(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResul
 pub struct SubmitResponse {
     pub submission_id: i64,
     pub source_hash: String,
-    /// Correctness is always accepted. This says what will happen on the bench
-    /// side, at enqueue time — never silently dropped later.
-    pub bench_will_queue: bool,
-    pub bench_reason: String,
-    pub bench_wait_secs: i64,
 }
 
-/// LeetCode "Submit": snapshot the draft as a submission, run the full
-/// correctness lane on a fresh seed, then enqueue for benchmark per the rate
-/// rules.
-///
-/// The rate limit is evaluated HERE, at enqueue, and the answer is returned in
-/// this response. Queueing a job and silently discarding it later generates
-/// angry questions at hour four (plan section 2).
+/// "Submit": snapshot the draft as a submission and run the whole gauntlet —
+/// Phase 0 (tests + hidden verify), Phase I, Phase II ladder — on the
+/// participant's box. Unlimited, EXCEPT one evaluation at a time: a Submit
+/// while any evaluation of theirs is running is rejected with a clear
+/// message, not queued and not cancel-and-replace (recorded decision,
+/// PLAN-measurement-redesign §3). One-at-a-time is the only throttle.
 async fn submit(
     State(st): State<AppState>,
     Json(body): Json<DraftBody>,
@@ -212,12 +208,22 @@ async fn submit(
     if body.source.len() > MAX_SOURCE_BYTES {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "source exceeds 256 KB"));
     }
+    if let Some(active) = active_submission(&st, body.participant_id).await? {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!(
+                "submission #{active} is still being evaluated — one evaluation at a time; \
+                 submit again the moment it finishes"
+            ),
+        ));
+    }
     let hash = store_source(&st, &body.source).await.map_err(|e| internal(e))?;
 
     let mut tx = st.db.begin().await.map_err(internal)?;
 
     // Snapshot the draft into a submission, so "what code produced this
-    // result" is always answerable.
+    // result" is always answerable. This S3-stored snapshot is also what the
+    // rejudge judges: latest stored via Submit, regardless of how it fares.
     let (id,): (i64,) = sqlx::query_as(
         "INSERT INTO submissions (participant_id, source_hash, state) \
          VALUES ($1, $2, 'received') RETURNING id",
@@ -238,92 +244,28 @@ async fn submit(
     .await
     .map_err(internal)?;
 
-    // Both rate rules in one transaction: one bench run per 15 minutes, and at
-    // most one pending bench job per participant. The second rule is what makes
-    // the queue self-throttling — otherwise five spammed submissions occupy
-    // twelve minutes of a serialized resource.
-    let slot: Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)> = sqlx::query_as(
-        "SELECT last_bench_at, pending_sub FROM bench_slots WHERE participant_id = $1 FOR UPDATE",
-    )
-    .bind(body.participant_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(internal)?;
-
-    let inc = incumbent_state(&mut *tx, &slot).await;
-    let (will_queue, reason, wait) = bench_eligibility(slot, inc);
-
     tx.commit().await.map_err(internal)?;
 
-    Ok(Json(SubmitResponse {
-        submission_id: id,
-        source_hash: hash,
-        bench_will_queue: will_queue,
-        bench_reason: reason,
-        bench_wait_secs: wait,
-    }))
+    Ok(Json(SubmitResponse { submission_id: id, source_hash: hash }))
 }
 
-/// The bench queue rule, in one place.
-///
-/// ONE rule, not two: at most one pending benchmark job per participant. There
-/// used to also be a fixed fifteen-minute cooldown; it was removed because it
-/// throttled the wrong thing. The benchmark node is serialised, so the resource
-/// is protected by the pending rule alone — worst-case queue depth is the
-/// number of participants, whatever anyone does — and the cooldown only added
-/// a wait for people who were already waiting behind their own job.
-///
-/// This reports what submitting WOULD DO; it is not permission to submit.
-/// Submitting is always allowed. Holding an outstanding benchmark used to grey
-/// the Submit button, which made the two useful cases unreachable: replacing a
-/// job that is only waiting, and letting the next one queue itself when a
-/// running job ends. A disabled button also could not be honest — "one at a
-/// time" reads as "you may not submit" when what actually happens is that your
-/// newest correct code takes the slot.
-///
-/// Both `submit` and `queue` call here, so the editor's message and the
-/// server's behaviour cannot drift apart.
-fn bench_eligibility(
-    slot: Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)>,
-    incumbent_state: Option<SubState>,
-) -> (bool, String, i64) {
-    match (slot, incumbent_state) {
-        // Being timed right now. Never interrupted; the new one is held and the
-        // janitor queues it when this finishes.
-        (Some((_, Some(pending))), Some(SubState::Benchmarking)) => (
-            false,
-            format!(
-                "submission #{pending} is being benchmarked now — a new submission queues \
-                 itself as soon as it finishes"
-            ),
-            0,
-        ),
-        // Waiting, not running: a new submission replaces it and keeps its place.
-        (Some((_, Some(pending))), _) => (
-            true,
-            format!("replaces submission #{pending}, which is still waiting, and keeps its place in the queue"),
-            0,
-        ),
-        _ => (true, "eligible".to_string(), 0),
-    }
-}
-
-/// The state of the participant's outstanding bench job, if they have one.
-async fn incumbent_state(
-    db: impl sqlx::PgExecutor<'_>,
-    slot: &Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)>,
-) -> Option<SubState> {
-    let pending = match slot {
-        Some((_, Some(p))) => *p,
-        _ => return None,
-    };
-    let row: Option<(SubState,)> = sqlx::query_as("SELECT state FROM submissions WHERE id = $1")
-        .bind(pending)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
-    row.map(|r| r.0)
+/// The participant's in-flight submission, if any. The one-at-a-time rule in
+/// one place, used by submit, run, and the status endpoint, so the editor's
+/// message and the server's behaviour cannot drift apart.
+async fn active_submission(
+    st: &AppState,
+    participant_id: i32,
+) -> Result<Option<i64>, (StatusCode, Json<serde_json::Value>)> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM submissions WHERE participant_id = $1 \
+         AND state IN ('received','compiling','testing','verifying','phase1','phase2') \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(participant_id)
+    .fetch_optional(&st.db)
+    .await
+    .map_err(internal)?;
+    Ok(row.map(|r| r.0))
 }
 
 // ---------------------------------------------------------------- results
@@ -336,22 +278,18 @@ pub struct SubmissionRow {
     pub state: SubState,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub verify_detail: Option<serde_json::Value>,
-    pub p50_ns: Option<f64>,
-    pub p95_ns: Option<f64>,
-    pub p99_ns: Option<f64>,
-    pub percentiles: Option<serde_json::Value>,
-    pub runs: Option<serde_json::Value>,
-    pub timeline: Option<serde_json::Value>,
-    pub probe_cost_ns: Option<f64>,
-    pub run_p50s_ns: Option<Vec<f64>>,
-    pub discard_count: Option<i32>,
-
+    /// One stable blob per phase — the dashboard contract.
+    pub phase0: Option<serde_json::Value>,
+    pub phase1: Option<serde_json::Value>,
+    pub phase2: Option<serde_json::Value>,
+    pub max_level: Option<i32>,
+    pub top_p50_ns: Option<f64>,
+    pub top_p95_ns: Option<f64>,
+    pub top_p99_ns: Option<f64>,
 }
 
 const SUBMISSION_COLUMNS: &str = "id, participant_id, source_hash, state, created_at, updated_at, \
-     verify_detail, p50_ns, p95_ns, p99_ns, percentiles, runs, timeline, probe_cost_ns, \
-     run_p50s_ns, discard_count";
+     phase0, phase1, phase2, max_level, top_p50_ns, top_p95_ns, top_p99_ns";
 
 async fn submission(
     State(st): State<AppState>,
@@ -415,45 +353,19 @@ async fn leaderboard(State(st): State<AppState>) -> ApiResult<serde_json::Value>
     Ok(Json(json!({ "frozen": is_frozen, "entries": entries })))
 }
 
-// ---------------------------------------------------------------- queue
+// ---------------------------------------------------------------- status
 
-/// "3 ahead, ~4 min" is the difference between patience and repeated
-/// resubmission (plan section 2).
+/// Nobody queues behind anybody anymore — the box is theirs. What remains to
+/// report is the one-at-a-time rule: whether THEIR evaluation is in flight,
+/// by exactly the rule submit() enforces.
 async fn queue(State(st): State<AppState>, Query(q): Query<WhoQuery>) -> ApiResult<serde_json::Value> {
-    let (depth,): (i64,) =
-        sqlx::query_as("SELECT count(*) FROM submissions WHERE state IN ('bench_queued','benchmarking')")
-            .fetch_one(&st.db)
-            .await
-            .map_err(internal)?;
-
-    let mine: Option<(i64,)> = sqlx::query_as(
-        "SELECT count(*) FROM submissions s WHERE s.state = 'bench_queued' \
-         AND s.id < COALESCE((SELECT pending_sub FROM bench_slots WHERE participant_id = $1), \
-                             9223372036854775807)",
-    )
-    .bind(q.participant_id)
-    .fetch_optional(&st.db)
-    .await
-    .map_err(internal)?;
-
-    let ahead = mine.map(|m| m.0).unwrap_or(depth);
-
-    // Read-only, and by exactly the rule submit() enforces.
-    let slot: Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)> =
-        sqlx::query_as("SELECT last_bench_at, pending_sub FROM bench_slots WHERE participant_id = $1")
-            .bind(q.participant_id)
-            .fetch_optional(&st.db)
-            .await
-            .map_err(internal)?;
-    let inc = incumbent_state(&st.db, &slot).await;
-    let (ready, reason, wait) = bench_eligibility(slot, inc);
-
+    let active = active_submission(&st, q.participant_id).await?;
     Ok(Json(json!({
-        "depth": depth,
-        "ahead": ahead,
-        "eta_secs": ahead * BENCH_JOB_SECS,
-        "bench_ready": ready,
-        "bench_reason": reason,
-        "bench_wait_secs": wait,
+        "evaluating": active.is_some(),
+        "submission_id": active,
+        "reason": match active {
+            Some(id) => format!("submission #{id} is being evaluated — one evaluation at a time"),
+            None => "eligible".to_string(),
+        },
     })))
 }

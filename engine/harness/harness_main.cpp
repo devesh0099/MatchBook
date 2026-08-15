@@ -241,6 +241,13 @@ int run_verify(int argc, char** argv) {
 
 // Shared by both modes: a stream is either read from a file or generated in
 // process from its seed.
+//
+// With --stream/--stream-fd, a non-zero `events` TRUNCATES the loaded stream
+// to its first N events. That is the prefix semantics the redesign's fixed
+// seeds need (PLAN-measurement-redesign §4): the hidden verify runs on a 50k
+// prefix of the Phase I stream, cut from the same baked bytes rather than
+// regenerated, so what it checks is literally the opening of what Phase I
+// times.
 bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, uint64_t seed,
                  const std::string& profile_name, uint64_t events,
                  std::vector<mebench::WireEvent>& out, mebench::Profile& profile_out,
@@ -260,6 +267,7 @@ bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, 
     }
     profile_out = static_cast<mebench::Profile>(header.profile_id);
     live_target_out = static_cast<uint32_t>(header.live_target);
+    if (events > 0 && events < out.size()) out.resize(events);
     return true;
   }
   if (!stream_path.empty()) {
@@ -270,6 +278,7 @@ bool load_stream(const std::string& stream_path, int stream_fd, bool have_seed, 
     }
     profile_out = static_cast<mebench::Profile>(header.profile_id);
     live_target_out = static_cast<uint32_t>(header.live_target);
+    if (events > 0 && events < out.size()) out.resize(events);
     return true;
   }
   if (have_seed && events > 0) {

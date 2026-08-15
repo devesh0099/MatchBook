@@ -498,6 +498,9 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
     ++completed;
   }
 
+  // Every run that reached here processed the whole stream.
+  r.events_processed = r.events_total;
+
   // Median of the per-run p50s. Never an average of per-event latencies across
   // runs — that would destroy the tail.
   r.p50_ns = median_of(r.run_p50s_ns);

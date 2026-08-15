@@ -34,13 +34,14 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/admin/events", get(events))
         .route("/admin/queue", get(queue_detail))
-        .route("/admin/discards", get(discards))
         .route("/admin/requeue/:id", post(requeue))
         .route("/admin/freeze", post(freeze))
         .route("/admin/unfreeze", post(unfreeze))
-        .route("/admin/bench/:state", post(set_bench_health))
+        .route("/admin/box/:id/:health", post(set_box_health))
         .route("/admin/leaderboard/rebuild", post(rebuild))
-        .route("/admin/rejudge", post(rejudge))
+        // The rejudge block returns with the golden-box role (M6): it reads
+        // every participant's LAST submission stored via Submit and writes
+        // rejudge_results on the sealed seed.
         .with_state(state)
 }
 
@@ -75,6 +76,8 @@ async fn events(State(st): State<AppState>, Query(q): Query<LimitQuery>) -> R {
     Ok(Json(json!({ "events": out })))
 }
 
+/// The dashboard-stub read: submission states and the box registry — exactly
+/// the tables the future admin dashboard renders.
 async fn queue_detail(State(st): State<AppState>) -> R {
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT state::text, count(*) FROM submissions GROUP BY state ORDER BY 2 DESC",
@@ -82,46 +85,27 @@ async fn queue_detail(State(st): State<AppState>) -> R {
     .fetch_all(&st.db)
     .await
     .map_err(oops)?;
-    let workers: Vec<(String, String, bool, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as("SELECT id, role, healthy, last_seen FROM workers ORDER BY id")
+    let boxes: Vec<(String, String, bool, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT id, role, healthy, last_seen FROM boxes ORDER BY id")
             .fetch_all(&st.db)
             .await
             .map_err(oops)?;
     Ok(Json(json!({
         "states": rows.into_iter().map(|(s, n)| json!({"state": s, "count": n})).collect::<Vec<_>>(),
-        "workers": workers.into_iter()
+        "boxes": boxes.into_iter()
             .map(|(id, role, healthy, seen)| json!({"id": id, "role": role, "healthy": healthy, "last_seen": seen}))
             .collect::<Vec<_>>(),
     })))
 }
 
-/// A rising machine-signal discard rate is the earliest warning that the bench
-/// node has become unstable (plan section 8). Watch this, not the leaderboard.
-async fn discards(State(st): State<AppState>) -> R {
-    let (total, discarded): (i64, Option<i64>) = sqlx::query_as(
-        "SELECT count(*), sum(discard_count) FROM submissions WHERE discard_count IS NOT NULL",
-    )
-    .fetch_one(&st.db)
-    .await
-    .map_err(oops)?;
-    let repeat: Vec<(i64, i32)> = sqlx::query_as(
-        "SELECT id, discard_count FROM submissions WHERE discard_count >= 3 ORDER BY id DESC LIMIT 20",
-    )
-    .fetch_all(&st.db)
-    .await
-    .map_err(oops)?;
-    Ok(Json(json!({
-        "submissions": total,
-        "total_discards": discarded.unwrap_or(0),
-        "repeat_offenders": repeat.into_iter().map(|(id, n)| json!({"id": id, "discards": n})).collect::<Vec<_>>(),
-    })))
-}
-
-/// Manual requeue, kept available throughout the event. Goes to the front, like
-/// every other requeue that was not the participant's fault.
+/// Manual re-evaluation: back to the front of the participant's own lane. The
+/// phase blobs are cleared so a half-written climb cannot masquerade as the
+/// new result.
 async fn requeue(State(st): State<AppState>, Path(id): Path<i64>) -> R {
     sqlx::query(
-        "UPDATE submissions SET state = 'bench_queued', claimed_by = NULL, requeue_priority = 1 \
+        "UPDATE submissions SET state = 'received', claimed_by = NULL, \
+         phase0 = NULL, phase1 = NULL, phase2 = NULL, max_level = NULL, \
+         top_p50_ns = NULL, top_p95_ns = NULL, top_p99_ns = NULL, updated_at = now() \
          WHERE id = $1",
     )
     .bind(id)
@@ -161,97 +145,41 @@ async fn unfreeze(State(st): State<AppState>) -> R {
     Ok(Json(json!({ "frozen": false })))
 }
 
-/// Mark the bench node healthy or unhealthy by hand. Unhealthy parks queued
-/// jobs as pending_benchmark; it never errors them.
-async fn set_bench_health(State(st): State<AppState>, Path(state): Path<String>) -> R {
-    let healthy = match state.as_str() {
+/// Mark one box healthy or unhealthy by hand — the operator's lever over the
+/// registry. Marking unhealthy is a deliberate verdict: flagged `held` so the
+/// agent's own heartbeat does not undo it on the next tick.
+async fn set_box_health(
+    State(st): State<AppState>,
+    Path((id, health)): Path<(String, String)>,
+) -> R {
+    let healthy = match health.as_str() {
         "healthy" => true,
         "unhealthy" => false,
         _ => return Err((axum::http::StatusCode::BAD_REQUEST, "use healthy|unhealthy".into())),
     };
-    // Marking unhealthy by hand is a deliberate verdict: flag it `held` so the
-    // worker's own heartbeat does not undo it on the next tick.
     sqlx::query(
-        "UPDATE workers SET healthy = $1, \
+        "UPDATE boxes SET healthy = $1, \
          detail = CASE WHEN $1 THEN NULL ELSE jsonb_build_object('held', true) END \
-         WHERE role = 'bench'",
+         WHERE id = $2",
     )
     .bind(healthy)
+    .bind(&id)
     .execute(&st.db)
     .await
     .map_err(oops)?;
-    log(&st, None, "admin_bench_health", json!({ "healthy": healthy }))
+    log(&st, None, "admin_box_health", json!({ "box": id, "healthy": healthy }))
         .await
         .map_err(oops)?;
-    Ok(Json(json!({ "bench_healthy": healthy })))
+    Ok(Json(json!({ "box": id, "healthy": healthy })))
 }
 
-/// Redis is disposable. On restart, or on any suspicion of drift, rebuild the
-/// serving copy from Postgres — it is 18 rows.
-///
-/// The `leaderboard` ZSET below is written here and **read nowhere**: `/api/
-/// leaderboard` serves from Postgres, and only `leaderboard:frozen` (a plain
-/// JSON blob) is ever read back. Do not make it a serving path. A ZSET scored on
-/// p50 cannot express the ranking: equal scores order lexicographically by
-/// member, so a tie would resolve by handle instead of by the earlier
-/// submission. `leaderboard_from_db` is the only thing that ranks.
+/// Redis holds only the frozen snapshot, and it is disposable: on any
+/// suspicion of drift this recomputes the ranking from Postgres and — when
+/// the board is frozen — refreshes the snapshot from it.
+/// `leaderboard_from_db` is the only thing that ranks.
 async fn rebuild(State(st): State<AppState>) -> R {
     let entries = leaderboard_from_db(&st.db).await.map_err(oops)?;
-    if let Some(client) = &st.redis {
-        let mut conn = client.get_multiplexed_async_connection().await.map_err(oops)?;
-        let _: () = redis::cmd("DEL").arg("leaderboard").query_async(&mut conn).await.map_err(oops)?;
-        for e in &entries {
-            let _: () = redis::cmd("ZADD")
-                .arg("leaderboard")
-                .arg(e.p50_ns)
-                .arg(&e.handle)
-                .query_async(&mut conn)
-                .await
-                .map_err(oops)?;
-        }
-    }
     Ok(Json(json!({ "rebuilt": entries.len() })))
-}
-
-#[derive(Deserialize)]
-pub struct RejudgeQuery {
-    /// One seed for the whole block. Omit and one is chosen for you.
-    pub seed: Option<i64>,
-}
-
-/// Queue every participant's final `done` submission for re-measurement on ONE
-/// shared seed.
-///
-/// This is what makes absolute scoring defensible without drift correction: all
-/// final numbers then come from the same short window on the same machine, so
-/// cross-time comparability stops being required. The live leaderboard during
-/// the event is indicative; this is the authoritative measurement.
-///
-/// Bracket it with a reference run on either side. If the two disagree, rerun
-/// the block before announcing.
-async fn rejudge(State(st): State<AppState>, Query(q): Query<RejudgeQuery>) -> R {
-    let seed = q.seed.unwrap_or_else(|| {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() & 0x7FFF_FFFF) as i64
-    });
-
-    let rows: Vec<(i64,)> = sqlx::query_as(
-        "WITH final AS (            SELECT DISTINCT ON (participant_id) id FROM submissions            WHERE state = 'done' ORDER BY participant_id, created_at DESC)          UPDATE submissions s SET state = 'bench_queued', claimed_by = NULL,            requeue_priority = 1, bench_queued_at = now(), bench_seed_set = ARRAY[$1::bigint]          FROM final WHERE s.id = final.id RETURNING s.id",
-    )
-    .bind(seed)
-    .fetch_all(&st.db)
-    .await
-    .map_err(oops)?;
-
-    log(&st, None, "rejudge_started", json!({ "seed": seed, "submissions": rows.len() }))
-        .await
-        .map_err(oops)?;
-
-    Ok(Json(json!({
-        "seed": seed,
-        "queued": rows.len(),
-        "submissions": rows.into_iter().map(|r| r.0).collect::<Vec<_>>(),
-    })))
 }
 
 async fn set_flag(st: &AppState, key: &str, value: bool) -> anyhow::Result<()> {

@@ -1,19 +1,25 @@
--- 001_schema.sql — the whole data model.
+-- 001_schema.sql — the whole data model, v2 (PLAN-measurement-redesign).
 --
--- The queue IS the submissions table: claim-and-commit on FOR UPDATE SKIP
--- LOCKED. At ~200 submissions across the event a Postgres table is a perfectly
--- good queue, and because the claim IS the state transition, a whole
--- crash-consistency class disappears.
+-- The queue as a contention point is gone — every participant has their own
+-- box — but the state machine stays: jobs are rows, the claim is the state
+-- transition on FOR UPDATE SKIP LOCKED, and crash recovery stays one janitor
+-- statement per stage. Each box's agent polls only its own participant's
+-- jobs, so the per-box "queue" is a mailbox of depth <= 1.
+--
+-- One scoring chain judges everything: p95, then p50, then p99. Deadlines are
+-- gates, never scores. The phase blobs below carry one stable JSON schema per
+-- phase — the student page, the leaderboard, and the future admin dashboard
+-- all read the same blobs.
 
 CREATE TYPE sub_state AS ENUM (
   'received','compiling','compile_failed',
-  'verifying','verify_failed','verify_timeout','verify_passed',
-  'bench_queued','pending_benchmark',      -- pending_benchmark = bench node unhealthy
-  'benchmarking','bench_verify_failed',    -- passed correctness, diverged on bench stream
-  'superseded',                            -- correct, but newer verified code replaced it
+  'testing','tests_failed',            -- phase 0: the visible spec tests
+  'verifying','verify_failed','verify_timeout',  -- phase 0: hidden differential verify
+  'phase1','phase1_failed',            -- the bulk run: 3 gated runs, median chain
+  'phase2',                            -- the ladder; a stopped climb is still 'done'
   'done','error');
 
-CREATE TABLE participants (                 -- preloaded roster of 18; no credentials
+CREATE TABLE participants (                 -- roster; credentials arrive in M3
   id          serial PRIMARY KEY,
   handle      text UNIQUE NOT NULL,
   created_at  timestamptz DEFAULT now()
@@ -24,53 +30,28 @@ CREATE TABLE submissions (
   participant_id int REFERENCES participants(id) NOT NULL,
   source_hash   text NOT NULL,             -- sha256 of source; S3 + compile-cache key
   state         sub_state NOT NULL DEFAULT 'received',
-  claimed_by    text,                      -- worker id, audit only; cleared by janitor
-  requeue_priority int NOT NULL DEFAULT 0, -- 1 = front of bench queue (steal-time requeue)
+  claimed_by    text,                      -- agent id, audit only; cleared by janitor
   created_at    timestamptz DEFAULT now(),
   updated_at    timestamptz DEFAULT now(),
-  -- When this submission ENTERED the bench queue, which is not when it was
-  -- created. The queue is ordered on this and never on `id`: a submission can
-  -- be held behind the participant's own running job and enter the queue much
-  -- later, and ordering by id would then seat hour-old work ahead of everyone
-  -- who queued while it waited.
-  bench_queued_at   timestamptz,
-  -- correctness results
-  verify_seed       bigint,
-  verify_detail     jsonb,   -- progress breakdown, first-divergence reproducer, timeout flag
-  verify_digest     text,    -- field-wise digest of the submission's output
-  -- benchmark results
-  bench_seed_set    bigint[],
-  p50_ns            double precision,      -- median of per-run p50s
-  p95_ns            double precision,      -- reported, unranked
-  p99_ns            double precision,      -- reported, unranked
-  probe_cost_ns     double precision,      -- published alongside
-  run_p50s_ns       double precision[],    -- all 7-10 per-run p50s, for the bootstrap CI
-  -- Every kept run's own p50/p95/p99, so a submission can be plotted run by
-  -- run. run_p50s_ns stays as the array the bootstrap resamples.
-  runs              jsonb,
-  -- Windowed p50/p95/p99 through the median run, so latency can be plotted
-  -- against time WITHIN the run rather than only summarised for it.
-  timeline          jsonb,
-  discard_count     int DEFAULT 0,         -- steal-time discards (3 => operator alert)
-  -- Percentile curve from the run whose p50 IS the score, so the published
-  -- distribution and the published headline describe the same run.
-  -- No histogram_s3 / flamegraph_s3: the percentile distribution and the
-  -- within-run timeline are stored inline above, and flamegraphs are not
-  -- produced. A column nothing writes is a promise nothing keeps.
-  percentiles       jsonb
+  -- One blob per phase, stable schema each:
+  --   phase0: { compile: {stderr?}, tests: {total,passed,tests[]},
+  --             verify: {outcome, reproducer?, ...} }
+  --   phase1: { outcome, p50_ns, p95_ns, p99_ns, runs[], deadline_ms, events }
+  --   phase2: { levels: [{level, outcome, events, deadline_ms, p50_ns, p95_ns,
+  --             p99_ns, wall_s, events_processed, checked_events}] }
+  phase0        jsonb,
+  phase1        jsonb,
+  phase2        jsonb,
+  -- The leaderboard sort keys, denormalized from phase2's last cleared level.
+  -- max_level 0 with state 'done' means the climb ended at rung 1 — still
+  -- ranked, sub-ordered by the phase1 chain (the CASE in the view below).
+  max_level     int,
+  top_p50_ns    double precision,
+  top_p95_ns    double precision,
+  top_p99_ns    double precision
 );
 CREATE INDEX ON submissions (participant_id, created_at DESC);
-CREATE INDEX ON submissions (state) WHERE state IN ('received','verify_passed','bench_queued');
-
--- One row per participant. `pending_sub` is the whole queue rule: at most one
--- benchmark of yours queued at a time, which bounds the queue at the number of
--- participants no matter how often anyone submits. `last_bench_at` used to also
--- enforce a fifteen-minute cooldown; it is now recorded but never checked.
-CREATE TABLE bench_slots (
-  participant_id int PRIMARY KEY REFERENCES participants(id),
-  last_bench_at  timestamptz,                        -- audit only; gates nothing
-  pending_sub    bigint REFERENCES submissions(id)   -- max one pending bench job
-);
+CREATE INDEX ON submissions (state) WHERE state IN ('received');
 
 CREATE TABLE drafts (
   participant_id int PRIMARY KEY REFERENCES participants(id),
@@ -78,12 +59,12 @@ CREATE TABLE drafts (
   updated_at    timestamptz DEFAULT now()
 );
 
-CREATE TABLE run_jobs (                     -- LeetCode "Run": ephemeral, not submissions
+CREATE TABLE run_jobs (                     -- "Run": phase 0 tests + phase 1, feedback only
   id bigserial PRIMARY KEY,
   participant_id int REFERENCES participants(id) NOT NULL,
   source_hash text NOT NULL,
   state text NOT NULL DEFAULT 'received',   -- received|running|done|failed
-  result jsonb,                             -- per-test pass/fail + compiler stderr
+  result jsonb,                             -- {compiled, tests, phase1}
   claimed_by text,
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now()
@@ -95,59 +76,91 @@ CREATE TABLE events_log (                   -- operator audit trail
   submission_id bigint, kind text, detail jsonb
 );
 
--- Worker liveness. The API marks the bench node unhealthy after 90s of silence,
--- and jobs then park in pending_benchmark rather than erroring (plan section 2).
-CREATE TABLE workers (
-  id          text PRIMARY KEY,
-  role        text NOT NULL,                -- pool | bench
-  last_seen   timestamptz NOT NULL DEFAULT now(),
-  healthy     boolean NOT NULL DEFAULT true,
-  detail      jsonb
+-- The box registry — what the future admin dashboard watches. Replaces the
+-- old `workers` table: a row per machine-resident agent, bound to its
+-- participant. `detail` carries the hygiene report, steal events, agent
+-- version, current job.
+CREATE TABLE boxes (
+  id             text PRIMARY KEY,
+  role           text NOT NULL,             -- agent | golden
+  participant_id int REFERENCES participants(id),
+  instance_id    text,
+  ip             text,
+  healthy        boolean NOT NULL DEFAULT true,
+  last_seen      timestamptz NOT NULL DEFAULT now(),
+  detail         jsonb
 );
 
--- Operator-controlled switches, so freezing the leaderboard or parking the
--- bench node does not need a deploy mid-event.
+-- Phase III, written by the golden box during the post-contest rejudge (M6).
+-- Final standings are a view over this table; nothing live writes here.
+CREATE TABLE rejudge_results (
+  id              bigserial PRIMARY KEY,
+  participant_id  int REFERENCES participants(id) NOT NULL,
+  submission_id   bigint REFERENCES submissions(id) NOT NULL,
+  seed            bigint,
+  finished        boolean,                  -- completed X events under the deadline
+  wall_s          double precision,
+  events_processed bigint,
+  p50_ns          double precision,
+  p95_ns          double precision,
+  p99_ns          double precision,
+  detail          jsonb,
+  judged_at       timestamptz DEFAULT now()
+);
+
+-- Operator-controlled switches and the workload configuration, so changing a
+-- deadline or freezing the board does not need a deploy mid-event.
 CREATE TABLE settings (
   key   text PRIMARY KEY,
   value jsonb NOT NULL
 );
--- The benchmark lane has no time gate. Holding it back was meant to prevent
--- premature optimisation, but the correctness gate already does that: nothing
--- reaches the bench queue until it has passed verification. A clock would only
--- have penalised whoever got correct early.
+-- The numbers below are DEV PLACEHOLDERS sized for a laptop. M5's calibration
+-- afternoon replaces them with the real level table and writes it into the
+-- spec; every deadline is a gate, never a score.
 INSERT INTO settings (key, value) VALUES
-  ('leaderboard_frozen', 'false'::jsonb);
+  ('leaderboard_frozen', 'false'::jsonb),
+  ('phase1', '{"events": 500000, "live_target": 1000, "deadline_ms": 5000, "runs": 3}'::jsonb),
+  ('level_table', '[
+    {"level": 1, "events":  500000, "live_target": 1000, "deadline_ms": 3000},
+    {"level": 2, "events": 1000000, "live_target": 1000, "deadline_ms": 1000},
+    {"level": 3, "events": 2000000, "live_target": 1000, "deadline_ms": 1000},
+    {"level": 4, "events": 4000000, "live_target": 1000, "deadline_ms": 1300}
+   ]'::jsonb);
 
--- Postgres stays the leaderboard's source of truth. Redis holds a disposable
--- serving copy that is rebuilt from this view whenever it is suspect — which is
--- cheap, because it is 18 rows.
+-- The live ranking: highest ladder level, then the scoring chain (p95, p50,
+-- p99) at that level, then the earlier submission. Level-0 rows rank on their
+-- Phase I chain so the board stays total-ordered from the first hour.
+--
+-- BEST per participant, not latest: DISTINCT ON keeps the first row of each
+-- participant's group under this ORDER BY. The rejudge (Phase III) does not
+-- read this view — final standings come from rejudge_results.
 CREATE VIEW leaderboard AS
 SELECT DISTINCT ON (s.participant_id)
        p.handle,
        s.participant_id,
        s.id AS submission_id,
-       s.p50_ns,
-       s.p99_ns,
-       s.probe_cost_ns,
-       s.run_p50s_ns,
+       s.max_level,
+       CASE WHEN s.max_level > 0 THEN s.top_p95_ns
+            ELSE (s.phase1->>'p95_ns')::double precision END AS chain_p95_ns,
+       CASE WHEN s.max_level > 0 THEN s.top_p50_ns
+            ELSE (s.phase1->>'p50_ns')::double precision END AS chain_p50_ns,
+       CASE WHEN s.max_level > 0 THEN s.top_p99_ns
+            ELSE (s.phase1->>'p99_ns')::double precision END AS chain_p99_ns,
        s.updated_at,
-       -- Exposed because it is the leaderboard's TIE-BREAK key, not for display:
-       -- equal p50s rank on the earlier submission. It has to be created_at and
-       -- not updated_at, because the rejudge (spec 4.5) re-runs every finalist
-       -- in one block at the end and rewrites updated_at into rejudge-block
-       -- order, which is arbitrary. Requeue-at-front does the same on a smaller
-       -- scale. created_at is the only timestamp that survives both.
+       -- The final deterministic tie-break: with rdtscp stepping in ~10 ns
+       -- quanta, an exact full-chain tie is possible, and it falls to the
+       -- earlier submission. created_at, never updated_at — requeues rewrite
+       -- updated_at into arbitrary order.
        s.created_at
 FROM submissions s
 JOIN participants p ON p.id = s.participant_id
-WHERE s.state = 'done' AND s.p50_ns IS NOT NULL
--- BEST per participant, not latest. This ordering is the whole rule: DISTINCT
--- ON keeps the first row of each participant's group, so ordering by
--- created_at DESC silently graded whatever they happened to submit last. A
--- participant who tried an experiment at 4pm and made it worse would have been
--- ranked on the experiment, and their best work discarded with nothing on the
--- page explaining why the number went up.
---
--- Ties break on the EARLIER submission: if two runs measure the same, the one
--- that got there first is the one that earned it.
-ORDER BY s.participant_id, s.p50_ns ASC, s.created_at ASC;
+WHERE s.state = 'done' AND s.max_level IS NOT NULL
+ORDER BY s.participant_id,
+         s.max_level DESC,
+         CASE WHEN s.max_level > 0 THEN s.top_p95_ns
+              ELSE (s.phase1->>'p95_ns')::double precision END ASC NULLS LAST,
+         CASE WHEN s.max_level > 0 THEN s.top_p50_ns
+              ELSE (s.phase1->>'p50_ns')::double precision END ASC NULLS LAST,
+         CASE WHEN s.max_level > 0 THEN s.top_p99_ns
+              ELSE (s.phase1->>'p99_ns')::double precision END ASC NULLS LAST,
+         s.created_at ASC;

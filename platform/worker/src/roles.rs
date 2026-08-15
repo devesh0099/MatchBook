@@ -1,46 +1,102 @@
-//! The two worker roles. Both poll Postgres directly — same VPC, no broker.
+//! The agent role (PLAN-measurement-redesign §7).
 //!
-//! Claim-and-commit: the claim commits immediately (no transaction held across
-//! the job), the worker does the work, then commits the terminal state. The
-//! claim IS the state transition, which is what makes crash recovery a single
-//! janitor statement rather than a protocol.
+//! One agent per box. It polls Postgres directly — same claim-and-commit as
+//! ever: the claim IS the state transition, so crash recovery stays a single
+//! janitor statement per stage. The per-box queue is a mailbox of depth <= 1;
+//! the API enforces one evaluation at a time per participant.
+//!
+//! The pipeline (one claimed job end to end):
+//!
+//!   Run    = compile -> visible tests -> Phase I          (feedback only)
+//!   Submit = compile -> visible tests -> hidden verify
+//!            -> Phase I -> Phase II ladder -> done        (leaderboard)
+//!
+//! One scoring chain everywhere: p95, then p50, then p99. Deadlines are
+//! gates, never scores. Streams and their baked solutions come from the bake
+//! cache — the generator and the reference run at bake time, not judge time
+//! (on the real fleet they are baked into the AMI; here the agent bakes
+//! lazily on first use, which is the dev stand-in).
 
 use anyhow::{Context, Result};
 use common::{harness_exit, SubState};
 use sqlx::PgPool;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::sandbox::{self, RunOpts, Sandbox};
 use crate::Config;
 
-/// The correctness lane's stream. Short on purpose: it catches essentially
-/// every bug the 10M stream catches, in a fraction of the time, and lane
-/// throughput is what makes iteration feel fast.
-const VERIFY_EVENTS: u64 = 300_000;
-const VERIFY_PROFILE: &str = "balanced";
+/// Every phase stream is cancel_heavy — the ranked profile. Depth per level
+/// comes from the level table's live_target.
+const PROFILE: &str = "cancel_heavy";
+
+/// The hidden verify runs on this prefix of the Phase I stream — same baked
+/// bytes, truncated by the harness (`--events`), never regenerated. Small on
+/// purpose: it catches essentially every bug a longer stream catches and the
+/// verify lane must feel fast.
+const VERIFY_PREFIX_EVENTS: u64 = 50_000;
 const VERIFY_WALL_TIME_S: f64 = 45.0;
 
-/// The ranked stream.
-///
-/// Long enough that the untimed warm-up fits with a real timed region after it,
-/// AND long enough that the harness's half-the-stream warm-up cap does not bind.
-///
-/// cancel_heavy builds ~750k resting orders and the harness derives 9,676,800
-/// events of warm-up for that. The cap is the subtle one: at 16M the warm-up is
-/// clipped to 8M, timing starts against a book at ~90% of target, and the result
-/// is reported as a ranked number with nothing saying it was measured early.
-/// 20M clears the cap with 10.3M events timed, at about 8s per run.
-const BENCH_EVENTS: u64 = 20_000_000;
-const BENCH_PROFILE: &str = "cancel_heavy";
-const BENCH_RUNS: u32 = 9;
+/// Wall-time ceiling handed to isolate for a single gated bench invocation.
+/// Generous by design: the DEADLINE inside the harness is the real gate, and
+/// this only bounds a pathological run the SIGALRM backstop somehow missed.
+const BENCH_BOX_WALL_S: f64 = 600.0;
 
-// ---------------------------------------------------------------- pool role
+// ---------------------------------------------------------------- config
 
-pub async fn run_pool(db: PgPool, cfg: Config) -> Result<()> {
+#[derive(serde::Deserialize, Clone)]
+pub struct Phase1Cfg {
+    pub events: u64,
+    #[serde(default)]
+    pub live_target: u64,
+    pub deadline_ms: f64,
+    #[serde(default = "default_runs")]
+    pub runs: u32,
+}
+fn default_runs() -> u32 {
+    3
+}
+
+#[derive(serde::Deserialize, Clone)]
+pub struct LevelCfg {
+    pub level: u32,
+    pub events: u64,
+    #[serde(default)]
+    pub live_target: u64,
+    pub deadline_ms: f64,
+}
+
+/// Workload numbers live in `settings`, not in code: M5's calibration writes
+/// the real level table there, and an operator can adjust a deadline without
+/// a deploy. Read per job — it is one row, and it means an edit takes effect
+/// on the next evaluation.
+async fn phase1_cfg(db: &PgPool) -> Result<Phase1Cfg> {
+    let (v,): (serde_json::Value,) =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'phase1'")
+            .fetch_one(db)
+            .await
+            .context("settings.phase1 missing")?;
+    Ok(serde_json::from_value(v).context("settings.phase1 malformed")?)
+}
+
+async fn level_table(db: &PgPool) -> Result<Vec<LevelCfg>> {
+    let (v,): (serde_json::Value,) =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'level_table'")
+            .fetch_one(db)
+            .await
+            .context("settings.level_table missing")?;
+    let mut t: Vec<LevelCfg> = serde_json::from_value(v).context("settings.level_table malformed")?;
+    t.sort_by_key(|l| l.level);
+    Ok(t)
+}
+
+// ---------------------------------------------------------------- agent role
+
+pub async fn run_agent(db: PgPool, cfg: Config) -> Result<()> {
     let sandbox = Sandbox::new();
     loop {
-        // Run jobs come first, always. Run turnaround IS the iteration loop and
-        // must feel instant; a Submit can wait three extra seconds.
+        // Run jobs first, always: Run turnaround IS the iteration loop, and a
+        // Submit can wait the extra seconds.
         if claim_run_job(&db, &cfg, &sandbox).await? {
             continue;
         }
@@ -65,7 +121,7 @@ async fn claim_run_job(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Result<b
     let Some((id, hash)) = row else { return Ok(false) };
     tracing::info!("run job {id} ({hash})");
 
-    let result = match execute_run(cfg, sandbox, &hash).await {
+    let result = match execute_run(db, cfg, sandbox, &hash).await {
         Ok(v) => v,
         Err(e) => serde_json::json!({ "error": e.to_string() }),
     };
@@ -77,32 +133,35 @@ async fn claim_run_job(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Result<b
     Ok(true)
 }
 
-/// Compile, then run the ~30 visible tests. These teach; they do not grade, so
-/// nothing here touches the submissions table.
-async fn execute_run(cfg: &Config, sandbox: &Sandbox, hash: &str) -> Result<serde_json::Value> {
+/// Run = Phase 0's visible half + Phase I, via EXACTLY the code path Submit
+/// uses. The lanes must not drift: "Run said 1.9s, Submit said fail" is a bug
+/// class this sharing removes by construction.
+async fn execute_run(
+    db: &PgPool,
+    cfg: &Config,
+    sandbox: &Sandbox,
+    hash: &str,
+) -> Result<serde_json::Value> {
     let source = cfg.storage.get_source(hash).await?;
     let b = sandbox.init(cfg.box_id).await?;
     let _guard = BoxGuard { sandbox, id: cfg.box_id };
-
     sandbox::place(&b, "engine.cpp", &source).await?;
-    let compile = compile_in_box(cfg, sandbox, &b, "engine.cpp", "tests").await?;
+
+    // One compile covers both artifacts: the tests binary embeds engine.cpp,
+    // and phase 1 needs the .so the harness dlopens.
+    let compile = compile_in_box(cfg, sandbox, &b, "engine.cpp", "engine").await?;
     if compile.exit_code != 0 {
         return Ok(serde_json::json!({
             "compiled": false,
             "stderr": first_lines(&compile.stderr, 100),
         }));
     }
+    let tests = run_visible_tests(cfg, sandbox, &b).await?;
 
-    let out = sandbox
-        .run(
-            &b,
-            &RunOpts::for_verify(30.0),
-            &["./run_tests", "--json"],
-        )
-        .await?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(out.stdout.trim()).unwrap_or_else(|_| serde_json::json!({}));
-    Ok(serde_json::json!({ "compiled": true, "tests": parsed }))
+    let p1cfg = phase1_cfg(db).await?;
+    let phase1 = run_phase1(cfg, sandbox, &b, &p1cfg).await?;
+
+    Ok(serde_json::json!({ "compiled": true, "tests": tests, "phase1": phase1 }))
 }
 
 async fn claim_submission(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Result<bool> {
@@ -117,9 +176,10 @@ async fn claim_submission(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Resul
     .await?;
 
     let Some((id, participant_id, hash)) = row else { return Ok(false) };
+    let _ = participant_id;
     tracing::info!("submission {id} ({hash})");
 
-    match process_submission(db, cfg, sandbox, id, participant_id, &hash).await {
+    match process_submission(db, cfg, sandbox, id, &hash).await {
         Ok(()) => {}
         Err(e) => {
             tracing::error!("submission {id} errored: {e}");
@@ -131,12 +191,14 @@ async fn claim_submission(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Resul
     Ok(true)
 }
 
+/// The whole gauntlet, one claimed job: compile -> tests -> hidden verify ->
+/// Phase I -> Phase II -> done. Every phase writes its blob as it completes,
+/// so the student page can follow the climb live on its 2s poll.
 async fn process_submission(
     db: &PgPool,
     cfg: &Config,
     sandbox: &Sandbox,
     id: i64,
-    participant_id: i32,
     hash: &str,
 ) -> Result<()> {
     let source = cfg.storage.get_source(hash).await?;
@@ -147,31 +209,32 @@ async fn process_submission(
     // ---- compile
     let compile = compile_in_box(cfg, sandbox, &b, "engine.cpp", "engine").await?;
     if compile.exit_code != 0 {
-        sqlx::query(
-            "UPDATE submissions SET state = 'compile_failed', verify_detail = $2, \
-             updated_at = now() WHERE id = $1",
-        )
-        .bind(id)
-        .bind(serde_json::json!({ "stderr": first_lines(&compile.stderr, 100) }))
-        .execute(db)
-        .await?;
+        let blob = serde_json::json!({ "compile": { "stderr": first_lines(&compile.stderr, 100) } });
+        finish_phase0(db, id, SubState::CompileFailed, &blob).await?;
         return Ok(());
     }
-
-    // The binary is cached on the source hash: participants resubmit unchanged
-    // code more often than expected, especially when chasing a fresh bench slot.
     if let Ok(so) = sandbox::read_out(&b, "engine.so").await {
         cfg.storage.put_binary(hash, so).await?;
     }
 
-    // ---- verify, on a seed this submission has never seen
-    set_state(db, id, SubState::Verifying).await?;
-    let seed: i64 = rand_seed();
+    // ---- phase 0a: the visible tests. All of them.
+    set_state(db, id, SubState::Testing).await?;
+    let tests = run_visible_tests(cfg, sandbox, &b).await?;
+    let all_passed = tests.get("passed").and_then(|v| v.as_u64())
+        == tests.get("total").and_then(|v| v.as_u64())
+        && tests.get("total").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
+    if !all_passed {
+        let blob = serde_json::json!({ "tests": tests });
+        finish_phase0(db, id, SubState::TestsFailed, &blob).await?;
+        return Ok(());
+    }
 
-    // The seed reaches the harness as a generated stream file passed by fd, not
-    // as --seed on argv: the submission is dlopen'ed into the harness process
-    // and can read /proc/self/cmdline.
-    let stream = generate_stream(cfg, seed as u64, VERIFY_PROFILE, VERIFY_EVENTS).await?;
+    // ---- phase 0b: the hidden differential verify, on a fixed 50k prefix of
+    // the Phase I stream. Same baked bytes Phase I times, truncated by the
+    // harness; the stream crosses as an inherited descriptor, never a path.
+    set_state(db, id, SubState::Verifying).await?;
+    let p1cfg = phase1_cfg(db).await?;
+    let baked = ensure_baked(cfg, cfg.seed1, p1cfg.events, p1cfg.live_target).await?;
     stage_harness(cfg, &b).await?;
 
     let verify = sandbox
@@ -183,305 +246,163 @@ async fn process_submission(
                 "verify",
                 "--stream-fd",
                 &sandbox::STREAM_FD.to_string(),
+                "--events",
+                &VERIFY_PREFIX_EVENTS.to_string(),
                 "--engine",
                 "./engine.so",
                 "--wall-time",
                 &VERIFY_WALL_TIME_S.to_string(),
                 "--json",
             ],
-            Some(stream.dup_fd()?),
+            Some(baked.open_stream()?),
         )
         .await?;
 
-    let detail: serde_json::Value =
+    let mut verify_detail: serde_json::Value =
         serde_json::from_str(verify.stdout.trim()).unwrap_or_else(|_| {
             serde_json::json!({ "outcome": "error", "stderr": first_lines(&verify.stderr, 40) })
         });
-
-    // A crashed engine is not a wrong answer either. Saying "segfault" beats
-    // showing a diff that never got produced.
-    let known_codes = [
+    let known = [
         harness_exit::PASSED,
         harness_exit::FAILED,
         harness_exit::USAGE,
         harness_exit::TIMEOUT,
     ];
-    let detail = if verify.crashed() || verify.unexpected_exit(&known_codes) {
-        serde_json::json!({
+    if verify.crashed() || verify.unexpected_exit(&known) {
+        verify_detail = serde_json::json!({
             "outcome": "crashed",
             "status": verify.status,
             "hint": "the engine died before finishing: signal or runtime error, not a diff",
             "stderr": first_lines(&verify.stderr, 40),
-        })
-    } else {
-        detail
-    };
+        });
+    }
+    let blob = serde_json::json!({ "tests": tests, "verify": verify_detail });
 
-    // A timeout is a liveness failure, reported distinctly from a wrong answer:
-    // they are different bugs and conflating them wastes participant time.
-    let state = if verify.timed_out() || verify.exit_code == harness_exit::TIMEOUT {
-        SubState::VerifyTimeout
-    } else if verify.exit_code == harness_exit::PASSED {
-        SubState::VerifyPassed
-    } else {
-        SubState::VerifyFailed
-    };
+    if verify.timed_out() || verify.exit_code == harness_exit::TIMEOUT {
+        finish_phase0(db, id, SubState::VerifyTimeout, &blob).await?;
+        return Ok(());
+    }
+    if verify.exit_code != harness_exit::PASSED {
+        finish_phase0(db, id, SubState::VerifyFailed, &blob).await?;
+        return Ok(());
+    }
+    sqlx::query("UPDATE submissions SET phase0 = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(&blob)
+        .execute(db)
+        .await?;
 
-    let digest = detail.get("digest").and_then(|d| d.as_str()).map(str::to_string);
-    sqlx::query(
-        "UPDATE submissions SET state = $2, verify_seed = $3, verify_detail = $4, \
-         verify_digest = $5, updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(state)
-    .bind(seed)
-    .bind(&detail)
-    .bind(digest)
-    .execute(db)
-    .await?;
-
-    if state != SubState::VerifyPassed {
+    // ---- phase I: the bulk run. The gate into the ladder.
+    set_state(db, id, SubState::Phase1).await?;
+    let phase1 = run_phase1(cfg, sandbox, &b, &p1cfg).await?;
+    let p1_ok = phase1.get("outcome").and_then(|v| v.as_str()) == Some("ok");
+    sqlx::query("UPDATE submissions SET phase1 = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(&phase1)
+        .execute(db)
+        .await?;
+    if !p1_ok {
+        set_state(db, id, SubState::Phase1Failed).await?;
         return Ok(());
     }
 
-    try_enqueue_bench(db, id, participant_id).await
-}
+    // ---- phase II: the ladder. One attempt per level, in order; the climb
+    // ends at the first miss — and a stopped climb is a RESULT, not an error.
+    set_state(db, id, SubState::Phase2).await?;
+    let table = level_table(db).await?;
+    let mut levels = Vec::new();
+    let mut max_level: i32 = 0;
+    let mut top: Option<(f64, f64, f64)> = None;
 
-/// The queue rule is applied here, at enqueue, in one transaction: at most one
-/// pending bench job per participant. That alone makes the queue
-/// self-throttling — worst-case depth is the number of participants, whatever
-/// anyone does — which is why the fifteen-minute cooldown that used to sit
-/// beside it was removed. It throttled people who were already blocked behind
-/// their own job, and protected nothing the pending rule was not already
-/// protecting.
-///
-/// What the incumbent job is DOING decides what happens to the new submission:
-///
-///   * `benchmarking` — hold. The bench node has exclusive use of an isolated
-///     core and is a minute into nine timed runs; discarding that to start over
-///     with newer code throws away real measurement and gains nothing.
-///   * `bench_queued` / `pending_benchmark` — waiting, not running, so nothing
-///     is lost by replacing it. The incumbent is marked `superseded` and the
-///     new submission takes the slot AND ITS QUEUE POSITION: the participant
-///     already waited for it, holds exactly one slot either way, and nobody
-///     else is delayed by the swap.
-///   * anything else — a stale slot (the job finished but `clear_pending` did
-///     not run). Take it; there is nothing to supersede.
-///
-/// Holding is the only branch that leaves work for someone else to pick up:
-/// the janitor promotes it when the running job ends.
-async fn try_enqueue_bench(db: &PgPool, id: i64, participant_id: i32) -> Result<()> {
-    let mut tx = db.begin().await?;
-
-    let slot: Option<(Option<chrono::DateTime<chrono::Utc>>, Option<i64>)> = sqlx::query_as(
-        "SELECT last_bench_at, pending_sub FROM bench_slots WHERE participant_id = $1 FOR UPDATE",
-    )
-    .bind(participant_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    // Inherit the incumbent's queue position when replacing it.
-    let mut inherited_at: Option<chrono::DateTime<chrono::Utc>> = None;
-    let mut superseded: Option<i64> = None;
-
-    if let Some((_, Some(incumbent))) = slot {
-        // Re-read the incumbent's state INSIDE this transaction, holding its
-        // row. This is the race that decides whether replacing is safe: the
-        // bench worker can claim a queued job at the same instant. If it won,
-        // the row now reads `benchmarking` and we hold. If we won, the worker's
-        // claim uses SKIP LOCKED and passes over this row to take another job.
-        let cur: Option<(SubState, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-            "SELECT state, bench_queued_at FROM submissions WHERE id = $1 FOR UPDATE",
+    for lv in &table {
+        let entry = run_level(cfg, sandbox, &b, lv).await?;
+        let ok = entry.get("outcome").and_then(|v| v.as_str()) == Some("ok");
+        if ok {
+            max_level = lv.level as i32;
+            top = Some((
+                entry.get("p50_ns").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                entry.get("p95_ns").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                entry.get("p99_ns").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            ));
+        }
+        levels.push(entry);
+        // Progress is visible mid-climb, and updated_at doubles as the
+        // heartbeat that keeps the janitor's hands off a live ladder.
+        sqlx::query(
+            "UPDATE submissions SET phase2 = $2, updated_at = now() WHERE id = $1",
         )
-        .bind(incumbent)
-        .fetch_optional(&mut *tx)
+        .bind(id)
+        .bind(serde_json::json!({ "levels": levels }))
+        .execute(db)
         .await?;
-
-        match cur {
-            Some((SubState::Benchmarking, _)) => {
-                let reason = format!(
-                    "held: submission #{incumbent} is being benchmarked right now. \
-                     A running timing job is never interrupted — this one queues \
-                     automatically when it finishes."
-                );
-                sqlx::query(
-                    "UPDATE submissions SET verify_detail = \
-                     COALESCE(verify_detail, '{}'::jsonb) || jsonb_build_object('bench_held', $2::text), \
-                     updated_at = now() WHERE id = $1",
-                )
-                .bind(id)
-                .bind(&reason)
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                log_event(db, Some(id), "bench_enqueue_held", serde_json::json!({ "reason": reason }))
-                    .await?;
-                return Ok(());
-            }
-            Some((SubState::BenchQueued, queued_at)) | Some((SubState::PendingBenchmark, queued_at)) => {
-                inherited_at = queued_at;
-                sqlx::query(
-                    "UPDATE submissions SET state = 'superseded', updated_at = now(), \
-                     verify_detail = COALESCE(verify_detail, '{}'::jsonb) \
-                       || jsonb_build_object('superseded_by', $2::bigint) \
-                     WHERE id = $1",
-                )
-                .bind(incumbent)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-                // Logged after the commit, not here: this transaction can still
-                // abort, and an audit line for a supersede that never happened
-                // is worse than no line at all.
-                superseded = Some(incumbent);
-            }
-            // Stale slot, or the incumbent already reached a terminal state.
-            _ => {}
+        if !ok {
+            break;
         }
     }
 
-    // If no bench worker is healthy, park rather than error: correctness keeps
-    // working and the queue is rejudged when the node returns.
-    let (healthy,): (i64,) =
-        sqlx::query_as("SELECT count(*) FROM workers WHERE role = 'bench' AND healthy = true")
-            .fetch_one(&mut *tx)
-            .await?;
-    let target = if healthy > 0 { SubState::BenchQueued } else { SubState::PendingBenchmark };
-
-    // COALESCE keeps the inherited position when this replaced a queued job.
+    let (p50, p95, p99) = top.unwrap_or((0.0, 0.0, 0.0));
     sqlx::query(
-        "UPDATE submissions SET state = $2, updated_at = now(), \
-         bench_queued_at = COALESCE($3, now()) WHERE id = $1",
+        "UPDATE submissions SET state = 'done', max_level = $2, top_p50_ns = $3, \
+         top_p95_ns = $4, top_p99_ns = $5, updated_at = now() WHERE id = $1",
     )
     .bind(id)
-    .bind(target)
-    .bind(inherited_at)
-    .execute(&mut *tx)
+    .bind(max_level)
+    .bind(if max_level > 0 { Some(p50) } else { None })
+    .bind(if max_level > 0 { Some(p95) } else { None })
+    .bind(if max_level > 0 { Some(p99) } else { None })
+    .execute(db)
     .await?;
-
-    // last_bench_at no longer gates anything — it is kept as a record of when a
-    // participant last took the bench slot, which is worth having in the
-    // events log's company when a queue question comes up on the day.
-    sqlx::query(
-        "INSERT INTO bench_slots (participant_id, last_bench_at, pending_sub) \
-         VALUES ($1, now(), $2) ON CONFLICT (participant_id) \
-         DO UPDATE SET last_bench_at = now(), pending_sub = $2",
-    )
-    .bind(participant_id)
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-
-    if let Some(old) = superseded {
-        log_event(db, Some(old), "bench_superseded", serde_json::json!({ "superseded_by": id }))
-            .await?;
-    }
     Ok(())
 }
 
-// ---------------------------------------------------------------- bench role
-
-pub async fn run_bench(db: PgPool, cfg: Config) -> Result<()> {
-    let sandbox = Sandbox::new();
-    let mut last_spot_check = std::time::Instant::now();
-
-    loop {
-        // Steal-time discards requeue at the FRONT, so priority leads the sort.
-        let row: Option<(i64, i32, String, Option<Vec<i64>>)> = sqlx::query_as(
-            // Ordered on bench_queued_at, NOT id. A submission held behind its
-            // participant's own running job enters the queue long after it was
-            // created, and ordering by id would seat that hour-old row ahead of
-            // everyone who queued while it waited.
-            "UPDATE submissions SET state = 'benchmarking', claimed_by = $1, updated_at = now() \
-             WHERE id = (SELECT id FROM submissions WHERE state = 'bench_queued' \
-                         ORDER BY requeue_priority DESC, bench_queued_at ASC NULLS LAST, id \
-                         LIMIT 1 FOR UPDATE SKIP LOCKED) \
-             RETURNING id, participant_id, source_hash, bench_seed_set",
-        )
-        .bind(&cfg.worker_id)
-        .fetch_optional(&db)
+async fn finish_phase0(db: &PgPool, id: i64, state: SubState, blob: &serde_json::Value) -> Result<()> {
+    sqlx::query("UPDATE submissions SET state = $2, phase0 = $3, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(state)
+        .bind(blob)
+        .execute(db)
         .await?;
-
-        if let Some((id, participant_id, hash, pinned)) = row {
-            // A pinned seed means this is a rejudge: every participant's final
-            // submission is measured on the SAME seed set, in one continuous
-            // block, so the numbers that decide ranking are comparable by
-            // construction rather than by assumption.
-            let pinned_seed = pinned.and_then(|v| v.first().copied()).map(|s| s as u64);
-            tracing::info!("bench job {id} ({hash}){}", if pinned_seed.is_some() { " [rejudge]" } else { "" });
-            if let Err(e) = run_bench_job(&db, &cfg, &sandbox, id, participant_id, &hash, pinned_seed).await {
-                tracing::error!("bench job {id} errored: {e}");
-                set_state(&db, id, SubState::Error).await?;
-                clear_pending(&db, participant_id).await?;
-            }
-            continue;
-        }
-
-        // Between jobs, roughly every 20 minutes, re-measure the reference.
-        // This is contamination detection by MEASUREMENT rather than inference:
-        // throttling, frequency drift or a mystery daemon all show up here
-        // without any per-run classification logic.
-        if last_spot_check.elapsed() > Duration::from_secs(20 * 60) {
-            last_spot_check = std::time::Instant::now();
-            if let Err(e) = reference_spot_check(&db, &cfg, &sandbox).await {
-                tracing::error!("reference spot check failed: {e}");
-            }
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    Ok(())
 }
 
-async fn run_bench_job(
-    db: &PgPool,
+// ---------------------------------------------------------------- phases
+
+async fn run_visible_tests(
     cfg: &Config,
     sandbox: &Sandbox,
-    id: i64,
-    participant_id: i32,
-    hash: &str,
-    pinned_seed: Option<u64>,
-) -> Result<()> {
-    let b = sandbox.init(cfg.box_id).await?;
-    let _guard = BoxGuard { sandbox, id: cfg.box_id };
-
-    // ALWAYS recompile on the benchmark node.
-    //
-    // The plan allows reusing the pool's cached binary when its build
-    // fingerprint matches this node's — but nothing embeds a fingerprint into a
-    // submission .so, so that check has no evidence to work from and would
-    // pass vacuously. Rather than keep a check that looks like it verifies
-    // something, take the branch it was there to guarantee: recompile locally
-    // rather than measuring a binary this node cannot vouch for. It costs about
-    // a second against a job of tens of seconds.
-    let source = cfg.storage.get_source(hash).await?;
-    sandbox::place(&b, "engine.cpp", &source).await?;
-    let compile = compile_in_box(cfg, sandbox, &b, "engine.cpp", "engine").await?;
+    b: &sandbox::Box_,
+) -> Result<serde_json::Value> {
+    let compile = compile_in_box(cfg, sandbox, b, "engine.cpp", "tests").await?;
     if compile.exit_code != 0 {
-        set_state(db, id, SubState::CompileFailed).await?;
-        clear_pending(db, participant_id).await?;
-        return Ok(());
+        // engine.so compiled but the tests harness did not — a worker-side
+        // problem worth surfacing distinctly, not a participant failure.
+        anyhow::bail!("tests harness failed to compile: {}", first_lines(&compile.stderr, 20));
     }
+    let out = sandbox.run(b, &RunOpts::for_verify(30.0), &["./run_tests", "--json"]).await?;
+    Ok(serde_json::from_str(out.stdout.trim())
+        .unwrap_or_else(|_| serde_json::json!({ "error": first_lines(&out.stderr, 20) })))
+}
 
-    // Precedence: a rejudge's pinned seed, then the configured fixed seed, then
-    // a fresh random one. The rejudge must always win — it is what puts every
-    // finalist on identical input.
-    let seed = pinned_seed
-        .or(cfg.bench_seed)
-        .unwrap_or_else(|| rand_seed() as u64);
-    let stream = generate_stream(cfg, seed, BENCH_PROFILE, BENCH_EVENTS).await?;
-
-    // The expected digest is the ORACLE's for this stream, computed outside the
-    // box. Verification inside the timed run is what stops anyone winning by
-    // doing less work.
-    let oracle_digest = oracle_digest(cfg, &stream.path).await?;
-    stage_harness(cfg, &b).await?;
+/// One gated bench invocation: deadline + baked solution, stream on the
+/// inherited descriptor, chain out. Shared by Phase I (runs=N) and each
+/// ladder level (runs=1).
+async fn gated_bench(
+    sandbox: &Sandbox,
+    b: &sandbox::Box_,
+    baked: &Baked,
+    runs: u32,
+    deadline_ms: f64,
+    sol_name: &str,
+) -> Result<(i32, serde_json::Value)> {
+    let sol_bytes = tokio::fs::read(&baked.solution)
+        .await
+        .with_context(|| format!("reading solution {}", baked.solution.display()))?;
+    sandbox::place(b, sol_name, &sol_bytes).await?;
 
     let out = sandbox
         .run_with_stream(
-            &b,
-            &RunOpts::for_bench(600.0),
+            b,
+            &RunOpts::for_bench(BENCH_BOX_WALL_S),
             &[
                 "./harness",
                 "bench",
@@ -490,217 +411,178 @@ async fn run_bench_job(
                 "--engine",
                 "./engine.so",
                 "--runs",
-                &BENCH_RUNS.to_string(),
-                "--digest",
-                &oracle_digest,
+                &runs.to_string(),
+                "--deadline-ms",
+                &deadline_ms.to_string(),
+                "--solution",
+                sol_name,
                 "--json",
             ],
-            Some(stream.dup_fd()?),
+            Some(baked.open_stream()?),
         )
         .await?;
 
-    let result: serde_json::Value =
+    let parsed: serde_json::Value =
         serde_json::from_str(out.stdout.trim()).unwrap_or_else(|_| serde_json::json!({}));
-
-    if out.exit_code == harness_exit::UNHEALTHY {
-        // Three consecutive steal-time discards: stop requeueing and alert.
-        // The node is unhealthy and a human should look before the queue churns
-        // silently.
-        tracing::error!("bench node reports unhealthy; parking job {id}");
-        sqlx::query("UPDATE workers SET healthy = false WHERE id = $1")
-            .bind(&cfg.worker_id)
-            .execute(db)
-            .await?;
-        sqlx::query(
-            "UPDATE submissions SET state = 'pending_benchmark', requeue_priority = 1, \
-             updated_at = now() WHERE id = $1",
-        )
-        .bind(id)
-        .execute(db)
-        .await?;
-        log_event(db, Some(id), "bench_node_unhealthy", result).await?;
-        return Ok(());
-    }
-
-    let state = if out.exit_code == harness_exit::PASSED {
-        SubState::Done
-    } else {
-        // Passed correctness, diverged on the benchmark stream — its own
-        // outcome, not a generic failure.
-        SubState::BenchVerifyFailed
-    };
-
-    let f = |k: &str| result.get(k).and_then(|v| v.as_f64());
-    let runs: Vec<f64> = result
-        .get("run_p50s_ns")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
-        .unwrap_or_default();
-
-    sqlx::query(
-        "UPDATE submissions SET state = $2, bench_seed_set = ARRAY[$3::bigint], p50_ns = $4, \
-         p95_ns = $5, p99_ns = $6, probe_cost_ns = $7, run_p50s_ns = $8, discard_count = $9, \
-         percentiles = $10, runs = $11, timeline = $12, updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(state)
-    .bind(seed as i64)
-    .bind(f("p50_ns"))
-    .bind(f("p95_ns"))
-    .bind(f("p99_ns"))
-    .bind(f("probe_cost_ns"))
-    .bind(&runs)
-    .bind(result.get("discard_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32)
-    .bind(result.get("percentiles").cloned())
-    .bind(result.get("runs").cloned())
-    .bind(result.get("timeline").cloned())
-    .execute(db)
-    .await?;
-
-    clear_pending(db, participant_id).await?;
-    Ok(())
+    Ok((out.exit_code, parsed))
 }
 
-/// Contamination detection by MEASUREMENT rather than inference: throttling,
-/// frequency drift and a mystery daemon all show up here without any per-run
-/// classification logic.
-///
-/// 5%, not 2%. The tolerance has to sit ABOVE the node's own run-to-run spread
-/// or it condemns a healthy node: `ops/noise-floor/analyze.py` calls a 2-5%
-/// spread workable, so a 2% tolerance fires on ordinary variance for any node
-/// that is not near-silent. That is not theoretical — on shared tenancy, and on
-/// any developer machine, 2% marks the node unhealthy within the hour and every
-/// submission parks at `pending_benchmark`.
-///
-/// The cost of the wider band is a real 3% contamination going unnoticed. That
-/// is the right trade: this check exists to catch a node that has BROKEN, and
-/// the end-of-event rejudge — one continuous block, one seed, reference runs
-/// bracketing both ends — is what actually defends the numbers that decide
-/// ranking. Tighten it only for a node whose measured spread earns it.
-const SPOT_CHECK_TOLERANCE: f64 = 0.05;
-
-async fn reference_spot_check(db: &PgPool, cfg: &Config, _sandbox: &Sandbox) -> Result<()> {
-    // Long enough that the harness's derived warm-up (~3.9M events for this
-    // profile) still leaves a timed region, so this measures the reference
-    // against a SETTLED 300k-order book — the same memory-bound work a ranked
-    // run does. At 2M it would time the book still filling from 50k to 130k:
-    // deterministic, so the baseline would still be stable, but a number whose
-    // meaning changes with any depth retune, compared against a fixed tolerance.
-    let out = tokio::process::Command::new(&cfg.harness_bin)
-        .args([
-            "bench", "--seed", "1", "--profile", BENCH_PROFILE, "--events", "5000000", "--runs",
-            "3", "--engine", &cfg.reference_so, "--json",
-        ])
-        .output()
-        .await?;
-    let v: serde_json::Value =
-        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap_or_default();
-
-    let Some(p50) = v.get("p50_ns").and_then(|x| x.as_f64()) else {
-        log_event(db, None, "reference_spot_check_failed", v).await?;
-        return Ok(());
-    };
-
-    // The output digest for this fixed seed, which is what makes the baseline
-    // safe to compare against later.
-    //
-    // The baseline is a stored number, and the check assumes any change in the
-    // measurement means the MACHINE changed. That is only true while the
-    // workload is identical. Retuning the ranked profile changes what these
-    // five million events are, so the same command legitimately measures
-    // something else — and the node then condemns itself for a reason that has
-    // nothing to do with its health, permanently, because every later check
-    // compares against the same stale number. Observed: a profile change moved
-    // this from 280ns to 350ns and parked the queue at 25% "deviation".
-    //
-    // The digest is a fingerprint of the stream and the output it produces, so
-    // a profile change moves it and a slow machine does not. Different digest
-    // means re-baseline rather than alert.
-    let digest = v.get("digest").and_then(|x| x.as_str()).unwrap_or("").to_string();
-
-    let stored: Option<(serde_json::Value,)> =
-        sqlx::query_as("SELECT value FROM settings WHERE key = 'bench_reference_baseline_ns'")
-            .fetch_optional(db)
-            .await?;
-    let stored = stored.map(|b| b.0);
-
-    // Older rows hold a bare number; treat those as a workload we cannot vouch
-    // for and re-record.
-    let base = stored.as_ref().and_then(|v| {
-        let same_workload = v.get("digest").and_then(|d| d.as_str()) == Some(digest.as_str());
-        if same_workload { v.get("p50_ns").and_then(|x| x.as_f64()) } else { None }
-    });
-
-    let Some(base) = base else {
-        let record = serde_json::json!({ "p50_ns": p50, "digest": digest });
-        sqlx::query(
-            "INSERT INTO settings (key, value) VALUES ('bench_reference_baseline_ns', $1) \
-             ON CONFLICT (key) DO UPDATE SET value = $1",
-        )
-        .bind(&record)
-        .execute(db)
-        .await?;
-        let why = if stored.is_some() { "workload changed" } else { "first check on this node" };
-        tracing::info!("recorded reference baseline: {p50:.1} ns ({why})");
-        log_event(db, None, "reference_baseline_set",
-                  serde_json::json!({ "p50_ns": p50, "digest": digest, "reason": why })).await?;
-        return Ok(());
-    };
-
-    let deviation = (p50 - base).abs() / base;
-    if deviation > SPOT_CHECK_TOLERANCE {
-        tracing::error!(
-            "reference spot check deviated {:.1}% from baseline ({p50:.1} vs {base:.1} ns); \
-             marking this node unhealthy",
-            deviation * 100.0
-        );
-        sqlx::query("UPDATE workers SET healthy = false WHERE id = $1")
-            .bind(&cfg.worker_id)
-            .execute(db)
-            .await?;
-        // `held` marks this as a deliberate verdict, so the heartbeat cannot
-        // quietly undo it 15 seconds later.
-        sqlx::query("UPDATE workers SET detail = jsonb_build_object('held', true) WHERE id = $1")
-            .bind(&cfg.worker_id)
-            .execute(db)
-            .await?;
-        log_event(
-            db,
-            None,
-            "reference_spot_check_alert",
-            serde_json::json!({ "p50_ns": p50, "baseline_ns": base, "deviation": deviation }),
-        )
-        .await?;
+/// Map a gated bench's exit + JSON to the stable per-phase schema. The chain
+/// (p95, p50, p99) is present for EVERY outcome that measured anything — a
+/// deadline-cut run's chain covers what it processed, which is exactly what
+/// the rejudge ranks non-finishers on.
+fn bench_outcome(exit_code: i32, r: &serde_json::Value, crashed: bool) -> serde_json::Value {
+    let outcome = if crashed {
+        "crashed"
     } else {
-        // Back within tolerance. The check that condemned the node is the one
-        // entitled to absolve it — otherwise a single transient spike parks
-        // every submission in pending_benchmark for the rest of the event.
-        let restored: Option<(String,)> = sqlx::query_as(
-            "UPDATE workers SET healthy = true, detail = NULL \
-             WHERE id = $1 AND healthy = false RETURNING id",
-        )
-        .bind(&cfg.worker_id)
-        .fetch_optional(db)
-        .await?;
-        if restored.is_some() {
-            tracing::warn!("reference spot check recovered ({p50:.1} ns); node healthy again");
-            log_event(
-                db,
-                None,
-                "reference_spot_check_recovered",
-                serde_json::json!({ "p50_ns": p50, "baseline_ns": base }),
-            )
-            .await?;
+        match exit_code {
+            harness_exit::PASSED => "ok",
+            harness_exit::DEADLINE => "deadline_missed",
+            harness_exit::TIMEOUT => "timeout",
+            harness_exit::UNHEALTHY => "node_unhealthy",
+            _ => r.get("outcome").and_then(|v| v.as_str()).unwrap_or("failed"),
         }
-        log_event(
-            db,
-            None,
-            "reference_spot_check",
-            serde_json::json!({ "p50_ns": p50, "baseline_ns": base, "deviation": deviation }),
-        )
-        .await?;
+    };
+    let f = |k: &str| r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    serde_json::json!({
+        "outcome": outcome,
+        "p50_ns": f("p50_ns"),
+        "p95_ns": f("p95_ns"),
+        "p99_ns": f("p99_ns"),
+        "events_processed": r.get("events_processed").and_then(|v| v.as_u64()).unwrap_or(0),
+        "notes": r.get("notes").cloned().unwrap_or(serde_json::Value::Null),
+    })
+}
+
+async fn run_phase1(
+    cfg: &Config,
+    sandbox: &Sandbox,
+    b: &sandbox::Box_,
+    p1: &Phase1Cfg,
+) -> Result<serde_json::Value> {
+    let baked = ensure_baked(cfg, cfg.seed1, p1.events, p1.live_target).await?;
+    stage_harness(cfg, b).await?;
+    let (exit, r) = gated_bench(sandbox, b, &baked, p1.runs, p1.deadline_ms, "phase1.sol").await?;
+
+    let mut out = bench_outcome(exit, &r, false);
+    let o = out.as_object_mut().unwrap();
+    o.insert("events".into(), serde_json::json!(p1.events));
+    o.insert("deadline_ms".into(), serde_json::json!(p1.deadline_ms));
+    o.insert("runs".into(), r.get("runs").cloned().unwrap_or(serde_json::Value::Null));
+    o.insert(
+        "percentiles".into(),
+        r.get("percentiles").cloned().unwrap_or(serde_json::Value::Null),
+    );
+    Ok(out)
+}
+
+async fn run_level(
+    cfg: &Config,
+    sandbox: &Sandbox,
+    b: &sandbox::Box_,
+    lv: &LevelCfg,
+) -> Result<serde_json::Value> {
+    let baked = ensure_baked(cfg, cfg.seed2, lv.events, lv.live_target).await?;
+    let (exit, r) = gated_bench(sandbox, b, &baked, 1, lv.deadline_ms, "level.sol").await?;
+
+    let crashed = !matches!(
+        exit,
+        harness_exit::PASSED
+            | harness_exit::FAILED
+            | harness_exit::TIMEOUT
+            | harness_exit::UNHEALTHY
+            | harness_exit::DEADLINE
+    );
+    let mut out = bench_outcome(exit, &r, crashed);
+    let o = out.as_object_mut().unwrap();
+    o.insert("level".into(), serde_json::json!(lv.level));
+    o.insert("events".into(), serde_json::json!(lv.events));
+    o.insert("deadline_ms".into(), serde_json::json!(lv.deadline_ms));
+    o.insert(
+        "wall_s".into(),
+        r.get("runs")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.last())
+            .and_then(|run| run.get("wall_s"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    o.insert(
+        "checked_events".into(),
+        r.get("runs")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.last())
+            .and_then(|run| run.get("checked_events"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    Ok(out)
+}
+
+// ---------------------------------------------------------------- bake cache
+
+/// A baked stream + its solution. On the real fleet these are AMI contents;
+/// in dev the agent bakes lazily into MEBENCH_BAKE on first use. Filenames
+/// carry every generation parameter, so an operator editing the level table
+/// mid-event just causes a fresh bake for the new shape.
+pub struct Baked {
+    pub stream: PathBuf,
+    pub solution: PathBuf,
+}
+
+impl Baked {
+    /// The stream crosses into the box as an inherited descriptor: no path
+    /// resolves inside, and no seed appears in argv.
+    fn open_stream(&self) -> Result<std::fs::File> {
+        Ok(std::fs::File::open(&self.stream)?)
     }
-    Ok(())
+}
+
+async fn ensure_baked(cfg: &Config, seed: u64, events: u64, live_target: u64) -> Result<Baked> {
+    tokio::fs::create_dir_all(&cfg.bake_dir).await?;
+    let base = format!("{PROFILE}-{seed}-{events}-{live_target}");
+    let stream = PathBuf::from(&cfg.bake_dir).join(format!("{base}.bin"));
+    let solution = PathBuf::from(&cfg.bake_dir).join(format!("{base}.sol"));
+
+    if !stream.exists() {
+        tracing::info!("baking stream {base}");
+        let mut args = vec![
+            "--seed".to_string(),
+            seed.to_string(),
+            "--profile".to_string(),
+            PROFILE.to_string(),
+            "--events".to_string(),
+            events.to_string(),
+            "-o".to_string(),
+            stream.to_string_lossy().into_owned(),
+        ];
+        if live_target > 0 {
+            args.extend(["--live-target".to_string(), live_target.to_string()]);
+        }
+        let out = tokio::process::Command::new(&cfg.gen_bin).args(&args).output().await?;
+        if !out.status.success() {
+            anyhow::bail!("gen failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stream, std::fs::Permissions::from_mode(0o600))?;
+    }
+    if !solution.exists() {
+        tracing::info!("baking solution {base}");
+        let out = tokio::process::Command::new(&cfg.harness_bin)
+            .args([
+                "solve",
+                "--stream",
+                &stream.to_string_lossy(),
+                "-o",
+                &solution.to_string_lossy(),
+            ])
+            .output()
+            .await?;
+        if !out.status.success() {
+            anyhow::bail!("solve failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+    Ok(Baked { stream, solution })
 }
 
 // ---------------------------------------------------------------- helpers
@@ -726,8 +608,8 @@ async fn compile_in_box(
     kind: &str,
 ) -> Result<sandbox::RunOutcome> {
     // Pinned compiler, published flags, explicit -march. Never -march=native:
-    // the pool and the bench node are different instance families, and a binary
-    // verified on one must be the binary measured on the other.
+    // every box is the same instance type by design, but a binary must mean
+    // the same thing on every one of them.
     let mut argv: Vec<String> = vec![
         cfg.cxx.clone(),
         "-std=c++20".into(),
@@ -752,39 +634,11 @@ async fn compile_in_box(
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
 
     // Headers go INTO the box rather than being bind-mounted from the host.
-    // They are a few kilobytes, it removes a whole class of mount-path
-    // mistakes, and the compile is hermetic: -Iinclude resolves inside the box
-    // no matter where the platform is installed on the node.
     stage_headers(cfg, b, kind).await?;
 
     let mut opts = RunOpts::for_compile();
-    // isolate starts the box with a minimal environment and no PATH, so a bare
-    // "g++" cannot resolve. cfg.cxx is an absolute path for the same reason the
-    // spec pins the compiler: which g++ ran must not depend on the node's PATH.
     opts.env.push(("PATH".into(), "/usr/bin:/bin".into()));
     sandbox.run(b, &opts, &refs).await
-}
-
-/// A generated stream, held open outside the box. Only the descriptor crosses
-/// in; the file itself is never readable by the box UID, and the seed never
-/// appears in argv.
-pub struct HiddenStream {
-    file: Option<std::fs::File>,
-    pub path: std::path::PathBuf,
-}
-
-impl HiddenStream {
-    /// Hand the descriptor to a sandboxed run. The file stays owned here, so
-    /// the temp file is still removed when this drops.
-    pub fn dup_fd(&self) -> std::io::Result<std::fs::File> {
-        self.file.as_ref().expect("stream file present").try_clone()
-    }
-}
-
-impl Drop for HiddenStream {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 /// Copy the harness into the box. It runs as ./harness inside the sandbox, so
@@ -803,7 +657,7 @@ async fn stage_harness(cfg: &Config, b: &sandbox::Box_) -> Result<()> {
     Ok(())
 }
 
-/// Copy the frozen headers into the box, plus the visible tests for a Run job.
+/// Copy the frozen headers into the box, plus the visible tests when needed.
 async fn stage_headers(cfg: &Config, b: &sandbox::Box_, kind: &str) -> Result<()> {
     let inc = b.root.join("include/mebench");
     tokio::fs::create_dir_all(&inc).await?;
@@ -826,61 +680,10 @@ async fn stage_headers(cfg: &Config, b: &sandbox::Box_, kind: &str) -> Result<()
     Ok(())
 }
 
-/// Generate a stream outside the sandbox. The seed never enters the box.
-async fn generate_stream(
-    cfg: &Config,
-    seed: u64,
-    profile: &str,
-    events: u64,
-) -> Result<HiddenStream> {
-    let path = std::env::temp_dir().join(format!("stream-{}-{}.bin", cfg.worker_id, seed));
-    let out = tokio::process::Command::new(&cfg.gen_bin)
-        .args([
-            "--seed",
-            &seed.to_string(),
-            "--profile",
-            profile,
-            "--events",
-            &events.to_string(),
-            "-o",
-            path.to_str().unwrap(),
-        ])
-        .output()
-        .await
-        .context("running gen")?;
-    if !out.status.success() {
-        anyhow::bail!("gen failed: {}", String::from_utf8_lossy(&out.stderr));
-    }
-
-    // Readable only by the worker. The box runs as a different unprivileged
-    // UID, so even the path leaking would not be enough.
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    let file = std::fs::File::open(&path)?;
-    Ok(HiddenStream { file: Some(file), path })
-}
-
-/// Computed OUTSIDE the box, by the reference, over the same stream.
-async fn oracle_digest(cfg: &Config, path: &std::path::Path) -> Result<String> {
-    let out = tokio::process::Command::new(&cfg.harness_bin)
-        .args(["digest", "--stream", path.to_str().unwrap(), "--engine", "builtin"])
-        .output()
-        .await?;
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
 async fn set_state(db: &PgPool, id: i64, state: SubState) -> Result<()> {
     sqlx::query("UPDATE submissions SET state = $2, updated_at = now() WHERE id = $1")
         .bind(id)
         .bind(state)
-        .execute(db)
-        .await?;
-    Ok(())
-}
-
-async fn clear_pending(db: &PgPool, participant_id: i32) -> Result<()> {
-    sqlx::query("UPDATE bench_slots SET pending_sub = NULL WHERE participant_id = $1")
-        .bind(participant_id)
         .execute(db)
         .await?;
     Ok(())
@@ -903,32 +706,4 @@ async fn log_event(
 
 fn first_lines(s: &str, n: usize) -> String {
     s.lines().take(n).collect::<Vec<_>>().join("\n")
-}
-
-/// A fresh seed per submission, so the hidden stream cannot be
-/// reverse-engineered across attempts.
-///
-/// Drawn from the OS entropy pool, not from the clock. The seed is the one
-/// thing standing between the contest and the exploit the plan names: read the
-/// stream, hardcode the outputs. A submission never SEES the seed — the stream
-/// arrives on an inherited descriptor — but a clock-derived seed is guessable
-/// by anyone who knows the algorithm and roughly when their job was claimed,
-/// and "the repository is private" is obscurity rather than a defence. It also
-/// removes the collision between pool boxes claiming in the same nanosecond.
-fn rand_seed() -> i64 {
-    use std::io::Read;
-    let mut bytes = [0u8; 8];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        if f.read_exact(&mut bytes).is_ok() {
-            return (u64::from_le_bytes(bytes) & 0x7FFF_FFFF_FFFF_FFFF) as i64;
-        }
-    }
-    // Only reachable if /dev/urandom is unavailable, which on these nodes means
-    // something is badly wrong — but a worker that cannot seed is worse than a
-    // worker with a weak seed, so fall back rather than refuse to run.
-    tracing::error!("/dev/urandom unavailable; falling back to a clock-derived seed");
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    ((d.as_secs().wrapping_mul(1_000_000_007).wrapping_add(d.subsec_nanos() as u64))
-        & 0x7FFF_FFFF_FFFF_FFFF) as i64
 }

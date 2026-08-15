@@ -25,3 +25,4 @@ FRONTEND-BRIEF.md
 # known_hosts for instances whose IPs AWS recycles, provisioning logs and
 # database backups. Never committed.
 ops/aws/.state/
+engine/build*/
