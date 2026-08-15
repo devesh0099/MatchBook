@@ -112,8 +112,27 @@ CREATE TABLE boxes (
   detail         jsonb
 );
 
--- Phase III, written by the golden box during the post-contest rejudge (M6).
--- Final standings are a view over this table; nothing live writes here.
+-- Phase III job queue (M6): one row per finalist, claimed by the golden box
+-- with the same FOR UPDATE SKIP LOCKED discipline as everything else. Created
+-- by POST /admin/rejudge from each participant's LAST submission stored via
+-- Submit — latest, not best, regardless of how it fared live.
+CREATE TABLE rejudge_jobs (
+  id             bigserial PRIMARY KEY,
+  participant_id int REFERENCES participants(id) NOT NULL,
+  submission_id  bigint REFERENCES submissions(id) NOT NULL,
+  source_hash    text NOT NULL,
+  state          text NOT NULL DEFAULT 'received',  -- received|running|done|error
+  claimed_by     text,
+  created_at     timestamptz DEFAULT now(),
+  updated_at     timestamptz DEFAULT now()
+);
+CREATE INDEX ON rejudge_jobs (state, id);
+
+-- Phase III results, written by the golden box. Final standings are a query
+-- over this table implementing the recorded chain (PLAN §3): finishers above
+-- non-finishers; finishers on p95, p50, p99; non-finishers on p99 over what
+-- they processed (validated against the cached solution), then events
+-- processed; ties fall to the earlier submission.
 CREATE TABLE rejudge_results (
   id              bigserial PRIMARY KEY,
   participant_id  int REFERENCES participants(id) NOT NULL,
@@ -135,17 +154,39 @@ CREATE TABLE settings (
   key   text PRIMARY KEY,
   value jsonb NOT NULL
 );
--- The numbers below are DEV PLACEHOLDERS sized for a laptop. M5's calibration
--- afternoon replaces them with the real level table and writes it into the
--- spec; every deadline is a gate, never a score.
+-- The M5-CALIBRATED numbers, measured 2026-08-15 on the real fleet
+-- (c6i.2xlarge, SMT off, isolated core; ops noise: 1.8% intra-box wall
+-- spread over 8 runs). Deadlines are gates, never scores, placed so the
+-- skeleton fails rung 1 on digest, the REFERENCE falls at L4 (ref wall
+-- 2.09s > 1.5s gate — "out-climb the oracle" is the mid-ladder milestone),
+-- and the optimized comparison engine clears all eight rungs with >=1.6x
+-- headroom (ref/opt wall ratio grows from 2.4x shallow to 4.9x at depth).
 INSERT INTO settings (key, value) VALUES
   ('leaderboard_frozen', 'false'::jsonb),
-  ('phase1', '{"events": 500000, "live_target": 1000, "deadline_ms": 5000, "runs": 3}'::jsonb),
+  -- Contest close (PLAN §3 mechanics): flipped by /admin/close at the
+  -- announced time; Submit refuses while true, in-flight evaluations drain.
+  ('submissions_closed', 'false'::jsonb),
+  -- Final standings stay hidden until the operator publishes them.
+  ('final_published', 'false'::jsonb),
+  -- Phase III's constrained run: X events under deadline Y, repeated. At
+  -- 16M/default depth the reference (10.3s) is a non-finisher and the
+  -- optimized engine (2.1s) finishes with 2.8x headroom. The sealed seed is
+  -- NOT here — it reaches the golden box as MEBENCH_SEED3 only when the
+  -- rejudge begins.
+  ('phase3', '{"events": 16000000, "live_target": 0, "deadline_ms": 6000, "runs": 5}'::jsonb),
+  ('phase1', '{"events": 500000, "live_target": 500, "deadline_ms": 3000, "runs": 3}'::jsonb),
+  -- live_target 0 = the profile's shipped ~750k-order depth. Measured walls
+  -- (reference / optimized, seconds): L1 .18/.07  L2 .41/.13  L3 .91/.25
+  -- L4 2.09/.47  L5 4.71/1.00  L6 7.47/1.51  L7 10.30/2.12  L8 16.09/3.31.
   ('level_table', '[
-    {"level": 1, "events":  500000, "live_target": 1000, "deadline_ms": 3000},
-    {"level": 2, "events": 1000000, "live_target": 1000, "deadline_ms": 1000},
-    {"level": 3, "events": 2000000, "live_target": 1000, "deadline_ms": 1000},
-    {"level": 4, "events": 4000000, "live_target": 1000, "deadline_ms": 1300}
+    {"level": 1, "events":   500000, "live_target":  500, "deadline_ms": 1000},
+    {"level": 2, "events":  1000000, "live_target": 1000, "deadline_ms":  800},
+    {"level": 3, "events":  2000000, "live_target": 2000, "deadline_ms": 1400},
+    {"level": 4, "events":  4000000, "live_target": 4000, "deadline_ms": 1500},
+    {"level": 5, "events":  8000000, "live_target": 4000, "deadline_ms": 2500},
+    {"level": 6, "events": 12000000, "live_target":    0, "deadline_ms": 3500},
+    {"level": 7, "events": 16000000, "live_target":    0, "deadline_ms": 4200},
+    {"level": 8, "events": 24000000, "live_target":    0, "deadline_ms": 5500}
    ]'::jsonb);
 
 -- The live ranking: highest ladder level, then the scoring chain (p95, p50,

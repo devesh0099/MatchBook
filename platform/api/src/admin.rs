@@ -40,10 +40,54 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/unfreeze", post(unfreeze))
         .route("/admin/box/:id/:health", post(set_box_health))
         .route("/admin/leaderboard/rebuild", post(rebuild))
-        // The rejudge block returns with the golden-box role (M6): it reads
-        // every participant's LAST submission stored via Submit and writes
-        // rejudge_results on the sealed seed.
+        .route("/admin/close", post(close_submissions))
+        .route("/admin/open", post(open_submissions))
+        .route("/admin/rejudge", post(rejudge))
+        .route("/admin/publish-final", post(publish_final))
         .with_state(state)
+}
+
+/// Contest close (PLAN §3 mechanics): Submit refuses from this moment;
+/// in-flight evaluations drain on their own. The last submission stored by
+/// the cutoff is the rejudge target.
+async fn close_submissions(State(st): State<AppState>) -> R {
+    set_flag(&st, "submissions_closed", true).await.map_err(oops)?;
+    log(&st, None, "submissions_closed", json!({})).await.map_err(oops)?;
+    Ok(Json(json!({ "closed": true })))
+}
+
+async fn open_submissions(State(st): State<AppState>) -> R {
+    set_flag(&st, "submissions_closed", false).await.map_err(oops)?;
+    log(&st, None, "submissions_opened", json!({})).await.map_err(oops)?;
+    Ok(Json(json!({ "closed": false })))
+}
+
+/// Queue Phase III: one job per participant, from their LAST submission
+/// stored via Submit — latest, not best, regardless of how it fared live
+/// (recorded decision; the spec says "make your final Submit one that
+/// works"). The golden box claims these; the sealed seed reaches it as
+/// MEBENCH_SEED3 when the operator starts that role, never through here.
+async fn rejudge(State(st): State<AppState>) -> R {
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "WITH final AS ( \
+           SELECT DISTINCT ON (participant_id) id, participant_id, source_hash \
+           FROM submissions ORDER BY participant_id, created_at DESC, id DESC) \
+         INSERT INTO rejudge_jobs (participant_id, submission_id, source_hash) \
+         SELECT participant_id, id, source_hash FROM final \
+         RETURNING id",
+    )
+    .fetch_all(&st.db)
+    .await
+    .map_err(oops)?;
+
+    log(&st, None, "rejudge_queued", json!({ "jobs": rows.len() })).await.map_err(oops)?;
+    Ok(Json(json!({ "queued": rows.len() })))
+}
+
+async fn publish_final(State(st): State<AppState>) -> R {
+    set_flag(&st, "final_published", true).await.map_err(oops)?;
+    log(&st, None, "final_published", json!({})).await.map_err(oops)?;
+    Ok(Json(json!({ "published": true })))
 }
 
 type R = Result<Json<serde_json::Value>, (axum::http::StatusCode, String)>;

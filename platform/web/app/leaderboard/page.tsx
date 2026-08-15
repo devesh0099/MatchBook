@@ -13,7 +13,7 @@
 // rather than in a footnote. It is information, not a rule: it does not tie ranks.
 
 import { useEffect, useState } from 'react';
-import { api, type LeaderboardEntry } from '@/lib/api';
+import { api, type FinalEntry, type LeaderboardEntry } from '@/lib/api';
 import { useIdentity } from '@/lib/identity';
 
 const COLS = '56px minmax(0,1fr) 90px 110px 110px 110px';
@@ -22,11 +22,12 @@ export default function LeaderboardPage() {
   const { identity } = useIdentity();
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [frozen, setFrozen] = useState(false);
+  const [finalEntries, setFinalEntries] = useState<FinalEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    const load = () =>
+    const load = () => {
       api
         .leaderboard()
         .then((r) => {
@@ -39,12 +40,99 @@ export default function LeaderboardPage() {
           setError(String(e.message ?? e));
           setLoaded(true);
         });
+      api
+        .final()
+        .then((r) => setFinalEntries(r.published ? r.entries : null))
+        .catch(() => {});
+    };
     load();
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, []);
 
   const ranked = entries;
+
+  // Once the golden box has spoken, its standings ARE the contest — the live
+  // board below stays as the day's history.
+  if (finalEntries) {
+    return (
+      <div className="page scroll-y">
+        <div style={{ padding: '28px 0 16px', borderBottom: '2px solid var(--app-rule)' }}>
+          <div style={{ fontWeight: 800, fontSize: 38, letterSpacing: '-0.02em', lineHeight: 1 }}>
+            Final standings
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--app-ink-2)', marginTop: 8 }}>
+            Re-measured after the contest on the golden box, on a sealed stream, from each
+            participant&apos;s last submitted code. p95 ranks first, then p50, then p99.
+          </div>
+        </div>
+        <div style={{ marginTop: 22, border: '1px solid var(--app-line)' }}>
+          <div
+            className="kicker"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '56px minmax(0,1fr) 110px 110px 110px 130px',
+              padding: '10px 16px',
+              background: 'var(--app-panel)',
+              borderBottom: '2px solid var(--app-rule)',
+              letterSpacing: '0.12em',
+            }}
+          >
+            <span>Rank</span>
+            <span>Participant</span>
+            <span style={{ textAlign: 'right' }}>p95 ns</span>
+            <span style={{ textAlign: 'right' }}>p50 ns</span>
+            <span style={{ textAlign: 'right' }}>p99 ns</span>
+            <span style={{ textAlign: 'right' }}>Outcome</span>
+          </div>
+          {finalEntries.map((e, i) => {
+            const me = identity?.handle === e.handle;
+            return (
+              <div
+                key={e.handle}
+                className="mono"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '56px minmax(0,1fr) 110px 110px 110px 130px',
+                  alignItems: 'center',
+                  padding: '9px 16px',
+                  borderBottom: '1px solid var(--app-line)',
+                  background: me ? 'var(--s-idle-bg)' : 'transparent',
+                  fontSize: 13,
+                }}
+              >
+                <span style={{ fontWeight: 700, color: i < 3 ? 'var(--color-accent)' : 'var(--app-ink-3)' }}>
+                  {String(i + 1).padStart(2, '0')}
+                </span>
+                <span style={{ fontFamily: 'var(--font-body)', fontWeight: me ? 800 : 500, fontSize: 14 }}>
+                  {e.handle}
+                  {me && <span style={{ fontSize: 10, color: 'var(--app-ink-3)' }}> you</span>}
+                </span>
+                <span style={{ textAlign: 'right', fontWeight: 700, fontSize: 15 }}>
+                  {e.p95_ns ? Math.round(e.p95_ns) : '—'}
+                </span>
+                <span style={{ textAlign: 'right', color: 'var(--app-ink-2)' }}>
+                  {e.p50_ns ? Math.round(e.p50_ns) : '—'}
+                </span>
+                <span style={{ textAlign: 'right', color: 'var(--app-ink-3)' }}>
+                  {e.p99_ns ? Math.round(e.p99_ns) : '—'}
+                </span>
+                <span
+                  style={{
+                    textAlign: 'right',
+                    fontWeight: 700,
+                    color: e.finished ? 'var(--s-pass)' : 'var(--s-fail)',
+                  }}
+                >
+                  {e.finished ? 'finished' : 'did not finish'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="page scroll-y">

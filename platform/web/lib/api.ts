@@ -130,6 +130,16 @@ export interface LeaderboardEntry {
   chain_p99_ns: number | null;
 }
 
+export interface FinalEntry {
+  handle: string;
+  submission_id: number;
+  finished: boolean | null;
+  p95_ns: number | null;
+  p50_ns: number | null;
+  p99_ns: number | null;
+  events_processed: number | null;
+}
+
 export interface RunResult {
   compiled: boolean;
   stderr?: string;
@@ -205,6 +215,10 @@ export const api = {
   mine: () => call<Submission[]>('/me'),
 
   leaderboard: () => call<{ frozen: boolean; entries: LeaderboardEntry[] }>('/leaderboard'),
+
+  /// Golden-box numbers on the sealed seed — the standings that decide the
+  /// contest. Empty until the operator publishes them.
+  final: () => call<{ published: boolean; entries: FinalEntry[] }>('/final'),
 
   /// The one-at-a-time rule, by exactly the check submit() enforces — so the
   /// editor's message can never promise a submission the server would refuse.

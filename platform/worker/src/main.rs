@@ -68,6 +68,9 @@ pub struct Config {
     /// what let streams and solutions be baked once and judged by lookup.
     pub seed1: u64,
     pub seed2: u64,
+    /// The sealed rejudge seed. Set ONLY on the golden box, ONLY when the
+    /// rejudge begins — before that it exists nowhere executable.
+    pub seed3: Option<u64>,
     /// Where baked streams and solutions live. On the real fleet this is AMI
     /// content; in dev the agent bakes lazily on first use.
     pub bake_dir: String,
@@ -107,8 +110,8 @@ async fn main() -> Result<()> {
     if role == "pool" {
         role = "agent".into(); // compose-era alias
     }
-    if role != "agent" {
-        anyhow::bail!("usage: worker --role agent");
+    if role != "agent" && role != "golden" {
+        anyhow::bail!("usage: worker --role agent|golden");
     }
 
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
@@ -146,6 +149,7 @@ async fn main() -> Result<()> {
         // the environment. Never published.
         seed1: env_or("MEBENCH_SEED1", "101").trim().parse().unwrap_or(101),
         seed2: env_or("MEBENCH_SEED2", "202").trim().parse().unwrap_or(202),
+        seed3: std::env::var("MEBENCH_SEED3").ok().and_then(|v| v.trim().parse().ok()),
         bake_dir: env_or(
             "MEBENCH_BAKE",
             &std::env::temp_dir().join("mebench-bake").to_string_lossy(),
@@ -161,7 +165,10 @@ async fn main() -> Result<()> {
     spawn_heartbeat(db.clone(), cfg.worker_id.clone());
 
     tracing::info!("worker {} starting as {role}", cfg.worker_id);
-    roles::run_agent(db, cfg).await
+    match role.as_str() {
+        "golden" => roles::run_golden(db, cfg).await,
+        _ => roles::run_agent(db, cfg).await,
+    }
 }
 
 /// Any row still claimed by THIS worker id at startup is orphaned by

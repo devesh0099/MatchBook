@@ -537,6 +537,148 @@ async fn run_level(
     Ok(out)
 }
 
+// ---------------------------------------------------------------- golden role
+
+/// Phase III (PLAN-measurement-redesign §3): the golden box, idle all
+/// contest, claims rejudge jobs after the freeze and re-measures every
+/// finalist's LAST submitted code on the sealed seed — one heavy constrained
+/// run, repeated, under maximum isolation. The seed arrives as MEBENCH_SEED3
+/// only when the operator starts this role: sealed means it exists nowhere
+/// executable until the rejudge begins, and the streams are baked here, then.
+pub async fn run_golden(db: PgPool, cfg: Config) -> Result<()> {
+    let seed3 = cfg.seed3.context("MEBENCH_SEED3 must be set for the golden role")?;
+    let sandbox = Sandbox::new();
+    sandbox.cleanup_blocking(cfg.box_id);
+    tracing::info!("golden box up; rejudge seed loaded, streams bake on first job");
+    loop {
+        let row: Option<(i64, i32, i64, String)> = sqlx::query_as(
+            "UPDATE rejudge_jobs SET state = 'running', claimed_by = $1, updated_at = now() \
+             WHERE id = (SELECT id FROM rejudge_jobs WHERE state = 'received' \
+                         ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) \
+             RETURNING id, participant_id, submission_id, source_hash",
+        )
+        .bind(&cfg.worker_id)
+        .fetch_optional(&db)
+        .await?;
+
+        let Some((job_id, participant_id, submission_id, hash)) = row else {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            continue;
+        };
+        tracing::info!("rejudge job {job_id}: participant {participant_id}, submission {submission_id}");
+        match rejudge_one(&db, &cfg, &sandbox, seed3, participant_id, submission_id, &hash).await {
+            Ok(()) => {
+                sqlx::query("UPDATE rejudge_jobs SET state = 'done', updated_at = now() WHERE id = $1")
+                    .bind(job_id)
+                    .execute(&db)
+                    .await?;
+            }
+            Err(e) => {
+                tracing::error!("rejudge job {job_id} errored: {e}");
+                sqlx::query("UPDATE rejudge_jobs SET state = 'error', updated_at = now() WHERE id = $1")
+                    .bind(job_id)
+                    .execute(&db)
+                    .await?;
+                log_event(&db, Some(submission_id), "rejudge_error",
+                          serde_json::json!({ "error": e.to_string() })).await?;
+            }
+        }
+    }
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct Phase3Cfg {
+    events: u64,
+    #[serde(default)]
+    live_target: u64,
+    deadline_ms: f64,
+    #[serde(default = "default_runs")]
+    runs: u32,
+}
+
+async fn rejudge_one(
+    db: &PgPool,
+    cfg: &Config,
+    sandbox: &Sandbox,
+    seed3: u64,
+    participant_id: i32,
+    submission_id: i64,
+    hash: &str,
+) -> Result<()> {
+    let (p3,): (serde_json::Value,) =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'phase3'")
+            .fetch_one(db)
+            .await
+            .context("settings.phase3 missing")?;
+    let p3: Phase3Cfg = serde_json::from_value(p3).context("settings.phase3 malformed")?;
+
+    let source = cfg.storage.get_source(hash).await?;
+    let b = sandbox.init(cfg.box_id).await?;
+    let _guard = BoxGuard { sandbox, id: cfg.box_id };
+    sandbox::place(&b, "engine.cpp", &source).await?;
+
+    // "Latest regardless of how it fared live" is blunt on purpose: a final
+    // submit that does not compile scores as failed, and the spec says so.
+    let compile = compile_in_box(cfg, sandbox, &b, "engine.cpp", "engine").await?;
+    let detail;
+    let (finished, wall_s, events_processed, chain);
+    if compile.exit_code != 0 {
+        finished = false;
+        wall_s = 0.0;
+        events_processed = 0i64;
+        chain = (0.0, 0.0, 0.0);
+        detail = serde_json::json!({ "outcome": "compile_failed",
+                                     "stderr": first_lines(&compile.stderr, 40) });
+    } else {
+        stage_harness(cfg, &b).await?;
+        let baked = ensure_baked(cfg, seed3, p3.events, p3.live_target).await?;
+        let (exit, r) = gated_bench(cfg, sandbox, &b, &baked, p3.runs, p3.deadline_ms, "phase3.sol").await?;
+        let out = bench_outcome(exit, &r, false);
+        let f = |k: &str| out.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        finished = out.get("outcome").and_then(|v| v.as_str()) == Some("ok");
+        chain = (f("p50_ns"), f("p95_ns"), f("p99_ns"));
+        events_processed =
+            out.get("events_processed").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        wall_s = r
+            .get("runs")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                let kept: Vec<f64> = a
+                    .iter()
+                    .filter(|run| run.get("discarded").and_then(|d| d.as_i64()) != Some(1))
+                    .filter_map(|run| run.get("wall_s").and_then(|w| w.as_f64()))
+                    .collect();
+                if kept.is_empty() { 0.0 } else { kept.iter().sum::<f64>() / kept.len() as f64 }
+            })
+            .unwrap_or(0.0);
+        detail = serde_json::json!({
+            "outcome": out.get("outcome"),
+            "notes": out.get("notes"),
+            "runs": r.get("runs"),
+            "percentiles": r.get("percentiles"),
+        });
+    }
+
+    sqlx::query(
+        "INSERT INTO rejudge_results (participant_id, submission_id, seed, finished, wall_s, \
+         events_processed, p50_ns, p95_ns, p99_ns, detail) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(participant_id)
+    .bind(submission_id)
+    .bind(seed3 as i64)
+    .bind(finished)
+    .bind(wall_s)
+    .bind(events_processed)
+    .bind(chain.0)
+    .bind(chain.1)
+    .bind(chain.2)
+    .bind(&detail)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------- bake cache
 
 /// A baked stream + its solution. On the real fleet these are AMI contents;

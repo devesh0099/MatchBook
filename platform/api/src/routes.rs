@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/submissions/:id", get(submission))
         .route("/me", get(me))
         .route("/leaderboard", get(leaderboard))
+        .route("/final", get(final_standings))
         .route("/queue", get(queue))
         .route("/health", get(|| async { "ok" }))
         .with_state(state)
@@ -196,6 +197,20 @@ async fn submit(
     if body.source.len() > MAX_SOURCE_BYTES {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "source exceeds 256 KB"));
     }
+    // The cutoff (PLAN §3 mechanics): after /admin/close, nothing new is
+    // stored — the last submission stored BEFORE this moment is the rejudge
+    // target, so refusing here is what makes "stored by the cutoff" exact.
+    let closed: Option<(serde_json::Value,)> =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'submissions_closed'")
+            .fetch_optional(&st.db)
+            .await
+            .map_err(internal)?;
+    if closed.map(|c| c.0 == serde_json::Value::Bool(true)).unwrap_or(false) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "submissions are closed — the contest has ended; your last submission is what the rejudge measures",
+        ));
+    }
     if let Some(active) = active_submission(&st, auth.participant_id).await? {
         return Err(err(
             StatusCode::CONFLICT,
@@ -344,6 +359,53 @@ async fn leaderboard(State(st): State<AppState>) -> ApiResult<serde_json::Value>
 
     let entries = leaderboard_from_db(&st.db).await.map_err(internal)?;
     Ok(Json(json!({ "frozen": is_frozen, "entries": entries })))
+}
+
+// ---------------------------------------------------------------- final
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct FinalRow {
+    pub handle: String,
+    pub submission_id: i64,
+    pub finished: Option<bool>,
+    pub p95_ns: Option<f64>,
+    pub p50_ns: Option<f64>,
+    pub p99_ns: Option<f64>,
+    pub events_processed: Option<i64>,
+}
+
+/// The final standings — golden-box numbers, sealed seed, the recorded chain
+/// (PLAN §3): finishers above non-finishers; finishers on p95, p50, p99;
+/// non-finishers on p99 over the events they processed, then progress; ties
+/// fall to the earlier submission. Hidden until the operator publishes.
+async fn final_standings(State(st): State<AppState>) -> ApiResult<serde_json::Value> {
+    let published: Option<(serde_json::Value,)> =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'final_published'")
+            .fetch_optional(&st.db)
+            .await
+            .map_err(internal)?;
+    if !published.map(|p| p.0 == serde_json::Value::Bool(true)).unwrap_or(false) {
+        return Ok(Json(json!({ "published": false, "entries": [] })));
+    }
+
+    let rows: Vec<FinalRow> = sqlx::query_as(
+        "SELECT p.handle, r.submission_id, r.finished, r.p95_ns, r.p50_ns, r.p99_ns, \
+                r.events_processed \
+         FROM rejudge_results r \
+         JOIN participants p ON p.id = r.participant_id \
+         JOIN submissions s ON s.id = r.submission_id \
+         ORDER BY r.finished DESC NULLS LAST, \
+                  CASE WHEN r.finished THEN r.p95_ns END ASC NULLS LAST, \
+                  CASE WHEN r.finished THEN r.p50_ns END ASC NULLS LAST, \
+                  CASE WHEN r.finished THEN r.p99_ns END ASC NULLS LAST, \
+                  CASE WHEN NOT r.finished THEN NULLIF(r.p99_ns, 0) END ASC NULLS LAST, \
+                  r.events_processed DESC NULLS LAST, \
+                  s.created_at ASC",
+    )
+    .fetch_all(&st.db)
+    .await
+    .map_err(internal)?;
+    Ok(Json(json!({ "published": true, "entries": rows })))
 }
 
 // ---------------------------------------------------------------- status
