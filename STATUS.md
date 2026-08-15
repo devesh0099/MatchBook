@@ -341,6 +341,12 @@ Short, and none of it blocks the event.
 
 ## 8. Open plans, for review
 
+- **[PLAN-measurement-redesign.md](PLAN-measurement-redesign.md)** — the phased
+  gauntlet: correctness → 500k bulk run → an ever-increasing ladder with time
+  budgets → a post-contest golden-box rejudge, on one dedicated box per
+  participant with real auth, replacing the shared bench node, its queue, and
+  nanosecond live ranking. Parks ratio scoring; promotes book depth into the
+  grading instrument itself.
 - **[PLAN-ratio-scoring.md](PLAN-ratio-scoring.md)** — score
   `submission_p50 / reference_p50`, measured in the same job on the same core,
   instead of raw nanoseconds. Cancels machine contamination rather than trying
