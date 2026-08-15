@@ -23,6 +23,8 @@ class ReferenceEngine final : public IMatchingEngine {
   void on_new(const Order& o, OutSink& out) noexcept override;
   void on_cancel(OrderRef ref, uint64_t seq, OutSink& out) noexcept override;
   void snapshot(BookSnapshot& out) const override;
+  void bid_levels(LevelVec& out) const override;
+  void ask_levels(LevelVec& out) const override;
 
   // Is (session_id, client_order_id) resting right now?
   //
@@ -63,7 +65,7 @@ class ReferenceEngine final : public IMatchingEngine {
 
   struct Locator {
     Side side;
-    int32_t px;
+    int32_t price;
     Level::iterator it;
   };
 
@@ -91,10 +93,12 @@ class ReferenceEngine final : public IMatchingEngine {
   void rest(Book& book, const Order& o, uint32_t remaining) noexcept;
 
   template <class Book>
-  void erase_at(Book& book, int32_t px, Level::iterator it) noexcept;
+  void erase_at(Book& book, int32_t price, Level::iterator it) noexcept;
 
+  // Book is this engine's map-of-lists; the output is the contract's
+  // (price, total_qty) aggregate vector, in the book's own (best-first) order.
   template <class Book>
-  void fill_side(const Book& book, LevelSnapshot* dst, uint32_t& n) const;
+  void fill_levels(const Book& book, LevelVec& dst) const;
 
   Bids bids_;
   Asks asks_;

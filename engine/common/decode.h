@@ -29,7 +29,7 @@ inline DecodedEvent decode(const WireEvent& w, uint64_t seq) {
   DecodedEvent d{};
   d.o.seq = seq;
   d.o.client_order_id = w.client_order_id;
-  d.o.px = w.px;
+  d.o.price = w.price;
   d.o.qty = w.qty;
   d.o.session_id = w.session_id;
   d.o.participant_id = w.participant_id;

@@ -24,30 +24,39 @@ class CaptureSink final : public OutSink {
 };
 
 bool same(const OutEvent& a, const OutEvent& b) {
-  return a.in_seq == b.in_seq && a.maker == b.maker && a.taker == b.taker && a.px == b.px &&
+  return a.in_seq == b.in_seq && a.maker == b.maker && a.taker == b.taker && a.price == b.price &&
          a.qty == b.qty && a.type == b.type && a.aggressor_side == b.aggressor_side &&
          a.reason == b.reason;
 }
 
 bool same(const BookSnapshot& a, const BookSnapshot& b, std::string& what) {
-  auto levels_equal = [](const LevelSnapshot& x, const LevelSnapshot& y) {
-    return x.px == y.px && x.total_qty == y.total_qty && x.order_count == y.order_count &&
-           x.front_seq == y.front_seq;
+  // Both sides are best-first vectors, so lockstep compares equal depths. Name
+  // the first difference precisely: "snapshots differ" is useless at 1000 levels.
+  auto sides_equal = [&what](const LevelVec& x, const LevelVec& y, const char* side) {
+    if (x.size() != y.size()) {
+      what = std::string("number of ") + side + " levels (" + std::to_string(x.size()) + " vs " +
+             std::to_string(y.size()) + ")";
+      return false;
+    }
+    for (size_t i = 0; i < x.size(); ++i) {
+      if (x[i].first != y[i].first) {
+        what = std::string(side) + " price at depth " + std::to_string(i) + " (" +
+               std::to_string(x[i].first) + " vs " + std::to_string(y[i].first) + ")";
+        return false;
+      }
+      if (x[i].second != y[i].second) {
+        what = std::string(side) + " level " + std::to_string(x[i].first) + " total quantity (" +
+               std::to_string(x[i].second) + " vs " + std::to_string(y[i].second) + ")";
+        return false;
+      }
+    }
+    return true;
   };
-  if (a.n_bids != b.n_bids) return what = "number of bid levels", false;
-  if (a.n_asks != b.n_asks) return what = "number of ask levels", false;
+
   if (a.resting_qty_total != b.resting_qty_total) return what = "total resting quantity", false;
   if (a.resting_order_count != b.resting_order_count) return what = "resting order count", false;
-  for (uint32_t i = 0; i < a.n_bids; ++i) {
-    if (!levels_equal(a.bids[i], b.bids[i])) {
-      return what = "bid level " + std::to_string(i), false;
-    }
-  }
-  for (uint32_t i = 0; i < a.n_asks; ++i) {
-    if (!levels_equal(a.asks[i], b.asks[i])) {
-      return what = "ask level " + std::to_string(i), false;
-    }
-  }
+  if (!sides_equal(a.bids, b.bids, "bid")) return false;
+  if (!sides_equal(a.asks, b.asks, "ask")) return false;
   return true;
 }
 
@@ -73,7 +82,7 @@ const char* reason_name(RejectReason r) {
 
 const char* tif_name(TIF t) {
   switch (t) {
-    case TIF::Day: return "DAY";
+    case TIF::GTC: return "GTC";
     case TIF::IOC: return "IOC";
     case TIF::FOK: return "FOK";
     case TIF::Market: return "MARKET";
@@ -96,7 +105,7 @@ std::string describe_out(const OutEvent& e) {
   std::ostringstream s;
   s << type_name(e.type);
   if (e.type == OutType::Trade) {
-    s << " " << e.qty << " @ " << e.px;
+    s << " " << e.qty << " @ " << e.price;
   } else if (e.type == OutType::CancelAck || e.type == OutType::Expired) {
     s << " " << e.qty;
   }
@@ -116,7 +125,7 @@ std::string describe_in(const WireEvent& w, uint64_t seq) {
   if (w.tif == TIF::Market) {
     s << " @ market";
   } else {
-    s << " @ " << w.px;
+    s << " @ " << w.price;
   }
   s << "  session=" << w.session_id << " coid=" << w.client_order_id << " firm=" << w.participant_id
     << " tif=" << tif_name(w.tif);
@@ -164,7 +173,7 @@ void classify(const DecodedEvent& d, const std::vector<OutEvent>& oracle_outs, u
     case TIF::Market: add(Category::MarketOrders); break;
     case TIF::IOC: add(Category::Ioc); break;
     case TIF::FOK: add(Category::Fok); break;
-    case TIF::Day: break;
+    case TIF::GTC: break;
   }
   if (traded > 0) add(Category::PriceTimePriority);
   if (traded > 0 && traded < d.o.qty) add(Category::PartialFills);
@@ -190,6 +199,11 @@ RunFailure replay(const std::vector<WireEvent>& events, uint64_t begin, uint64_t
   sub_out.reserve(512);
   ref_out.reserve(512);
   CaptureSink sub_sink(sub_out), ref_sink(ref_out);
+
+  // Allocated once and reused; snapshot() clears them.
+  auto snap_storage = std::make_unique<BookSnapshot[]>(2);
+  BookSnapshot& snap_ref = snap_storage[0];
+  BookSnapshot& snap_sub = snap_storage[1];
 
   InvariantChecker invariants;
   // The oracle is held to the same laws as the submission. If the reference
@@ -291,9 +305,10 @@ RunFailure replay(const std::vector<WireEvent>& events, uint64_t begin, uint64_t
 
     const bool at_snapshot = opts.snapshot_every && ((i - begin + 1) % opts.snapshot_every == 0);
     if (at_snapshot || i + 1 == end) {
-      BookSnapshot a{}, b{};
-      ref->snapshot(a);
-      sub->snapshot(b);
+      build_book(*ref, snap_ref);
+      build_book(*sub, snap_sub);
+      const BookSnapshot& a = snap_ref;
+      const BookSnapshot& b = snap_sub;
       if (std::string what; !same(a, b, what)) {
         fail.failed = true;
         fail.outcome = VerifyOutcome::SnapshotDiverged;
@@ -527,7 +542,7 @@ std::string json_escape(const std::string& in) {
 }
 
 void json_out_event(std::ostringstream& s, const OutEvent& e) {
-  s << "{\"type\":\"" << type_name(e.type) << "\",\"in_seq\":" << e.in_seq << ",\"px\":" << e.px
+  s << "{\"type\":\"" << type_name(e.type) << "\",\"in_seq\":" << e.in_seq << ",\"price\":" << e.price
     << ",\"qty\":" << e.qty << ",\"maker_session\":" << e.maker.session_id
     << ",\"maker_coid\":" << e.maker.client_order_id
     << ",\"maker_firm\":" << e.maker.participant_id
@@ -564,7 +579,7 @@ std::string format_json(const VerifyResult& r) {
       s << (i ? "," : "") << "{\"seq\":" << i << ",\"type\":\""
         << (w.type == EvType::New ? "NEW" : "CANCEL") << "\",\"side\":\""
         << (w.side == Side::Buy ? "buy" : "sell") << "\",\"tif\":\"" << tif_name(w.tif)
-        << "\",\"px\":" << w.px << ",\"qty\":" << w.qty << ",\"session\":" << w.session_id
+        << "\",\"price\":" << w.price << ",\"qty\":" << w.qty << ",\"session\":" << w.session_id
         << ",\"coid\":" << w.client_order_id << ",\"firm\":" << w.participant_id << "}";
     }
     s << "]";

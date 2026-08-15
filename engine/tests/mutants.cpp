@@ -56,7 +56,7 @@ class FilterSink final : public OutSink {
       case Mutation::TradeAtAggressorPrice:
         // The most common first-submission bug: paying the aggressor's price
         // instead of the resting order's.
-        if (out.type == OutType::Trade && aggressor_px_ != 0) out.px = aggressor_px_;
+        if (out.type == OutType::Trade && aggressor_px_ != 0) out.price = aggressor_px_;
         break;
       case Mutation::SwallowExpired:
         if (out.type == OutType::Expired) return;  // silently drop it
@@ -85,7 +85,7 @@ class MutantEngine final : public IMatchingEngine {
       static volatile uint64_t spin = 0;
       for (;;) spin = spin + 1;
     }
-    FilterSink f(out, m_, o.px);
+    FilterSink f(out, m_, o.price);
     inner_->on_new(o, f);
   }
 
@@ -96,13 +96,22 @@ class MutantEngine final : public IMatchingEngine {
 
   void snapshot(BookSnapshot& out) const override {
     inner_->snapshot(out);
-    if (m_ == Mutation::LyingSnapshot && out.n_bids > 0) {
-      // Claim a level that the emitted output never put an order on. Trades
-      // still match the oracle; only the book disagrees.
-      out.bids[0].total_qty += 1;
+    if (m_ == Mutation::LyingSnapshot) {
+      // Paired with the bid_levels() lie below so the book stays internally
+      // consistent. Trades still match the oracle; only the book disagrees.
       out.resting_qty_total += 1;
     }
   }
+
+  void bid_levels(LevelVec& out) const override {
+    inner_->bid_levels(out);
+    if (m_ == Mutation::LyingSnapshot && !out.empty()) {
+      // Claim quantity that the emitted output never put an order on.
+      out[0].second += 1;
+    }
+  }
+
+  void ask_levels(LevelVec& out) const override { inner_->ask_levels(out); }
 
  private:
   Mutation m_;

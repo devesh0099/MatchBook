@@ -5,31 +5,29 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
+#include <vector>
 
 #include "mebench/order.h"
 #include "mebench/out.h"
 
 namespace mebench {
 
-struct LevelSnapshot {
-  int32_t px;
-  uint64_t total_qty;
-  uint32_t order_count;
-  uint64_t front_seq;  // seq of the order at the head of the queue
-};
+// One side of the book as (price, total_qty) aggregates, one entry per occupied
+// price level, BEST PRICE FIRST: bids highest price first, asks lowest first.
+// total_qty is the sum of every resting order's remaining quantity at that
+// level. No empty levels, no duplicate prices.
+using LevelVec = std::vector<std::pair<int32_t, uint64_t>>;
 
-// front_seq is the only cheap way to catch a LIFO level queue — aggregates
-// alone would look identical.
+// The book as the harness sees it. Never timed.
 struct BookSnapshot {
-  uint64_t at_seq;
-  uint32_t n_bids, n_asks;
-  LevelSnapshot bids[16];  // best first: highest price first
-  LevelSnapshot asks[16];  // best first: lowest price first
-  uint64_t resting_qty_total;
-  uint32_t resting_order_count;
+  uint64_t at_seq;          // seq of the last event you saw
+  uint32_t n_bids, n_asks;  // must equal bids.size() / asks.size() once filled
+  LevelVec bids;            // filled via bid_levels(), highest price first
+  LevelVec asks;            // filled via ask_levels(), lowest price first
+  uint64_t resting_qty_total;    // whole book
+  uint32_t resting_order_count;  // whole book
 };
-
-inline constexpr uint32_t kSnapshotLevels = 16;
 
 class IMatchingEngine {
  public:
@@ -39,18 +37,28 @@ class IMatchingEngine {
   virtual void on_new(const Order& o, OutSink& out) noexcept = 0;
   virtual void on_cancel(OrderRef ref, uint64_t seq, OutSink& out) noexcept = 0;
 
-  // Called outside the timed region — correctness snapshots only. It costs
-  // nothing at benchmark time, so implement it straightforwardly: this is what
-  // catches a silently dropped resting order.
-  //
-  // Fill at most kSnapshotLevels per side, BEST PRICE FIRST — highest price
-  // first for bids, lowest first for asks. Set n_bids / n_asks to the number of
-  // levels actually written, capped at kSnapshotLevels. resting_qty_total and
-  // resting_order_count cover the WHOLE book, not just the levels written.
+  // Never timed. Fills the SCALAR fields only — at_seq, n_bids/n_asks and the
+  // whole-book totals. The level vectors are filled separately by
+  // bid_levels()/ask_levels(); the harness composes all three via build_book().
   virtual void snapshot(BookSnapshot& out) const = 0;
+
+  // Never timed. Clear `out`, then append one (price, total_qty) pair per
+  // occupied level, best price first — bids highest first, asks lowest first.
+  // Write them the simple way, whatever your book looks like internally: an
+  // O(n log n) collect-and-sort is fine.
+  virtual void bid_levels(LevelVec& out) const = 0;
+  virtual void ask_levels(LevelVec& out) const = 0;
 
   virtual ~IMatchingEngine() = default;
 };
+
+// How every consumer builds a complete book view. Not part of what you
+// implement — it just calls the three virtuals above in order.
+inline void build_book(const IMatchingEngine& e, BookSnapshot& snap) {
+  e.snapshot(snap);
+  e.bid_levels(snap.bids);
+  e.ask_levels(snap.asks);
+}
 
 }  // namespace mebench
 

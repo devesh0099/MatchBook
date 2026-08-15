@@ -44,7 +44,7 @@ constexpr uint32_t kPxSlots = static_cast<uint32_t>(kMaxPx - kMinPx + 1);
 struct PoolOrder {
   uint64_t seq;
   uint64_t coid;
-  int32_t px;
+  int32_t price;
   uint32_t remaining;
   uint16_t session;
   uint16_t firm;
@@ -176,7 +176,7 @@ class OptimizedEngine final : public IMatchingEngine {
       }
     }
 
-    out.emit(out::ack(o.seq, o.ref(), o.px, o.side));
+    out.emit(out::ack(o.seq, o.ref(), o.price, o.side));
 
     if (o.side == Side::Buy) {
       match<false>(o, remaining, out);
@@ -186,7 +186,7 @@ class OptimizedEngine final : public IMatchingEngine {
 
     if (remaining == 0) return;
     switch (o.tif) {
-      case TIF::Day: rest(o, remaining); break;
+      case TIF::GTC: rest(o, remaining); break;
       case TIF::IOC:
       case TIF::Market: out.emit(out::expired(o.seq, o.ref(), remaining, o.side)); break;
       case TIF::FOK: break;  // F3 guarantees a full fill
@@ -208,27 +208,38 @@ class OptimizedEngine final : public IMatchingEngine {
     out.emit(out::cancel_ack(seq, r, remaining, side));
   }
 
+  // Never timed: scan the price band and count occupied levels.
   void snapshot(BookSnapshot& snap) const override {
-    std::memset(&snap, 0, sizeof(snap));
+    snap = BookSnapshot{};  // not memset: BookSnapshot owns containers
     snap.at_seq = last_seq_;
-    uint32_t n = 0;
-    for (int32_t px = best_bid_; px >= kMinPx && n < kSnapshotLevels; --px) {
-      const Level& l = bids_[static_cast<uint32_t>(px)];
-      if (l.count == 0) continue;
-      snap.bids[n++] = LevelSnapshot{px, l.total_qty, l.count, pool_[l.head].seq};
+    uint32_t n_bids = 0, n_asks = 0;
+    for (int32_t price = best_bid_; price >= kMinPx; --price) {
+      if (bids_[static_cast<uint32_t>(price)].count) ++n_bids;
     }
-    snap.n_bids = n;
-
-    n = 0;
-    for (int32_t px = best_ask_; px <= kMaxPx && n < kSnapshotLevels; ++px) {
-      const Level& l = asks_[static_cast<uint32_t>(px)];
-      if (l.count == 0) continue;
-      snap.asks[n++] = LevelSnapshot{px, l.total_qty, l.count, pool_[l.head].seq};
+    for (int32_t price = best_ask_; price <= kMaxPx; ++price) {
+      if (asks_[static_cast<uint32_t>(price)].count) ++n_asks;
     }
-    snap.n_asks = n;
-
+    snap.n_bids = n_bids;
+    snap.n_asks = n_asks;
     snap.resting_qty_total = resting_qty_;
     snap.resting_order_count = resting_count_;
+  }
+
+  // Best first: bids scan downward from the touch, asks upward.
+  void bid_levels(LevelVec& out) const override {
+    out.clear();
+    for (int32_t price = best_bid_; price >= kMinPx; --price) {
+      const Level& l = bids_[static_cast<uint32_t>(price)];
+      if (l.count) out.emplace_back(price, l.total_qty);
+    }
+  }
+
+  void ask_levels(LevelVec& out) const override {
+    out.clear();
+    for (int32_t price = best_ask_; price <= kMaxPx; ++price) {
+      const Level& l = asks_[static_cast<uint32_t>(price)];
+      if (l.count) out.emplace_back(price, l.total_qty);
+    }
   }
 
  private:
@@ -237,16 +248,16 @@ class OptimizedEngine final : public IMatchingEngine {
   uint32_t fillable(const Order& o) const {
     uint64_t sum = 0;
     const auto& book = Sell ? bids_ : asks_;
-    int32_t px = Sell ? best_bid_ : best_ask_;
-    while (px >= kMinPx && px <= kMaxPx) {
-      if (!acceptable<Sell>(o, px)) break;
-      const Level& l = book[static_cast<uint32_t>(px)];
+    int32_t price = Sell ? best_bid_ : best_ask_;
+    while (price >= kMinPx && price <= kMaxPx) {
+      if (!acceptable<Sell>(o, price)) break;
+      const Level& l = book[static_cast<uint32_t>(price)];
       for (uint32_t s = l.head; s != kNil; s = pool_[s].next) {
         if (pool_[s].firm == o.participant_id) continue;
         sum += pool_[s].remaining;
         if (sum >= o.qty) return o.qty;
       }
-      px += Sell ? -1 : 1;
+      price += Sell ? -1 : 1;
     }
     return static_cast<uint32_t>(sum);
   }
@@ -254,16 +265,16 @@ class OptimizedEngine final : public IMatchingEngine {
   template <bool Sell>
   bool acceptable(const Order& o, int32_t level_px) const {
     if (o.tif == TIF::Market) return true;
-    return Sell ? level_px >= o.px : level_px <= o.px;
+    return Sell ? level_px >= o.price : level_px <= o.price;
   }
 
   template <bool Sell>
   void match(const Order& o, uint32_t& remaining, OutSink& out) noexcept {
     auto& book = Sell ? bids_ : asks_;
-    int32_t px = Sell ? best_bid_ : best_ask_;
-    while (remaining > 0 && px >= kMinPx && px <= kMaxPx) {
-      if (!acceptable<Sell>(o, px)) break;
-      Level& l = book[static_cast<uint32_t>(px)];
+    int32_t price = Sell ? best_bid_ : best_ask_;
+    while (remaining > 0 && price >= kMinPx && price <= kMaxPx) {
+      if (!acceptable<Sell>(o, price)) break;
+      Level& l = book[static_cast<uint32_t>(price)];
       uint32_t s = l.head;
       while (remaining > 0 && s != kNil) {
         const uint32_t next = pool_[s].next;
@@ -277,7 +288,7 @@ class OptimizedEngine final : public IMatchingEngine {
           continue;
         }
         const uint32_t q = remaining < p.remaining ? remaining : p.remaining;
-        out.emit(out::trade(o.seq, mref, o.ref(), p.px, q, o.side));
+        out.emit(out::trade(o.seq, mref, o.ref(), p.price, q, o.side));
         remaining -= q;
         p.remaining -= q;
         l.total_qty -= q;
@@ -289,9 +300,9 @@ class OptimizedEngine final : public IMatchingEngine {
           break;  // resting order survived, so the aggressor is exhausted
         }
       }
-      if (l.count == 0) px += Sell ? -1 : 1;
+      if (l.count == 0) price += Sell ? -1 : 1;
       else if (remaining == 0) break;
-      else px += Sell ? -1 : 1;
+      else price += Sell ? -1 : 1;
     }
     retouch();
   }
@@ -301,7 +312,7 @@ class OptimizedEngine final : public IMatchingEngine {
     PoolOrder& p = pool_[slot];
     p.seq = o.seq;
     p.coid = o.client_order_id;
-    p.px = o.px;
+    p.price = o.price;
     p.remaining = remaining;
     p.session = o.session_id;
     p.firm = o.participant_id;
@@ -310,7 +321,7 @@ class OptimizedEngine final : public IMatchingEngine {
     p.next = kNil;
 
     auto& book = o.side == Side::Buy ? bids_ : asks_;
-    Level& l = book[static_cast<uint32_t>(o.px)];
+    Level& l = book[static_cast<uint32_t>(o.price)];
     p.prev = l.tail;
     if (l.tail != kNil) pool_[l.tail].next = slot;
     l.tail = slot;
@@ -323,16 +334,16 @@ class OptimizedEngine final : public IMatchingEngine {
     ++resting_count_;
 
     if (o.side == Side::Buy) {
-      if (o.px > best_bid_) best_bid_ = o.px;
+      if (o.price > best_bid_) best_bid_ = o.price;
     } else {
-      if (o.px < best_ask_) best_ask_ = o.px;
+      if (o.price < best_ask_) best_ask_ = o.price;
     }
   }
 
   void unlink(uint32_t slot) noexcept {
     PoolOrder& p = pool_[slot];
     auto& book = p.side == Side::Buy ? bids_ : asks_;
-    Level& l = book[static_cast<uint32_t>(p.px)];
+    Level& l = book[static_cast<uint32_t>(p.price)];
     if (p.prev != kNil) pool_[p.prev].next = p.next;
     else l.head = p.next;
     if (p.next != kNil) pool_[p.next].prev = p.prev;

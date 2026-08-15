@@ -1,4 +1,4 @@
-// tests/spec_tests.h — the ~30 visible unit tests.
+// tests/spec_tests.h — the visible unit tests (one case per SPEC rule).
 //
 // These are Layer 1 (SPEC §4): teaching, not grading. They are written against
 // IMatchingEngine, not against the reference, so the exact same file runs

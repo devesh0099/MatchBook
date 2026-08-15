@@ -46,7 +46,9 @@ class EmptyEngine final : public IMatchingEngine {
  public:
   void on_new(const Order&, OutSink&) noexcept override {}
   void on_cancel(OrderRef, uint64_t, OutSink&) noexcept override {}
-  void snapshot(BookSnapshot& out) const override { std::memset(&out, 0, sizeof(out)); }
+  void snapshot(BookSnapshot& out) const override { out = BookSnapshot{}; }
+  void bid_levels(LevelVec& out) const override { out.clear(); }
+  void ask_levels(LevelVec& out) const override { out.clear(); }
 };
 
 class Histogram {
@@ -171,7 +173,7 @@ double measure_probe_cost_ns(const std::vector<WireEvent>& events, uint64_t samp
   for (uint64_t i = 0; i < n; ++i) decoded.push_back(decode(events[i], i));
 
   volatile uint64_t touch = 0;
-  for (const auto& d : decoded) touch += d.o.px;
+  for (const auto& d : decoded) touch += d.o.price;
   (void)touch;
 
   // Measured under the SAME discipline as a ranked run: warm up first, then
@@ -244,7 +246,7 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
 
   // Touch every page so no fault lands in the timed region.
   volatile uint64_t touch = 0;
-  for (size_t i = 0; i < buf.size(); ++i) touch += buf.data()[i].o.px;
+  for (size_t i = 0; i < buf.size(); ++i) touch += buf.data()[i].o.price;
   (void)touch;
 
   if (!buf.explicit_huge_pages()) {

@@ -33,7 +33,7 @@ enum class RejectReason : uint8_t { None = 0, UnknownOrder = 1, FokUnfillable = 
 //   taker           the order named by the input event: the aggressor on Trade,
 //                   the subject order on Ack / Reject / Expired, and the
 //                   cancelled order on an ordinary CancelAck
-//   px              Trade: the RESTING order's price. Ack: the order's own price
+//   price              Trade: the RESTING order's price. Ack: the order's own price
 //                   (0 for a market order). Expired / CancelAck / Reject: 0
 //   qty             Trade: quantity traded. Expired: quantity expiring.
 //                   CancelAck: the REMAINING quantity. Ack / Reject: 0
@@ -50,7 +50,7 @@ struct OutEvent {
   uint64_t in_seq;
   OrderRef maker;
   OrderRef taker;
-  int32_t px;
+  int32_t price;
   uint32_t qty;
   OutType type;
   Side aggressor_side;
@@ -69,14 +69,14 @@ class OutSink {
 // measured contract — use them or build OutEvents by hand, whichever you prefer.
 namespace out {
 
-inline OutEvent ack(uint64_t in_seq, OrderRef taker, int32_t px, Side side) {
-  return OutEvent{in_seq, OrderRef{}, taker,        px, 0, OutType::Ack, side,
+inline OutEvent ack(uint64_t in_seq, OrderRef taker, int32_t price, Side side) {
+  return OutEvent{in_seq, OrderRef{}, taker,        price, 0, OutType::Ack, side,
                   RejectReason::None, {0, 0, 0, 0, 0}};
 }
 
-inline OutEvent trade(uint64_t in_seq, OrderRef maker, OrderRef taker, int32_t px, uint32_t qty,
+inline OutEvent trade(uint64_t in_seq, OrderRef maker, OrderRef taker, int32_t price, uint32_t qty,
                       Side aggressor_side) {
-  return OutEvent{in_seq, maker, taker,        px, qty, OutType::Trade, aggressor_side,
+  return OutEvent{in_seq, maker, taker,        price, qty, OutType::Trade, aggressor_side,
                   RejectReason::None, {0, 0, 0, 0, 0}};
 }
 

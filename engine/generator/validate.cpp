@@ -118,7 +118,7 @@ std::string summarize(const std::vector<OutEvent>& evs) {
   s << evs.size() << " output(s):";
   for (const auto& e : evs) {
     switch (e.type) {
-      case OutType::Trade: s << " Trade(" << e.qty << "@" << e.px << ")"; break;
+      case OutType::Trade: s << " Trade(" << e.qty << "@" << e.price << ")"; break;
       case OutType::Ack: s << " Ack"; break;
       case OutType::Reject:
         s << " Reject("
@@ -268,7 +268,7 @@ ValidationReport validate_stream(const std::vector<WireEvent>& events,
 
     if ((i + 1) % sample_every == 0) {
       BookSnapshot snap{};
-      engine.snapshot(snap);
+      build_book(engine, snap);
       rep.depth_samples.push_back(snap.resting_order_count);
       if (invariant_error.empty() && !invariants.on_snapshot(snap, invariant_error)) {
         invariant_failed_at = i;

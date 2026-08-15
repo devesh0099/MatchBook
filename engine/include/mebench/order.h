@@ -14,7 +14,7 @@ namespace mebench {
 // Do not implement one.
 enum class EvType : uint8_t { New = 0, Cancel = 1 };
 enum class Side : uint8_t { Buy = 0, Sell = 1 };
-enum class TIF : uint8_t { Day = 0, IOC = 1, FOK = 2, Market = 3 };
+enum class TIF : uint8_t { GTC = 0, IOC = 1, FOK = 2, Market = 3 };
 
 // 16 bytes, pass by value.
 //
@@ -43,7 +43,7 @@ static_assert(sizeof(OrderRef) == 16 && alignof(OrderRef) == 8);
 struct Order {
   uint64_t seq;  // global sequence — use for time priority
   uint64_t client_order_id;
-  int32_t px;  // integer ticks; 0 for market orders
+  int32_t price;  // integer ticks; 0 for market orders
   uint32_t qty;
   uint16_t session_id;
   uint16_t participant_id;

@@ -20,7 +20,7 @@ namespace mebench {
 // Exactly 24 bytes. Packed: this is a file layout, not a hot-path struct.
 struct __attribute__((packed)) WireEvent {
   uint64_t client_order_id;  // unique per session only
-  int32_t px;                // integer ticks; 0 for market orders
+  int32_t price;                // integer ticks; 0 for market orders
   uint32_t qty;
   uint16_t session_id;
   uint16_t participant_id;  // firm; several sessions may share one

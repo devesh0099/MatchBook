@@ -93,7 +93,7 @@ and compared field by field:
 ```cpp
 bool same(const OutEvent& a, const OutEvent& b) {
   return a.in_seq == b.in_seq && a.maker == b.maker && a.taker == b.taker &&
-         a.px == b.px && a.qty == b.qty && a.type == b.type &&
+         a.price == b.price && a.qty == b.qty && a.type == b.type &&
          a.aggressor_side == b.aggressor_side && a.reason == b.reason;
 }
 ```
@@ -108,8 +108,8 @@ Failure output shows both sides, aligned, with the offending row marked:
 ```
 output mismatch (2 expected, 1 emitted)
     #0
-      expected: Ack in_seq=2 px=10000 qty=0 maker=(s0,c0,f0) taker=(s2,c2,f2) side=Buy
-      actual:   Ack in_seq=2 px=10000 qty=0 maker=(s0,c0,f0) taker=(s2,c2,f2) side=Buy
+      expected: Ack in_seq=2 price=10000 qty=0 maker=(s0,c0,f0) taker=(s2,c2,f2) side=Buy
+      actual:   Ack in_seq=2 price=10000 qty=0 maker=(s0,c0,f0) taker=(s2,c2,f2) side=Buy
   > #1
       expected: Trade 100 @ 10000 ...
       actual:   <nothing>
@@ -244,7 +244,7 @@ class FilterSink final : public OutSink {
     OutEvent out = e;
     switch (m_) {
       case Mutation::TradeAtAggressorPrice:
-        if (out.type == OutType::Trade && aggressor_px_ != 0) out.px = aggressor_px_;
+        if (out.type == OutType::Trade && aggressor_px_ != 0) out.price = aggressor_px_;
         break;
       case Mutation::SwallowExpired:
         if (out.type == OutType::Expired) return;          // silently drop it
@@ -294,7 +294,7 @@ returns control. The `hang` mutant passed cleanly — the test was lying — unt
 enforcement moved to an async-signal-safe `SIGALRM` handler.
 
 One test of my own was also wrong: `stp_keys_on_firm_not_session` originally
-expected an `Expired` after the STP cancel, but the aggressor was a **Day**
+expected an `Expired` after the STP cancel, but the aggressor was a **GTC**
 order, whose remainder rests silently. The reference was right and the test was
 wrong. Which is the point of having the reference and the tests disagree
 loudly.

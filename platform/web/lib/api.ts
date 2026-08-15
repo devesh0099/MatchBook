@@ -69,7 +69,7 @@ export interface Submission {
 export interface OutEventView {
   type: string;
   in_seq: number;
-  px: number;
+  price: number;
   qty: number;
   maker_session: number;
   maker_coid: number;
@@ -85,7 +85,7 @@ export interface ReproEvent {
   type: string;
   side: string;
   tif: string;
-  px: number;
+  price: number;
   qty: number;
   session: number;
   coid: number;

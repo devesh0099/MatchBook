@@ -300,10 +300,10 @@ int32_t Generator::place_price(Session& s, Side side, bool& marketable) {
 
 // ---------------------------------------------------------------- emission
 
-WireEvent Generator::make_new(Session& s, Side side, int32_t px, uint32_t qty, TIF tif) {
+WireEvent Generator::make_new(Session& s, Side side, int32_t price, uint32_t qty, TIF tif) {
   WireEvent e{};
   e.client_order_id = s.next_coid++;
-  e.px = (tif == TIF::Market) ? 0 : px;
+  e.price = (tif == TIF::Market) ? 0 : price;
   e.qty = qty;
   e.session_id = s.session_id;
   e.participant_id = s.participant_id;
@@ -312,20 +312,20 @@ WireEvent Generator::make_new(Session& s, Side side, int32_t px, uint32_t qty, T
   e.tif = tif;
   // Nothing is added to the live set here. apply() asks the book afterwards
   // whether this order actually rested, which is the only way to be right about
-  // a marketable Day order that partially filled and rested the remainder.
+  // a marketable GTC order that partially filled and rested the remainder.
   return e;
 }
 
 WireEvent Generator::make_cancel(uint16_t session_id, uint16_t firm, uint64_t coid) {
   WireEvent e{};
   e.client_order_id = coid;
-  e.px = 0;
+  e.price = 0;
   e.qty = 0;
   e.session_id = session_id;
   e.participant_id = firm;
   e.type = EvType::Cancel;
   e.side = Side::Buy;  // ignored for cancels, but must be deterministic
-  e.tif = TIF::Day;
+  e.tif = TIF::GTC;
   return e;
 }
 
@@ -381,9 +381,9 @@ WireEvent Generator::emit_from(Session& s) {
   }
 
   Side side = (s.rng.next() & 1) ? Side::Buy : Side::Sell;
-  TIF tif = TIF::Day;
+  TIF tif = TIF::GTC;
 
-  // Only takers use non-Day time-in-force. A market maker sending FOK would be
+  // Only takers use non-GTC time-in-force. A market maker sending FOK would be
   // noise for its own sake.
   if (s.kind == AgentKind::Taker) {
     const uint32_t roll = s.rng.below(100);
@@ -396,7 +396,7 @@ WireEvent Generator::emit_from(Session& s) {
     }
   }
 
-  int32_t px;
+  int32_t price;
   bool marketable = false;
   if (s.kind == AgentKind::LevelStacker) {
     // Repeated same-price adds, to stress one level's queue.
@@ -404,19 +404,19 @@ WireEvent Generator::emit_from(Session& s) {
     if (s.stack_px == 0 || s.rng.chance(2)) {
       s.stack_px = mid_ + (side == Side::Buy ? -1 : 1);
     }
-    px = s.stack_px;
+    price = s.stack_px;
   } else {
-    px = place_price(s, side, marketable);
+    price = place_price(s, side, marketable);
   }
 
   // A FOK priced at or through the touch is the interesting case; leave the
   // price as placed, but never let a FOK or a limit carry price 0, which is
   // reserved for market orders (SPEC M1).
-  if (tif != TIF::Market && px <= 0) px = 1;
+  if (tif != TIF::Market && price <= 0) price = 1;
 
   (void)marketable;  // the book decides what rests now, not a guess
   const uint32_t qty = s.rng.range(b.qty_lo, b.qty_hi);
-  return make_new(s, side, px, qty, tif);
+  return make_new(s, side, price, qty, tif);
 }
 
 // ---------------------------------------------------------------- book feedback
@@ -518,11 +518,11 @@ uint64_t script_length(InjectionKind k) {
   return 0;
 }
 
-WireEvent inj_new(uint16_t sess, uint16_t firm, uint64_t coid, Side side, int32_t px, uint32_t qty,
+WireEvent inj_new(uint16_t sess, uint16_t firm, uint64_t coid, Side side, int32_t price, uint32_t qty,
                   TIF tif) {
   WireEvent e{};
   e.client_order_id = coid;
-  e.px = (tif == TIF::Market) ? 0 : px;
+  e.price = (tif == TIF::Market) ? 0 : price;
   e.qty = qty;
   e.session_id = sess;
   e.participant_id = firm;
@@ -549,7 +549,7 @@ WireEvent inj_new(uint16_t sess, uint16_t firm, uint64_t coid, Side side, int32_
 WireEvent inj_clear_asks() {
   WireEvent e{};
   e.client_order_id = 1;
-  e.px = 0;
+  e.price = 0;
   e.qty = 1'000'000'000;
   e.session_id = 899;
   e.participant_id = 899;
@@ -566,7 +566,7 @@ WireEvent inj_cancel(uint16_t sess, uint16_t firm, uint64_t coid) {
   e.participant_id = firm;
   e.type = EvType::Cancel;
   e.side = Side::Buy;
-  e.tif = TIF::Day;
+  e.tif = TIF::GTC;
   return e;
 }
 
@@ -581,8 +581,8 @@ void Generator::enqueue_injection(InjectionKind kind, uint64_t at_seq) {
     case InjectionKind::CancelOfConsumedOrder: {
       // The cancel at seq N targets an order the aggressor at seq N-1 consumed.
       pending_.push_back(inj_clear_asks());
-      pending_.push_back(inj_new(900, 900, 1, Side::Sell, P + 0, 100, TIF::Day));
-      pending_.push_back(inj_new(901, 901, 1, Side::Buy, P + 0, 100, TIF::Day));
+      pending_.push_back(inj_new(900, 900, 1, Side::Sell, P + 0, 100, TIF::GTC));
+      pending_.push_back(inj_new(901, 901, 1, Side::Buy, P + 0, 100, TIF::GTC));
       pending_.push_back(inj_cancel(900, 900, 1));
       payoff = at_seq + 3;
       break;
@@ -593,8 +593,8 @@ void Generator::enqueue_injection(InjectionKind kind, uint64_t at_seq) {
       //
       // Both rest as asks up in the injection band, where no organic buy can
       // reach them, so no clearing sweep is needed: this case has no aggressor.
-      pending_.push_back(inj_new(902, 902, 7, Side::Sell, P + 10, 50, TIF::Day));
-      pending_.push_back(inj_new(903, 903, 7, Side::Sell, P + 11, 60, TIF::Day));
+      pending_.push_back(inj_new(902, 902, 7, Side::Sell, P + 10, 50, TIF::GTC));
+      pending_.push_back(inj_new(903, 903, 7, Side::Sell, P + 11, 60, TIF::GTC));
       pending_.push_back(inj_cancel(903, 903, 7));
       pending_.push_back(inj_cancel(902, 902, 7));
       payoff = at_seq + 2;
@@ -606,7 +606,7 @@ void Generator::enqueue_injection(InjectionKind kind, uint64_t at_seq) {
       // aggressor is IOC so nothing is left resting up in the injection band
       // for organic traffic to trade against afterwards.
       pending_.push_back(inj_clear_asks());
-      pending_.push_back(inj_new(904, 904, 1, Side::Sell, P + 20, 80, TIF::Day));
+      pending_.push_back(inj_new(904, 904, 1, Side::Sell, P + 20, 80, TIF::GTC));
       pending_.push_back(inj_new(905, 904, 1, Side::Buy, P + 20, 80, TIF::IOC));
       payoff = at_seq + 2;
       detail = 80;
@@ -622,8 +622,8 @@ void Generator::enqueue_injection(InjectionKind kind, uint64_t at_seq) {
       // a commit, quietly destroying the one case that separates F1 from the
       // naive fillability check.
       pending_.push_back(inj_clear_asks());
-      pending_.push_back(inj_new(906, 906, 1, Side::Sell, P + 30, 60, TIF::Day));
-      pending_.push_back(inj_new(907, 907, 1, Side::Sell, P + 30, 50, TIF::Day));
+      pending_.push_back(inj_new(906, 906, 1, Side::Sell, P + 30, 60, TIF::GTC));
+      pending_.push_back(inj_new(907, 907, 1, Side::Sell, P + 30, 50, TIF::GTC));
       pending_.push_back(inj_new(908, 907, 1, Side::Buy, P + 30, 100, TIF::FOK));
       pending_.push_back(inj_cancel(906, 906, 1));
       pending_.push_back(inj_cancel(907, 907, 1));
@@ -634,9 +634,9 @@ void Generator::enqueue_injection(InjectionKind kind, uint64_t at_seq) {
       pending_.push_back(inj_clear_asks());
       for (uint32_t k = 0; k < 5; ++k) {
         pending_.push_back(
-            inj_new(909, 909, k + 1, Side::Sell, P + 40 + static_cast<int32_t>(k), 20, TIF::Day));
+            inj_new(909, 909, k + 1, Side::Sell, P + 40 + static_cast<int32_t>(k), 20, TIF::GTC));
       }
-      pending_.push_back(inj_new(910, 910, 1, Side::Buy, P + 44, 150, TIF::Day));
+      pending_.push_back(inj_new(910, 910, 1, Side::Buy, P + 44, 150, TIF::GTC));
       pending_.push_back(inj_cancel(910, 910, 1));
       payoff = at_seq + 6;
       detail = 5;  // exactly five trades, then 50 rests
@@ -645,15 +645,15 @@ void Generator::enqueue_injection(InjectionKind kind, uint64_t at_seq) {
     case InjectionKind::ConsumeDeepLevelQueue: {
       pending_.push_back(inj_clear_asks());
       for (uint32_t k = 0; k < 200; ++k) {
-        pending_.push_back(inj_new(911, 911, k + 1, Side::Sell, P + 50, 1, TIF::Day));
+        pending_.push_back(inj_new(911, 911, k + 1, Side::Sell, P + 50, 1, TIF::GTC));
       }
-      pending_.push_back(inj_new(912, 912, 1, Side::Buy, P + 50, 200, TIF::Day));
+      pending_.push_back(inj_new(912, 912, 1, Side::Buy, P + 50, 200, TIF::GTC));
       payoff = at_seq + 201;
       detail = 200;  // exactly 200 trades from one event
       break;
     }
     case InjectionKind::CancelLastOrderAtLevel: {
-      pending_.push_back(inj_new(913, 913, 1, Side::Sell, P + 60, 25, TIF::Day));
+      pending_.push_back(inj_new(913, 913, 1, Side::Sell, P + 60, 25, TIF::GTC));
       pending_.push_back(inj_cancel(913, 913, 1));
       payoff = at_seq + 1;
       detail = 25;

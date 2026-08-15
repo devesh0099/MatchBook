@@ -62,7 +62,7 @@ accepted.** This matches FIX-style venue behaviour (`ExecType=New` before any fi
 
 ### 1.3 Market orders (M1–M5)
 
-1. **M1.** A market order is `px = 0`, `TIF::Market`, and is **never rested**. There are
+1. **M1.** A market order is `price = 0`, `TIF::Market`, and is **never rested**. There are
    no `INT32_MIN`/`INT32_MAX` price sentinels; do not invent any, they invite overflow
    bugs in comparison code.
 2. **M2.** It matches against the opposite side at **each level's resting price**, best
@@ -161,7 +161,7 @@ and there is no reject reason for them:
   is gone, and the same `client_order_id` **will** appear concurrently in *different*
   sessions.)
 - A `New` never carries zero quantity.
-- A market order (`TIF::Market`) always carries `px == 0`.
+- A market order (`TIF::Market`) always carries `price == 0`.
 
 Everything else is fair game, including cancels for orders that were already fully filled
 and cancels for orders that never existed.

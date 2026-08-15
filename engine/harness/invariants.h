@@ -34,7 +34,7 @@ class InvariantChecker {
 
  private:
   struct Shadow {
-    int32_t px;
+    int32_t price;
     uint64_t seq;
     uint32_t remaining;
     Side side;

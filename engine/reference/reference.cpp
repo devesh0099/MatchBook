@@ -21,8 +21,8 @@ namespace mebench::reference {
 template <class Book>
 uint32_t ReferenceEngine::fillable_qty(const Book& book, const Order& o) const {
   uint64_t sum = 0;
-  for (const auto& [px, level] : book) {
-    if (!acceptable(o.side, o.tif, o.px, px)) break;
+  for (const auto& [price, level] : book) {
+    if (!acceptable(o.side, o.tif, o.price, price)) break;
     for (const auto& r : level) {
       if (r.o.participant_id == o.participant_id) continue;  // F1 exclusion
       sum += r.remaining;
@@ -42,7 +42,7 @@ void ReferenceEngine::match(Book& book, const Order& o, uint32_t& remaining,
   auto lit = book.begin();
   while (remaining > 0 && lit != book.end()) {
     const int32_t level_px = lit->first;
-    if (!acceptable(o.side, o.tif, o.px, level_px)) break;  // no better prices behind us
+    if (!acceptable(o.side, o.tif, o.price, level_px)) break;  // no better prices behind us
 
     Level& level = lit->second;
     auto oit = level.begin();
@@ -63,7 +63,7 @@ void ReferenceEngine::match(Book& book, const Order& o, uint32_t& remaining,
 
       // SPEC §1.1 Core: trade price is the RESTING order's price, always.
       const uint32_t q = remaining < r.remaining ? remaining : r.remaining;
-      sink.emit(out::trade(o.seq, r.o.ref(), o.ref(), r.o.px, q, o.side));
+      sink.emit(out::trade(o.seq, r.o.ref(), o.ref(), r.o.price, q, o.side));
       remaining -= q;
       r.remaining -= q;
       resting_qty_total_ -= q;
@@ -87,17 +87,17 @@ void ReferenceEngine::match(Book& book, const Order& o, uint32_t& remaining,
 
 template <class Book>
 void ReferenceEngine::rest(Book& book, const Order& o, uint32_t remaining) noexcept {
-  Level& level = book[o.px];
+  Level& level = book[o.price];
   level.push_back(Resting{o, remaining});
   auto it = std::prev(level.end());
-  index_[key_of(o.ref())] = Locator{o.side, o.px, it};
+  index_[key_of(o.ref())] = Locator{o.side, o.price, it};
   resting_qty_total_ += remaining;
   ++resting_order_count_;
 }
 
 template <class Book>
-void ReferenceEngine::erase_at(Book& book, int32_t px, Level::iterator it) noexcept {
-  auto lit = book.find(px);
+void ReferenceEngine::erase_at(Book& book, int32_t price, Level::iterator it) noexcept {
+  auto lit = book.find(price);
   assert(lit != book.end());
   lit->second.erase(it);
   if (lit->second.empty()) book.erase(lit);
@@ -121,7 +121,7 @@ void ReferenceEngine::on_new(const Order& o, OutSink& sink) noexcept {
   }
 
   // SPEC A1: exactly one Ack, before any other output for this event.
-  sink.emit(out::ack(o.seq, o.ref(), o.px, o.side));
+  sink.emit(out::ack(o.seq, o.ref(), o.price, o.side));
 
   if (o.side == Side::Buy) {
     match(asks_, o, remaining, sink);
@@ -132,7 +132,7 @@ void ReferenceEngine::on_new(const Order& o, OutSink& sink) noexcept {
   if (remaining == 0) return;
 
   switch (o.tif) {
-    case TIF::Day:
+    case TIF::GTC:
       // Marketable-and-partial or plain non-marketable: the remainder rests
       // silently. The Ack already covered acceptance (SPEC A4).
       if (o.side == Side::Buy) {
@@ -178,9 +178,9 @@ void ReferenceEngine::on_cancel(OrderRef ref, uint64_t seq, OutSink& sink) noexc
 
   index_.erase(it);
   if (side == Side::Buy) {
-    erase_at(bids_, loc.px, loc.it);
+    erase_at(bids_, loc.price, loc.it);
   } else {
-    erase_at(asks_, loc.px, loc.it);
+    erase_at(asks_, loc.price, loc.it);
   }
   resting_qty_total_ -= remaining;
   --resting_order_count_;
@@ -191,23 +191,26 @@ void ReferenceEngine::on_cancel(OrderRef ref, uint64_t seq, OutSink& sink) noexc
 // ---------------------------------------------------------------- snapshot
 
 template <class Book>
-void ReferenceEngine::fill_side(const Book& book, LevelSnapshot* dst, uint32_t& n) const {
-  n = 0;
-  for (const auto& [px, level] : book) {
-    if (n == kSnapshotLevels) break;
-    uint64_t total = 0;
-    for (const auto& r : level) total += r.remaining;
-    dst[n++] = LevelSnapshot{px, total, static_cast<uint32_t>(level.size()),
-                             level.empty() ? 0 : level.front().o.seq};
+void ReferenceEngine::fill_levels(const Book& book, LevelVec& dst) const {
+  dst.clear();
+  dst.reserve(book.size());
+  // The map's own comparator is best-first, so iteration order is the contract's.
+  for (const auto& [price, level] : book) {
+    uint64_t qty = 0;
+    for (const auto& r : level) qty += r.remaining;
+    dst.emplace_back(price, qty);
   }
 }
 
+void ReferenceEngine::bid_levels(LevelVec& out) const { fill_levels(bids_, out); }
+void ReferenceEngine::ask_levels(LevelVec& out) const { fill_levels(asks_, out); }
+
 void ReferenceEngine::snapshot(BookSnapshot& snap) const {
-  std::memset(&snap, 0, sizeof(snap));
+  snap = BookSnapshot{};  // not memset: BookSnapshot owns containers
   snap.at_seq = last_seq_;
-  fill_side(bids_, snap.bids, snap.n_bids);
-  fill_side(asks_, snap.asks, snap.n_asks);
-  // Whole-book totals, not just the levels written above.
+  snap.n_bids = static_cast<uint32_t>(bids_.size());
+  snap.n_asks = static_cast<uint32_t>(asks_.size());
+  // Whole-book totals; the level vectors are bid_levels()/ask_levels()'s job.
   snap.resting_qty_total = resting_qty_total_;
   snap.resting_order_count = resting_order_count_;
 }

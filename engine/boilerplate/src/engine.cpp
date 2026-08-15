@@ -26,48 +26,6 @@ using namespace mebench;
 
 namespace {
 
-// An order plus how much of it is left. A partial fill does not change arrival
-// time, so a partially filled order keeps its place in the queue.
-struct RestingOrder {
-  Order o;
-  uint32_t remaining;
-};
-
-// One price level, oldest at the front.
-struct PriceLevel {
-  std::vector<RestingOrder> orders;
-  uint64_t total_qty = 0;
-
-  void push(const Order& o, uint32_t qty) {
-    orders.push_back(RestingOrder{o, qty});
-    total_qty += qty;
-  }
-
-  bool empty() const { return orders.empty(); }
-
-  // Removal preserves the arrival order of everything behind it.
-  void erase_at(size_t i) {
-    total_qty -= orders[i].remaining;
-    orders.erase(orders.begin() + static_cast<long>(i));
-  }
-
-  void reduce_at(size_t i, uint32_t by) {
-    orders[i].remaining -= by;
-    total_qty -= by;
-  }
-};
-
-// Each map's own comparator makes begin() the touch: bids highest price first,
-// asks lowest first.
-using Bids = std::map<int32_t, PriceLevel, std::greater<int32_t>>;
-using Asks = std::map<int32_t, PriceLevel, std::less<int32_t>>;
-
-// Keyed on the PAIR, never client_order_id alone — see the note on OrderRef in
-// order.h. Keying on the id alone cancels the wrong order and looks correct for
-// a long time first.
-//
-// This index is where most of the latency spread in this contest comes from.
-// std::map is a correct starting point and a slow one.
 struct OrderKey {
   uint16_t session_id;
   uint64_t client_order_id;
@@ -83,7 +41,7 @@ inline OrderKey key_of(const OrderRef& r) { return OrderKey{r.session_id, r.clie
 // Where a resting order lives, so a cancel does not have to search the book.
 struct Location {
   Side side;
-  int32_t px;
+  int32_t price;
 };
 
 // ============================================================================
@@ -93,6 +51,8 @@ struct Location {
 class Engine final : public IMatchingEngine {
  public:
   void on_new(const Order& o, OutSink& out) noexcept override {
+    last_seq_ = o.seq;  // every event, even a rejected one
+
     if (o.tif == TIF::FOK) {
       // TODO [F1]: read-only walk of the opposite side summing only OTHER
       // firms' resting quantity. If it is short of o.qty, emit the Reject and
@@ -100,7 +60,7 @@ class Engine final : public IMatchingEngine {
     }
 
     // [A1] every accepted order acks first, before any other output.
-    out.emit(out::ack(o.seq, o.ref(), o.px, o.side));
+    out.emit(out::ack(o.seq, o.ref(), o.price, o.side));
 
     uint32_t remaining = o.qty;
 
@@ -111,7 +71,7 @@ class Engine final : public IMatchingEngine {
     (void)remaining;
 
     switch (o.tif) {
-      case TIF::Day:
+      case TIF::GTC:
         // TODO: rest the remainder silently and record it in the index. [A4]
         break;
 
@@ -127,6 +87,8 @@ class Engine final : public IMatchingEngine {
   }
 
   void on_cancel(OrderRef ref, uint64_t seq, OutSink& out) noexcept override {
+    last_seq_ = seq;
+
     // TODO [1.4 Cancel]: look up the (session_id, client_order_id) pair.
     // Found -> remove it and cancel_ack the REMAINING quantity. Not found ->
     // reject with UnknownOrder.
@@ -135,44 +97,30 @@ class Engine final : public IMatchingEngine {
     (void)out;
   }
 
-  // Outside the timed region, so it costs nothing at benchmark time. Write it
-  // straightforwardly: it is what catches a silently dropped resting order.
   void snapshot(BookSnapshot& snap) const override {
     snap = BookSnapshot{};
     snap.at_seq = last_seq_;
 
-    uint32_t n = 0;
-    for (const auto& [px, level] : bids_) {
-      if (n == kSnapshotLevels) break;
-      snap.bids[n++] = make_level(px, level);
-    }
-    snap.n_bids = n;
-
-    n = 0;
-    for (const auto& [px, level] : asks_) {
-      if (n == kSnapshotLevels) break;
-      snap.asks[n++] = make_level(px, level);
-    }
-    snap.n_asks = n;
-
+    // TODO: fill n_bids / n_asks (occupied level counts) and the whole-book
+    // totals from your book. The level vectors are NOT filled here — they come
+    // from bid_levels() / ask_levels() below.
     snap.resting_qty_total = resting_qty_total_;
     snap.resting_order_count = resting_order_count_;
   }
 
- private:
-  static LevelSnapshot make_level(int32_t px, const PriceLevel& level) {
-    LevelSnapshot s{};
-    s.px = px;
-    s.total_qty = level.total_qty;
-    s.order_count = static_cast<uint32_t>(level.orders.size());
-    s.front_seq = level.orders.empty() ? 0 : level.orders.front().o.seq;
-    return s;
+  void bid_levels(LevelVec& out) const override {
+    out.clear();
+    // TODO: one (price, total_qty) pair per occupied bid level, HIGHEST price
+    // first. total_qty is the sum of remaining quantity resting at that level.
   }
 
-  Bids bids_;
-  Asks asks_;
-  std::map<OrderKey, Location> index_;
+  void ask_levels(LevelVec& out) const override {
+    out.clear();
+    // TODO: one (price, total_qty) pair per occupied ask level, LOWEST price
+    // first.
+  }
 
+ private:
   uint64_t last_seq_ = 0;
   uint64_t resting_qty_total_ = 0;
   uint32_t resting_order_count_ = 0;

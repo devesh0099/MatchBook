@@ -30,7 +30,7 @@ class HashSink final : public OutSink {
     mix(static_cast<uint64_t>(e.maker.session_id) << 16 | e.maker.participant_id);
     mix(e.taker.client_order_id);
     mix(static_cast<uint64_t>(e.taker.session_id) << 16 | e.taker.participant_id);
-    mix(static_cast<uint64_t>(static_cast<uint32_t>(e.px)) << 32 | e.qty);
+    mix(static_cast<uint64_t>(static_cast<uint32_t>(e.price)) << 32 | e.qty);
     mix(static_cast<uint64_t>(e.type) << 16 | static_cast<uint64_t>(e.aggressor_side) << 8 |
         static_cast<uint64_t>(e.reason));
   }

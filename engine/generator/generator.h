@@ -64,7 +64,7 @@ struct ProfileParams {
   // Placement weights, must sum to 100 (SPEC-side plan section 5.2).
   uint32_t p_marketable, p_at_touch, p_near, p_deep;
 
-  // TIF mix among New events, as percentages; the remainder is Day.
+  // TIF mix among New events, as percentages; the remainder is GTC.
   uint32_t tif_ioc_pct, tif_fok_pct, tif_market_pct;
 
   // How far out, in ticks, a "deep" placement can sit. This is what spreads
@@ -210,7 +210,7 @@ class Generator {
   void step_mid();
   uint32_t pick_session();
   WireEvent emit_from(Session& s);
-  WireEvent make_new(Session& s, Side side, int32_t px, uint32_t qty, TIF tif);
+  WireEvent make_new(Session& s, Side side, int32_t price, uint32_t qty, TIF tif);
   WireEvent make_cancel(uint16_t session_id, uint16_t firm, uint64_t coid);
   int32_t place_price(Session& s, Side side, bool& marketable);
 

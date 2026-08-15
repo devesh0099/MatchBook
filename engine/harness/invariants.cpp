@@ -1,5 +1,6 @@
 #include "harness/invariants.h"
 
+#include <algorithm>
 #include <sstream>
 
 namespace mebench::harness {
@@ -68,18 +69,18 @@ bool InvariantChecker::check_new(const DecodedEvent& d, const std::vector<OutEve
         }
         Shadow& m = it->second;
         // SPEC section 3.1: the trade price is the resting order's price.
-        if (e.px != m.px) {
+        if (e.price != m.price) {
           std::ostringstream s;
-          s << "trade price " << e.px << " is not the resting order's price " << m.px << " "
+          s << "trade price " << e.price << " is not the resting order's price " << m.price << " "
             << ref_str(e.maker);
           return fail(err, s.str());
         }
         // And it must lie within the aggressor's limit.
         if (o.tif != TIF::Market) {
-          const bool within = (o.side == Side::Buy) ? (e.px <= o.px) : (e.px >= o.px);
+          const bool within = (o.side == Side::Buy) ? (e.price <= o.price) : (e.price >= o.price);
           if (!within) {
             std::ostringstream s;
-            s << "trade price " << e.px << " is outside the aggressor's limit " << o.px;
+            s << "trade price " << e.price << " is outside the aggressor's limit " << o.price;
             return fail(err, s.str());
           }
         }
@@ -149,8 +150,8 @@ bool InvariantChecker::check_new(const DecodedEvent& d, const std::vector<OutEve
   }
 
   switch (o.tif) {
-    case TIF::Day:
-      if (expired) return fail(err, "a Day order must never emit Expired");
+    case TIF::GTC:
+      if (expired) return fail(err, "a GTC order must never emit Expired");
       break;
     case TIF::IOC:
     case TIF::Market:
@@ -173,12 +174,12 @@ bool InvariantChecker::check_new(const DecodedEvent& d, const std::vector<OutEve
       break;
   }
 
-  if (o.tif == TIF::Day && rested > 0) {
+  if (o.tif == TIF::GTC && rested > 0) {
     const Key k = key_of(o.ref());
     if (live_.count(k)) {
       return fail(err, "two live orders share " + ref_str(o.ref()));
     }
-    live_[k] = Shadow{o.px, o.seq, static_cast<uint32_t>(rested), o.side, o.participant_id};
+    live_[k] = Shadow{o.price, o.seq, static_cast<uint32_t>(rested), o.side, o.participant_id};
     resting_qty_ += rested;
   }
   return true;
@@ -226,8 +227,8 @@ bool InvariantChecker::check_cancel(const DecodedEvent& d, const std::vector<Out
 }
 
 bool InvariantChecker::on_snapshot(const BookSnapshot& snap, std::string& err) {
-  if (snap.n_bids > kSnapshotLevels || snap.n_asks > kSnapshotLevels) {
-    return fail(err, "snapshot reports more than " + std::to_string(kSnapshotLevels) + " levels");
+  if (snap.n_bids != snap.bids.size() || snap.n_asks != snap.asks.size()) {
+    return fail(err, "snapshot's n_bids / n_asks disagree with the level vectors they count");
   }
 
   // The engine's own totals must match the book implied by its output.
@@ -245,22 +246,18 @@ bool InvariantChecker::on_snapshot(const BookSnapshot& snap, std::string& err) {
     return fail(err, s.str());
   }
 
-  // Aggregate the shadow book by price and side so the levels can be compared.
-  std::map<int32_t, std::pair<uint64_t, uint32_t>> bid_levels, ask_levels;  // px -> (qty, count)
-  std::map<int32_t, uint64_t> bid_front, ask_front;                        // px -> min seq
-  for (const auto& [k, s] : live_) {
-    auto& levels = (s.side == Side::Buy) ? bid_levels : ask_levels;
-    auto& fronts = (s.side == Side::Buy) ? bid_front : ask_front;
-    auto& cell = levels[s.px];
-    cell.first += s.remaining;
-    cell.second += 1;
-    auto f = fronts.find(s.px);
-    if (f == fronts.end() || s.seq < f->second) fronts[s.px] = s.seq;
+  // Rebuild the shadow book as per-level quantity aggregates so the snapshot
+  // can be compared level for level rather than by summary.
+  std::map<int32_t, uint64_t> bid_want, ask_want;
+  for (const auto& [k, sh] : live_) {
+    (void)k;
+    auto& levels = (sh.side == Side::Buy) ? bid_want : ask_want;
+    levels[sh.price] += sh.remaining;
   }
 
-  if (!bid_levels.empty() && !ask_levels.empty()) {
-    const int32_t best_bid = bid_levels.rbegin()->first;
-    const int32_t best_ask = ask_levels.begin()->first;
+  if (!bid_want.empty() && !ask_want.empty()) {
+    const int32_t best_bid = bid_want.rbegin()->first;
+    const int32_t best_ask = ask_want.begin()->first;
     if (best_bid >= best_ask) {
       std::ostringstream s;
       s << "book is crossed: best bid " << best_bid << " >= best ask " << best_ask;
@@ -268,71 +265,53 @@ bool InvariantChecker::on_snapshot(const BookSnapshot& snap, std::string& err) {
     }
   }
 
-  // Bids descend from the touch, asks ascend.
-  for (uint32_t i = 1; i < snap.n_bids; ++i) {
-    if (snap.bids[i].px >= snap.bids[i - 1].px) {
-      return fail(err, "snapshot bids are not in descending price order (best first)");
-    }
-  }
-  for (uint32_t i = 1; i < snap.n_asks; ++i) {
-    if (snap.asks[i].px <= snap.asks[i - 1].px) {
-      return fail(err, "snapshot asks are not in ascending price order (best first)");
-    }
-  }
-
-  auto check_side = [&](const LevelSnapshot* levels, uint32_t n, bool bids,
-                        const std::map<int32_t, std::pair<uint64_t, uint32_t>>& expect_levels,
-                        const std::map<int32_t, uint64_t>& expect_front) -> bool {
+  // The old map-of-levels snapshot made "best first, no duplicates" structural;
+  // a vector makes wrong ordering a submittable bug, so it is checked here.
+  auto check_side = [&](const LevelVec& got, bool bids,
+                        const std::map<int32_t, uint64_t>& want) -> bool {
     const char* what = bids ? "bid" : "ask";
-    for (uint32_t i = 0; i < n; ++i) {
-      const LevelSnapshot& l = levels[i];
-      if (l.total_qty == 0 || l.order_count == 0) {
+    if (got.size() != want.size()) {
+      std::ostringstream s;
+      s << "snapshot reports " << got.size() << " " << what << " levels; this engine's own output "
+        << "accounts for " << want.size();
+      return fail(err, s.str());
+    }
+    for (size_t i = 0; i < got.size(); ++i) {
+      const auto [price, qty] = got[i];
+      if (i > 0) {
+        const int32_t prev = got[i - 1].first;
+        const bool ordered = bids ? price < prev : price > prev;
+        if (!ordered) {
+          std::ostringstream s;
+          s << what << " levels are not best-price-first: depth " << i - 1 << " is " << prev
+            << ", depth " << i << " is " << price
+            << (price == prev ? " (duplicate level)" : "");
+          return fail(err, s.str());
+        }
+      }
+      if (qty == 0) {
         return fail(err, std::string("snapshot contains an empty ") + what + " level at price " +
-                             std::to_string(l.px));
+                             std::to_string(price));
       }
-      auto e = expect_levels.find(l.px);
-      if (e == expect_levels.end()) {
+      auto e = want.find(price);
+      if (e == want.end()) {
         return fail(err, std::string("snapshot reports a ") + what + " level at " +
-                             std::to_string(l.px) + " with no orders behind it in this engine's "
-                             "own output");
+                             std::to_string(price) +
+                             " with no orders behind it in this engine's own output");
       }
-      if (l.total_qty != e->second.first || l.order_count != e->second.second) {
+      if (qty != e->second) {
         std::ostringstream s;
-        s << what << " level " << l.px << ": snapshot says qty " << l.total_qty << " count "
-          << l.order_count << ", output accounts for qty " << e->second.first << " count "
-          << e->second.second;
-        return fail(err, s.str());
-      }
-      // front_seq is the only cheap way to catch a LIFO queue: the aggregates
-      // above look identical either way.
-      const uint64_t want_front = expect_front.at(l.px);
-      if (l.front_seq != want_front) {
-        std::ostringstream s;
-        s << what << " level " << l.px << " has front_seq " << l.front_seq << " but the earliest "
-          << "order resting there arrived at seq " << want_front
-          << " — the level queue is not in arrival order";
+        s << what << " level " << price << ": snapshot says total_qty " << qty
+          << " but this engine's own output accounts for " << e->second;
         return fail(err, s.str());
       }
     }
     return true;
   };
 
-  if (!check_side(snap.bids, snap.n_bids, true, bid_levels, bid_front)) return false;
-  if (!check_side(snap.asks, snap.n_asks, false, ask_levels, ask_front)) return false;
+  if (!check_side(snap.bids, true, bid_want)) return false;
+  if (!check_side(snap.asks, false, ask_want)) return false;
 
-  // If the book has more levels than fit, the snapshot must show the best ones.
-  const uint32_t want_bids =
-      static_cast<uint32_t>(bid_levels.size() < kSnapshotLevels ? bid_levels.size()
-                                                                : kSnapshotLevels);
-  const uint32_t want_asks =
-      static_cast<uint32_t>(ask_levels.size() < kSnapshotLevels ? ask_levels.size()
-                                                                : kSnapshotLevels);
-  if (snap.n_bids != want_bids || snap.n_asks != want_asks) {
-    std::ostringstream s;
-    s << "snapshot reports " << snap.n_bids << " bid and " << snap.n_asks
-      << " ask levels; output accounts for " << want_bids << " and " << want_asks;
-    return fail(err, s.str());
-  }
   return true;
 }
 

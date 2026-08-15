@@ -232,7 +232,7 @@ That check is the entire reason `OrderRef` carries the firm.
 Against the shadow book:
 
 ```cpp
-if (e.px  != m.px)          // trade price must be the RESTING order's price
+if (e.price  != m.price)          // trade price must be the RESTING order's price
 if (e.qty >  m.remaining)   // cannot trade more than is there
 if (m.side == o.side)       // cannot trade two orders on the same side
 ```
@@ -293,7 +293,7 @@ EventBuffer buf(events.size());          // mmap MAP_HUGETLB, falls back to THP
 for (...) buf.data()[i] = decode(events[i], i);
 
 volatile uint64_t touch = 0;
-for (...) touch += buf.data()[i].o.px;   // fault every page in NOW
+for (...) touch += buf.data()[i].o.price;   // fault every page in NOW
 r.memory_locked = mlockall(MCL_CURRENT | MCL_FUTURE) == 0;
 ```
 
@@ -418,7 +418,7 @@ mix(e.maker.client_order_id);
 mix(static_cast<uint64_t>(e.maker.session_id) << 16 | e.maker.participant_id);
 mix(e.taker.client_order_id);
 mix(static_cast<uint64_t>(e.taker.session_id) << 16 | e.taker.participant_id);
-mix(static_cast<uint64_t>(static_cast<uint32_t>(e.px)) << 32 | e.qty);
+mix(static_cast<uint64_t>(static_cast<uint32_t>(e.price)) << 32 | e.qty);
 mix(static_cast<uint64_t>(e.type) << 16 | ... << 8 | static_cast<uint64_t>(e.reason));
 ```
 

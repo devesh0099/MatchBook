@@ -25,12 +25,12 @@ struct Rec : OutSink {
   void clear() { ev.clear(); }
 };
 
-Order ord(uint64_t seq, Side side, int32_t px, uint32_t qty, uint16_t sess, uint64_t coid,
-          uint16_t firm, TIF tif = TIF::Day) {
+Order ord(uint64_t seq, Side side, int32_t price, uint32_t qty, uint16_t sess, uint64_t coid,
+          uint16_t firm, TIF tif = TIF::GTC) {
   Order o{};
   o.seq = seq;
   o.client_order_id = coid;
-  o.px = px;
+  o.price = price;
   o.qty = qty;
   o.session_id = sess;
   o.participant_id = firm;
@@ -42,7 +42,7 @@ Order ord(uint64_t seq, Side side, int32_t px, uint32_t qty, uint16_t sess, uint
 OrderRef rf(uint16_t sess, uint64_t coid, uint16_t firm) { return OrderRef{coid, sess, firm, 0}; }
 
 bool same(const OutEvent& a, const OutEvent& b) {
-  return a.in_seq == b.in_seq && a.maker == b.maker && a.taker == b.taker && a.px == b.px &&
+  return a.in_seq == b.in_seq && a.maker == b.maker && a.taker == b.taker && a.price == b.price &&
          a.qty == b.qty && a.type == b.type && a.aggressor_side == b.aggressor_side &&
          a.reason == b.reason;
 }
@@ -69,7 +69,7 @@ const char* reason_name(RejectReason r) {
 
 std::string describe(const OutEvent& e) {
   std::ostringstream s;
-  s << type_name(e.type) << " in_seq=" << e.in_seq << " px=" << e.px << " qty=" << e.qty
+  s << type_name(e.type) << " in_seq=" << e.in_seq << " price=" << e.price << " qty=" << e.qty
     << " maker=(s" << e.maker.session_id << ",c" << e.maker.client_order_id << ",f"
     << e.maker.participant_id << ")"
     << " taker=(s" << e.taker.session_id << ",c" << e.taker.client_order_id << ",f"
@@ -100,7 +100,7 @@ std::string diff(const std::vector<OutEvent>& got, const std::vector<OutEvent>& 
 std::string expect_book(IMatchingEngine& e, uint32_t n_bids, uint32_t n_asks, uint64_t total_qty,
                         uint32_t total_orders) {
   BookSnapshot s{};
-  e.snapshot(s);
+  build_book(e, s);
   if (s.n_bids == n_bids && s.n_asks == n_asks && s.resting_qty_total == total_qty &&
       s.resting_order_count == total_orders) {
     return {};
@@ -239,11 +239,29 @@ std::string t_book_never_crossed(IMatchingEngine& e) {
     return d;
   }
   BookSnapshot s{};
-  e.snapshot(s);
-  if (s.n_bids != 0 || s.n_asks != 1 || s.asks[0].px != 9999) {
+  build_book(e, s);
+  if (s.n_bids != 0 || s.n_asks != 1 || s.asks.front().first != 9999) {
     return "remainder must rest at its own price (9999) with the bid fully consumed";
   }
   return {};
+}
+
+// §1.1 Core: a partial fill does not change arrival time — the partially
+// filled order keeps its place at the head of the level. The snapshot no
+// longer exposes per-order queues, so this is proven behaviorally: the next
+// aggressor must trade the partially filled order's REMAINDER first.
+std::string t_partial_fill_keeps_queue_head(IMatchingEngine& e) {
+  Rec r;
+  e.on_new(ord(1, Side::Sell, 10000, 100, 1, 1, 1), r);
+  e.on_new(ord(2, Side::Sell, 10000, 50, 1, 2, 1), r);
+  e.on_new(ord(3, Side::Buy, 10000, 40, 2, 3, 2), r);  // fills 40 of order 1
+  r.clear();
+  e.on_new(ord(4, Side::Buy, 10000, 70, 2, 4, 2), r);
+  // Head kept: 60 remaining of order 1 first, then 10 of order 2. A
+  // pop-and-reappend engine would trade order 2's 50 first instead.
+  return diff(r.ev, {out::ack(4, rf(2, 4, 2), 10000, Side::Buy),
+                     out::trade(4, rf(1, 1, 1), rf(2, 4, 2), 10000, 60, Side::Buy),
+                     out::trade(4, rf(1, 2, 1), rf(2, 4, 2), 10000, 10, Side::Buy)});
 }
 
 // ---------------------------------------------------------------- M: market orders
@@ -397,9 +415,15 @@ std::string t_cancel_identity_is_the_pair(IMatchingEngine& e) {
   e.on_new(ord(1, Side::Buy, 10000, 100, 3, 1, 3), r);  // session 3, coid 1
   e.on_new(ord(2, Side::Buy, 9999, 50, 7, 1, 7), r);    // session 7, coid 1 — same id!
   r.clear();
-  e.on_cancel(rf(7, 1, 7), 3, r);  // cancel session 7's
-  if (auto d = diff(r.ev, {out::cancel_ack(3, rf(7, 1, 7), 50, Side::Buy)}); !d.empty()) return d;
-  return expect_book(e, 1, 0, 100, 1);  // session 3's 100 must still be resting
+  // Cancel BOTH, first-inserted first. A map keyed on coid alone fails one of
+  // the two whichever insert "won": overwrite semantics cancel the wrong order
+  // here; keep-first semantics reject session 7's cancel below.
+  e.on_cancel(rf(3, 1, 3), 3, r);
+  if (auto d = diff(r.ev, {out::cancel_ack(3, rf(3, 1, 3), 100, Side::Buy)}); !d.empty()) return d;
+  r.clear();
+  e.on_cancel(rf(7, 1, 7), 4, r);
+  if (auto d = diff(r.ev, {out::cancel_ack(4, rf(7, 1, 7), 50, Side::Buy)}); !d.empty()) return d;
+  return expect_book(e, 0, 0, 0, 0);
 }
 
 // §1.1 Core: cancelling the last order at a level removes the level.
@@ -409,28 +433,49 @@ std::string t_cancel_last_order_at_level(IMatchingEngine& e) {
   e.on_new(ord(2, Side::Sell, 10001, 100, 1, 2, 1), r);
   e.on_cancel(rf(1, 1, 1), 3, r);
   BookSnapshot s{};
-  e.snapshot(s);
-  if (s.n_asks != 1 || s.asks[0].px != 10001) return "empty level must disappear from the book";
+  build_book(e, s);
+  if (s.n_asks != 1 || s.asks.front().first != 10001)
+    return "empty level must disappear from the book";
   return {};
 }
 
-// engine.h: front_seq exposes the head of each level's queue — the only cheap way
-// to catch a LIFO level queue, since aggregates look identical.
-std::string t_snapshot_front_seq_is_fifo(IMatchingEngine& e) {
+// engine.h: bid_levels()/ask_levels() return (price, total_qty) BEST price
+// first — bids highest first, asks lowest first — with per-level quantities
+// that track fills and cancels.
+std::string t_levels_best_first(IMatchingEngine& e) {
   Rec r;
-  e.on_new(ord(11, Side::Sell, 10000, 10, 1, 1, 1), r);
-  e.on_new(ord(12, Side::Sell, 10000, 10, 1, 2, 1), r);
-  e.on_new(ord(13, Side::Sell, 10000, 10, 1, 3, 1), r);
+  e.on_new(ord(1, Side::Sell, 10002, 10, 1, 1, 1), r);
+  e.on_new(ord(2, Side::Sell, 10000, 20, 1, 2, 1), r);
+  e.on_new(ord(3, Side::Sell, 10000, 5, 1, 3, 1), r);
+  e.on_new(ord(4, Side::Buy, 9999, 30, 1, 4, 1), r);
+  e.on_new(ord(5, Side::Buy, 9997, 40, 1, 5, 1), r);
   BookSnapshot s{};
-  e.snapshot(s);
-  if (s.n_asks != 1 || s.asks[0].front_seq != 11 || s.asks[0].order_count != 3 ||
-      s.asks[0].total_qty != 30) {
-    return "level head must be the earliest seq (11), with 3 orders totalling 30";
+  build_book(e, s);
+  const LevelVec want_asks{{10000, 25}, {10002, 10}};  // lowest first, 20+5 merged
+  const LevelVec want_bids{{9999, 30}, {9997, 40}};    // highest first
+  if (s.asks != want_asks) return "asks must be [(10000,25),(10002,10)], lowest price first";
+  if (s.bids != want_bids) return "bids must be [(9999,30),(9997,40)], highest price first";
+  e.on_cancel(rf(1, 2, 1), 6, r);  // remove 20 of the 25 at 10000
+  build_book(e, s);
+  if (s.asks != LevelVec{{10000, 5}, {10002, 10}}) {
+    return "cancelling one order must leave (10000,5) at the touch";
   }
-  e.on_cancel(rf(1, 1, 1), 14, r);  // remove the head
-  e.snapshot(s);
-  if (s.n_asks != 1 || s.asks[0].front_seq != 12) return "new head must be seq 12";
   return {};
+}
+
+// §2 Input guarantees: a (session_id, client_order_id) pair may be reused once
+// the earlier order is gone. A stale map entry left behind by the first order
+// would make this cancel miss the NEW order or report the wrong side.
+std::string t_id_reuse_after_death(IMatchingEngine& e) {
+  Rec r;
+  e.on_new(ord(1, Side::Buy, 10000, 100, 1, 7, 1), r);
+  e.on_cancel(rf(1, 7, 1), 2, r);                       // pair (1,7) now dead
+  e.on_new(ord(3, Side::Sell, 10005, 40, 1, 7, 1), r);  // same pair, reused
+  r.clear();
+  e.on_cancel(rf(1, 7, 1), 4, r);
+  // Side::Sell proves the cancel found the new order, not the dead buy.
+  if (auto d = diff(r.ev, {out::cancel_ack(4, rf(1, 7, 1), 40, Side::Sell)}); !d.empty()) return d;
+  return expect_book(e, 0, 0, 0, 0);
 }
 
 // ---------------------------------------------------------------- S: self-trade prevention
@@ -438,9 +483,9 @@ std::string t_snapshot_front_seq_is_fifo(IMatchingEngine& e) {
 // S1: STP keys on participant_id (firm). Different sessions of the same firm
 // still self-trade — session_id is irrelevant to STP.
 //
-// The aggressor here is a Day order, so after the STP cancellation its
+// The aggressor here is a GTC order, so after the STP cancellation its
 // untouched quantity rests silently (A4). There is no Expired: that is an
-// IOC/market ending, not a Day one.
+// IOC/market ending, not a GTC one.
 std::string t_stp_across_sessions_same_firm(IMatchingEngine& e) {
   Rec r;
   e.on_new(ord(1, Side::Sell, 10000, 100, 1, 1, 5), r);  // firm 5, session 1
@@ -508,6 +553,41 @@ std::string t_ioc_stp_expires_full_qty(IMatchingEngine& e) {
   return diff(r.ev, {out::ack(2, rf(2, 2, 5), 10000, Side::Buy),
                      out::stp_cancel_ack(2, rf(1, 1, 5), rf(2, 2, 5), 50, Side::Buy),
                      out::expired(2, rf(2, 2, 5), 100, Side::Buy)});
+}
+
+// S2: the STP CancelAck carries the resting order's REMAINING quantity, not
+// its original quantity — the same remainder rule a plain cancel obeys. Every
+// other STP case above uses an untouched resting order, so an original-qty bug
+// would pass them all.
+std::string t_stp_cancelack_carries_remaining(IMatchingEngine& e) {
+  Rec r;
+  e.on_new(ord(1, Side::Sell, 10000, 100, 1, 1, 5), r);  // firm 5 rests 100
+  e.on_new(ord(2, Side::Buy, 10000, 30, 2, 2, 6), r);    // other firm fills 30
+  r.clear();
+  e.on_new(ord(3, Side::Buy, 10000, 10, 3, 3, 5), r);  // firm 5 aggresses
+  if (auto d = diff(r.ev, {out::ack(3, rf(3, 3, 5), 10000, Side::Buy),
+                           out::stp_cancel_ack(3, rf(1, 1, 5), rf(3, 3, 5), 70, Side::Buy)});
+      !d.empty()) {
+    return d;
+  }
+  return expect_book(e, 1, 0, 10, 1);  // aggressor's untouched 10 rests as a bid
+}
+
+// A2/I1 end-to-end: one IOC event producing the full canonical sequence —
+// Ack, trade, interleaved STP CancelAck, trade at the next level, then exactly
+// one Expired for the remainder.
+std::string t_ioc_full_sequence_trades_stp_expired(IMatchingEngine& e) {
+  Rec r;
+  e.on_new(ord(1, Side::Sell, 10000, 30, 1, 1, 6), r);  // other firm
+  e.on_new(ord(2, Side::Sell, 10000, 20, 2, 2, 5), r);  // own — STP target
+  e.on_new(ord(3, Side::Sell, 10001, 25, 3, 3, 7), r);  // other firm, next level
+  r.clear();
+  e.on_new(ord(4, Side::Buy, 10001, 100, 4, 4, 5, TIF::IOC), r);
+  return diff(r.ev, {out::ack(4, rf(4, 4, 5), 10001, Side::Buy),
+                     out::trade(4, rf(1, 1, 6), rf(4, 4, 5), 10000, 30, Side::Buy),
+                     out::stp_cancel_ack(4, rf(2, 2, 5), rf(4, 4, 5), 20, Side::Buy),
+                     out::trade(4, rf(3, 3, 7), rf(4, 4, 5), 10001, 25, Side::Buy),
+                     out::expired(4, rf(4, 4, 5), 45, Side::Buy)});
 }
 
 // ---------------------------------------------------------------- F: fill-or-kill
@@ -664,6 +744,22 @@ std::string t_sell_market_sweeps_bids_high_first(IMatchingEngine& e) {
                      out::trade(3, rf(1, 1, 6), rf(3, 3, 5), 9998, 20, Side::Sell)});
 }
 
+// F2/M3 on the sell side: Reject and Expired must carry the order's real side.
+// Every other Reject and Expired in this suite is buy-side, so an engine
+// hardcoding Side::Buy on those event types would pass them all.
+std::string t_sell_side_reject_and_expired(IMatchingEngine& e) {
+  Rec r;
+  e.on_new(ord(1, Side::Sell, 10000, 50, 1, 1, 5, TIF::FOK), r);  // empty bid side
+  if (auto d = diff(r.ev, {out::reject(1, rf(1, 1, 5), RejectReason::FokUnfillable, Side::Sell)});
+      !d.empty()) {
+    return d;
+  }
+  r.clear();
+  e.on_new(ord(2, Side::Sell, 0, 30, 1, 2, 5, TIF::Market), r);  // still empty
+  return diff(r.ev, {out::ack(2, rf(1, 2, 5), 0, Side::Sell),
+                     out::expired(2, rf(1, 2, 5), 30, Side::Sell)});
+}
+
 // ---------------------------------------------------------------- registry
 
 const Case kCases[] = {
@@ -691,7 +787,7 @@ const Case kCases[] = {
     {"second_cancel_of_same_order_rejects", "§1.4 Cancel", t_double_cancel},
     {"cancel_identity_is_session_plus_coid", "identity", t_cancel_identity_is_the_pair},
     {"cancelling_last_order_removes_level", "§1.1 Core", t_cancel_last_order_at_level},
-    {"snapshot_front_seq_proves_fifo", "engine.h", t_snapshot_front_seq_is_fifo},
+    {"levels_are_best_price_first", "engine.h", t_levels_best_first},
     {"stp_keys_on_firm_not_session", "S1", t_stp_across_sessions_same_firm},
     {"stp_cancels_resting_aggressor_continues", "S2, S3",
      t_stp_cancels_resting_aggressor_continues},
@@ -709,6 +805,11 @@ const Case kCases[] = {
     {"fok_fills_across_multiple_levels", "F1, F3", t_fok_multi_level_fill},
     {"sell_side_aggressor_mirrors_buy_side", "§1.1 Core", t_sell_aggressor_mirrors},
     {"sell_market_sweeps_bids_highest_first", "M2", t_sell_market_sweeps_bids_high_first},
+    {"partial_fill_keeps_queue_head", "§1.1 Core", t_partial_fill_keeps_queue_head},
+    {"id_reuse_after_death_targets_new_order", "§2", t_id_reuse_after_death},
+    {"stp_cancelack_carries_remaining_qty", "S2", t_stp_cancelack_carries_remaining},
+    {"ioc_full_sequence_trade_stp_trade_expired", "A2, I1", t_ioc_full_sequence_trades_stp_expired},
+    {"sell_side_reject_and_expired_carry_side", "F2, M3", t_sell_side_reject_and_expired},
 };
 
 }  // namespace
