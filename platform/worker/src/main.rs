@@ -157,10 +157,56 @@ async fn main() -> Result<()> {
     };
 
     register(&db, &cfg).await?;
+    reclaim_own_orphans(&db, &cfg).await?;
     spawn_heartbeat(db.clone(), cfg.worker_id.clone());
 
     tracing::info!("worker {} starting as {role}", cfg.worker_id);
     roles::run_agent(db, cfg).await
+}
+
+/// Any row still claimed by THIS worker id at startup is orphaned by
+/// definition — a just-started process cannot have work in flight. Reclaiming
+/// it here means the common crash case (agent dies, systemd restarts it in
+/// 5s) recovers in SECONDS; the janitor's dead-box and staleness sweeps only
+/// cover the box that never comes back and the agent that wedges while
+/// alive. Partial measurement blobs are cleared so a half-climb cannot
+/// masquerade as the re-evaluation's result.
+async fn reclaim_own_orphans(db: &sqlx::PgPool, cfg: &Config) -> Result<()> {
+    let subs = sqlx::query(
+        "UPDATE submissions SET state = 'received', claimed_by = NULL, \
+         phase1 = NULL, phase2 = NULL, updated_at = now() \
+         WHERE claimed_by = $1 \
+         AND state IN ('compiling','testing','verifying','phase1','phase2') RETURNING id",
+    )
+    .bind(&cfg.worker_id)
+    .fetch_all(db)
+    .await?;
+    let runs = sqlx::query(
+        "UPDATE run_jobs SET state = 'received', claimed_by = NULL, updated_at = now() \
+         WHERE claimed_by = $1 AND state = 'running' RETURNING id",
+    )
+    .bind(&cfg.worker_id)
+    .fetch_all(db)
+    .await?;
+    if !subs.is_empty() || !runs.is_empty() {
+        use sqlx::Row;
+        for row in &subs {
+            let id: i64 = row.get("id");
+            tracing::warn!("reclaimed my orphaned submission {id} at startup");
+            sqlx::query("INSERT INTO events_log (submission_id, kind, detail) VALUES ($1, $2, $3)")
+                .bind(id)
+                .bind("agent_startup_reclaim")
+                .bind(serde_json::json!({ "worker": cfg.worker_id }))
+                .execute(db)
+                .await?;
+        }
+        tracing::warn!(
+            "startup reclaim: {} submission(s), {} run job(s)",
+            subs.len(),
+            runs.len()
+        );
+    }
+    Ok(())
 }
 
 /// Registration goes to the BOX REGISTRY — the table the future admin

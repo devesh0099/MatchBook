@@ -16,12 +16,19 @@ use std::time::Duration;
 /// Compile, tests, and verify are seconds of work under sub-minute isolate
 /// wall-times.
 const STUCK_EARLY: &str = "3 minutes";
-/// Phase I is three short gated runs; Phase II is a whole climb — minutes at
-/// the top rungs, with a heartbeat per level. Thirty minutes only catches an
-/// agent that died mid-level.
+/// The deep backstop, not the recovery path. Recovery normally comes from
+/// the two DIRECT liveness signals — the agent's own startup reclaim
+/// (seconds, via systemd restart) and the dead-box sweep below (~2-3 min via
+/// the heartbeat). This staleness rule only catches an agent that is alive
+/// and heartbeating but wedged mid-job, where silence is the only evidence.
 const STUCK_MEASURE: &str = "30 minutes";
 /// A box is marked unhealthy after this much silence.
 const BOX_SILENCE_SECS: i64 = 90;
+/// A box silent this long is DEAD, not busy: the heartbeat runs concurrently
+/// with jobs, every 15s, so a live climb never goes quiet. Rows claimed by a
+/// box past this threshold are recovered immediately — this is what keeps a
+/// student's lockout to minutes when their box dies and never comes back.
+const BOX_DEAD_SECS: i64 = 120;
 
 pub fn spawn(db: PgPool) {
     tokio::spawn(async move {
@@ -57,7 +64,39 @@ async fn sweep(db: &PgPool) -> anyhow::Result<()> {
     .fetch_all(db)
     .await?;
 
+    // The fast path: rows claimed by a box whose heartbeat has stopped. The
+    // heartbeat beats every 15s regardless of what the agent is doing, so
+    // two minutes of silence is death, and the row can be recovered NOW
+    // rather than after the staleness backstop. last_seen is used directly —
+    // never the healthy flag, so an operator marking a box unhealthy does
+    // not requeue work its still-running agent holds.
+    let reset_dead = sqlx::query(&format!(
+        "UPDATE submissions SET state = 'received', claimed_by = NULL, \
+         phase1 = NULL, phase2 = NULL, updated_at = now() \
+         WHERE state IN ('compiling','testing','verifying','phase1','phase2') \
+         AND claimed_by IN (SELECT id FROM boxes \
+                            WHERE last_seen < now() - interval '{BOX_DEAD_SECS} seconds') \
+         RETURNING id"
+    ))
+    .fetch_all(db)
+    .await?;
+    let reset_dead_runs = sqlx::query(&format!(
+        "UPDATE run_jobs SET state = 'received', claimed_by = NULL, updated_at = now() \
+         WHERE state = 'running' \
+         AND claimed_by IN (SELECT id FROM boxes \
+                            WHERE last_seen < now() - interval '{BOX_DEAD_SECS} seconds') \
+         RETURNING id"
+    ))
+    .fetch_all(db)
+    .await?;
+    for row in reset_dead_runs.iter() {
+        use sqlx::Row;
+        let id: i64 = row.get("id");
+        tracing::warn!("janitor reset run job {id}: its box is dead");
+    }
+
     for (rows, kind) in [
+        (&reset_dead, "janitor_reset_dead_box"),
         (&reset_early, "janitor_reset_early"),
         (&reset_measure, "janitor_reset_measure"),
     ] {
