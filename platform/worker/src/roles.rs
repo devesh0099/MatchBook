@@ -94,6 +94,11 @@ async fn level_table(db: &PgPool) -> Result<Vec<LevelCfg>> {
 
 pub async fn run_agent(db: PgPool, cfg: Config) -> Result<()> {
     let sandbox = Sandbox::new();
+    // A killed predecessor never ran its BoxGuard, and a stale isolate box
+    // wedges every later init for this box id. A fresh agent owns its box id
+    // outright, so an unconditional cleanup at startup is always correct —
+    // the companion of the startup reclaim in main.rs.
+    sandbox.cleanup_blocking(cfg.box_id);
     loop {
         // Run jobs first, always: Run turnaround IS the iteration loop, and a
         // Submit can wait the extra seconds.

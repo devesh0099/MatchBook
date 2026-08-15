@@ -262,6 +262,20 @@ locals {
     repo_url = var.repo_url
     repo_ref = var.repo_ref
   })
+
+  # A box launched from the baked AMI is already provisioned — full cloud-init
+  # would spend ten minutes re-installing what the image contains. It only
+  # refreshes the checkout (so `--only agentN` re-provisions against current
+  # code) and re-asserts the ready marker the image already carries.
+  agent_user_data = var.agent_ami_id == null ? local.user_data : <<-EOT
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'echo "user_data FAILED at line $LINENO" > /var/lib/cloud/flashmatch-failed' ERR
+    git -C /opt/flashmatch fetch --all --quiet || true
+    git -C /opt/flashmatch checkout ${var.repo_ref} --quiet || true
+    git -C /opt/flashmatch pull --ff-only --quiet || true
+    touch /var/lib/cloud/flashmatch-ready
+  EOT
 }
 
 # user_data_replace_on_change is on for all three. Without it the provider
@@ -318,13 +332,13 @@ resource "aws_instance" "web" {
 resource "aws_instance" "agent" {
   count = var.fleet_size
 
-  ami                         = var.ami_id
+  ami                         = coalesce(var.agent_ami_id, var.ami_id)
   instance_type               = var.agent_instance_type
   subnet_id                   = var.subnet_id
   key_name                    = aws_key_pair.this.key_name
   vpc_security_group_ids      = [aws_security_group.worker.id]
   iam_instance_profile        = local.instance_profile
-  user_data                   = local.user_data
+  user_data                   = local.agent_user_data
   user_data_replace_on_change = true
   associate_public_ip_address = var.associate_public_ip
 
@@ -362,7 +376,7 @@ resource "aws_instance" "agent" {
 resource "aws_instance" "golden" {
   count = var.golden_count
 
-  ami                         = var.ami_id
+  ami                         = coalesce(var.agent_ami_id, var.ami_id)
   instance_type               = var.agent_instance_type
   subnet_id                   = var.subnet_id
   key_name                    = aws_key_pair.this.key_name

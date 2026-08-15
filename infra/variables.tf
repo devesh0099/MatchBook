@@ -172,6 +172,12 @@ variable "web_instance_type" {
   default     = "m6i.large"
 }
 
+variable "agent_ami_id" {
+  description = "The baked fleet AMI from ops/aws/bake-ami.sh. Null (the default) launches agents from the stock Ubuntu ami_id and provisions from source (~25 min/box); set, agents boot fully provisioned in minutes — kernel isolation, toolchain, baked streams and all — and only the connect phase (worker.env binding) remains."
+  type        = string
+  default     = null
+}
+
 variable "fleet_size" {
   description = "One box per participant (PLAN-measurement-redesign §7). agent-N serves participant N. ~$0.34/hr each in ap-south-1; a 20-box fleet over an 8h event is ~$55 of compute."
   type        = number
