@@ -185,15 +185,15 @@ variable "fleet_size" {
 }
 
 variable "agent_instance_type" {
-  description = "Every box measures, so every box is the calibrated type. The size that matters is L3 — the ladder's depth rungs are calibrated against it. Do not change without re-running M5."
+  description = "Every box measures, so every box is the calibrated type. c6i.xlarge with SMT off presents 2 whole cores — the design's minimum: OS, agent and compiles share core 0; core 1 is the isolated measurement core. Do not change without re-running M5: the deadlines are calibrated against this type's effective cache."
   type        = string
-  default     = "c6i.2xlarge"
+  default     = "c6i.xlarge"
 }
 
 variable "agent_core_count" {
-  description = "Physical cores with SMT off. c6i.2xlarge has 4: OS+agent on 0, measurement isolated on 1, compiles on 2-3. Must match the instance type or the launch fails."
+  description = "Physical cores with SMT off. c6i.xlarge has 2. Must match the instance type or the launch fails."
   type        = number
-  default     = 4
+  default     = 2
 }
 
 variable "golden_count" {

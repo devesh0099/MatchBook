@@ -164,14 +164,15 @@ chmod 600 /opt/flashmatch/platform/.env"
 provision_agent() {
   local role="$1"
   # ISOLATED_CPUS / BENCH_CPU / COMPILE_CPUS derived from what the box actually
-  # presents. With SMT off a c6i.2xlarge presents 4: OS on 0, measurement on 1,
-  # compiles on the rest.
+  # presents. With SMT off a c6i.xlarge presents 2: OS, agent and compiles on
+  # core 0; core 1 isolated for measurement. On a bigger box the spare cores
+  # take the compiles instead.
   local ncpu
   ncpu="$(node "$role" nproc --all)"
   ncpu="${ncpu//[!0-9]/}"
   (( ncpu >= 2 )) || { echo "$role reports $ncpu CPUs" >&2; return 1; }
-  local compile_cpus="2,3"
-  (( ncpu < 4 )) && compile_cpus="1"
+  local compile_cpus="0"
+  (( ncpu >= 4 )) && compile_cpus="2,3"
 
   node "$role" "cd /opt/flashmatch && sudo ISOLATED_CPUS=1-$((ncpu - 1)) BENCH_CPU=1 \
     COMPILE_CPUS=$compile_cpus SEED1=$SEED1 SEED2=$SEED2 ops/agent-node-setup.sh"

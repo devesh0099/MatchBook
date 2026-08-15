@@ -3,9 +3,9 @@
 #
 # Every box measures, so every box gets the discipline the old bench node had:
 # timers masked, swap off, kernel core isolation, IRQs steered, turbo pinned.
-# On a c6i.2xlarge with SMT off (4 cores): core 0 runs the OS and the agent,
-# core 1 is the isolated measurement core, cores 2-3 take compiles — reachable
-# only by explicit affinity, which is exactly how the worker steers them.
+# On a c6i.xlarge with SMT off (2 cores): core 0 runs the OS, the agent and
+# the compiles; core 1 is the isolated measurement core, reachable only by
+# explicit affinity — which is exactly how the worker steers the harness.
 #
 #   sudo SEED1=... SEED2=... ops/agent-node-setup.sh
 #
@@ -21,9 +21,9 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/mebench}"
 REPO="${REPO:-/opt/flashmatch}"
-ISOLATED_CPUS="${ISOLATED_CPUS:-1-3}"
+ISOLATED_CPUS="${ISOLATED_CPUS:-1}"
 export BENCH_CPU="${BENCH_CPU:-1}"
-COMPILE_CPUS="${COMPILE_CPUS:-2,3}"
+COMPILE_CPUS="${COMPILE_CPUS:-0}"
 # The fixed measurement seeds (§4). Dev defaults; the event's real seeds are
 # chosen before kickoff and passed in. SEED3 never reaches an agent box.
 SEED1="${SEED1:-101}"
@@ -191,12 +191,12 @@ bake_one() {
   local seed="$1" events="$2" lt="$3"
   local base="cancel_heavy-$seed-$events-$lt"
   if [[ ! -f "$PREFIX/bake/$base.bin" ]]; then
-    "$PREFIX/bin/gen" --seed "$seed" --profile cancel_heavy --events "$events" \
+    taskset -c "$HOUSEKEEPING_CPUS" "$PREFIX/bin/gen" --seed "$seed" --profile cancel_heavy --events "$events" \
       --live-target "$lt" -o "$PREFIX/bake/$base.bin" >/dev/null
     chmod 600 "$PREFIX/bake/$base.bin"
   fi
   [[ -f "$PREFIX/bake/$base.sol" ]] || \
-    "$PREFIX/bin/harness" solve --stream "$PREFIX/bake/$base.bin" -o "$PREFIX/bake/$base.sol"
+    taskset -c "$HOUSEKEEPING_CPUS" "$PREFIX/bin/harness" solve --stream "$PREFIX/bake/$base.bin" -o "$PREFIX/bake/$base.sol"
 }
 read -ra _first <<< "$BAKE_LIST"
 # Phase 1 (SEED1) uses the first entry's shape; the ladder (SEED2) uses all.

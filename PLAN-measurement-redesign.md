@@ -344,12 +344,14 @@ box **warns rather than discards** — there is no co-tenant queue to protect,
 and the golden box is where discards still mean discard.
 
 **Every box pins measurement to an isolated physical core.** The fleet
-instance is **`c6i.2xlarge` launched with `CpuOptions { ThreadsPerCore = 1 }`**
-— SMT off from boot, leaving 4 whole physical cores: core 0 runs the OS and
-the agent, core 1 is isolated (`isolcpus` + `nohz_full` + `rcu_nocbs`, IRQ
-affinity steered to core 0) and runs nothing but the pinned harness, and
-cores 2–3 take compiles, so the ~2 s Run loop stays fast without ever
-touching the measurement core. With SMT disabled there is no sibling thread
+instance is **`c6i.xlarge` launched with `CpuOptions { ThreadsPerCore = 1 }`**
+— SMT off from boot, leaving 2 whole physical cores: core 0 runs the OS, the
+agent and the compiles; core 1 is isolated (`isolcpus` + `nohz_full` +
+`rcu_nocbs`, IRQ affinity steered to core 0) and runs nothing but the pinned
+harness. (Revised from `c6i.2xlarge` by decision: two cores are the design's
+actual requirement, the halved cost matters at scale, and the one-afternoon
+recalibration the switch demands is automated. The trade accepted: compiles
+share core 0 with the OS, and the Run loop is somewhat slower.) With SMT disabled there is no sibling thread
 to share L1/L2 or execution ports, no scheduler migration, no timer tick and
 no IRQ inside a timed run — which is what bounds same-code run-to-run
 variance. Two cautions that shaped the choice: a bare 2-vCPU instance
