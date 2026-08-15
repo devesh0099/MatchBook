@@ -63,26 +63,37 @@ function ActionButton({
   label,
   danger,
   onClick,
+  disabled,
+  reason,
 }: {
   label: string;
   danger?: boolean;
   onClick: () => void;
+  /// A disabled control is the failover: the operator can SEE the action
+  /// exists but cannot fire it until its precondition holds.
+  disabled?: boolean;
+  /// Why it's disabled — surfaced as the hover title so the block is never
+  /// mysterious.
+  reason?: string;
 }) {
   return (
     <button
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      title={disabled ? reason : undefined}
       style={{
         appearance: 'none',
-        border: `1px solid ${danger ? 'var(--s-fail)' : 'var(--app-rule)'}`,
+        border: `1px solid ${disabled ? 'var(--app-line)' : danger ? 'var(--s-fail)' : 'var(--app-rule)'}`,
         background: 'transparent',
-        color: danger ? 'var(--s-fail)' : 'var(--app-ink)',
+        color: disabled ? 'var(--app-ink-3)' : danger ? 'var(--s-fail)' : 'var(--app-ink)',
         font: 'inherit',
         fontWeight: 700,
         fontSize: 11,
         letterSpacing: '0.1em',
         textTransform: 'uppercase',
         padding: '6px 12px',
-        cursor: 'pointer',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
       }}
     >
       {label}
@@ -211,6 +222,16 @@ export default function AdminPage() {
   const closed = flagOn('submissions_closed');
   const published = flagOn('final_published');
 
+  // Safe failover: each late-stage action stays disabled until its
+  // precondition holds, so the day's sequence can't be run out of order.
+  //  · Queue rejudge waits for submissions to close — otherwise the golden box
+  //    would rejudge a moving target.
+  //  · Publish final waits for the rejudge to actually FINISH — publishing a
+  //    half-formed board is the mistake this guard exists to prevent.
+  const rp = rejudge?.progress;
+  const rejudgeQueued = (rp?.total ?? 0) > 0;
+  const rejudgeFinished = rejudgeQueued && (rp?.running ?? 0) === 0 && (rp?.pending ?? 0) === 0;
+
   return (
     <div className="page scroll-y" style={{ paddingBottom: 40 }}>
       <div
@@ -275,11 +296,19 @@ export default function AdminPage() {
           <ActionButton
             label={confirmAction === 'rejudge' ? 'Really rejudge?' : 'Queue rejudge'}
             danger
+            disabled={!closed}
+            reason="Close submissions first — the rejudge measures the final field."
             onClick={() => guarded('rejudge', 'rejudge')}
           />
           <ActionButton
             label={confirmAction === 'publish-final' ? 'Really publish?' : 'Publish final'}
             danger
+            disabled={!rejudgeFinished}
+            reason={
+              !rejudgeQueued
+                ? 'Queue the rejudge first — the final standings come from the golden box.'
+                : `Rejudge still running — ${rp?.done ?? 0}/${rp?.total ?? 0} done. Wait for it to finish.`
+            }
             onClick={() => guarded('publish-final', 'publish final')}
           />
         </div>
