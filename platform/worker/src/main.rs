@@ -84,6 +84,9 @@ pub struct Config {
     /// sandbox invocation. Both unset in dev.
     pub bench_cpus: Option<String>,
     pub compile_cpus: Option<String>,
+    /// What this agent is doing right now — written by the claim loops, read
+    /// by the heartbeat, rendered on the dashboard's box row.
+    pub current_job: Arc<std::sync::Mutex<String>>,
     pub storage: Arc<Storage>,
 }
 
@@ -157,12 +160,13 @@ async fn main() -> Result<()> {
         participant_id: std::env::var("MEBENCH_PARTICIPANT_ID").ok().and_then(|v| v.trim().parse().ok()),
         bench_cpus: std::env::var("MEBENCH_BENCH_CPUS").ok().filter(|v| !v.trim().is_empty()),
         compile_cpus: std::env::var("MEBENCH_COMPILE_CPUS").ok().filter(|v| !v.trim().is_empty()),
+        current_job: Arc::new(std::sync::Mutex::new("idle".into())),
         storage,
     };
 
     register(&db, &cfg).await?;
     reclaim_own_orphans(&db, &cfg).await?;
-    spawn_heartbeat(db.clone(), cfg.worker_id.clone());
+    spawn_heartbeat(db.clone(), cfg.worker_id.clone(), cfg.current_job.clone());
 
     tracing::info!("worker {} starting as {role}", cfg.worker_id);
     match role.as_str() {
@@ -237,18 +241,54 @@ async fn register(db: &sqlx::PgPool, cfg: &Config) -> Result<()> {
 /// The janitor marks a box unhealthy after 90s of silence. A box condemned
 /// for silence is healthy again the moment it speaks; a verdict recorded as
 /// `held` (the operator's) is NOT undone here.
-fn spawn_heartbeat(db: sqlx::PgPool, worker_id: String) {
+///
+/// Each beat also carries the box's live telemetry — current job, load,
+/// available memory, cumulative steal — into `detail`, which is what the
+/// dashboard's box rows render. Cheap: three /proc reads every 15s.
+fn spawn_heartbeat(db: sqlx::PgPool, worker_id: String, current_job: Arc<std::sync::Mutex<String>>) {
+    fn proc_metric(path: &str, field: usize) -> Option<f64> {
+        std::fs::read_to_string(path)
+            .ok()?
+            .split_whitespace()
+            .nth(field)?
+            .parse()
+            .ok()
+    }
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(15));
         loop {
             ticker.tick().await;
+            let job = current_job.lock().map(|j| j.clone()).unwrap_or_default();
+            let load1 = proc_metric("/proc/loadavg", 0).unwrap_or(0.0);
+            let mem_avail_mb = std::fs::read_to_string("/proc/meminfo")
+                .ok()
+                .and_then(|m| {
+                    m.lines()
+                        .find(|l| l.starts_with("MemAvailable:"))
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .and_then(|v| v.parse::<u64>().ok())
+                })
+                .map(|kb| kb / 1024)
+                .unwrap_or(0);
+            // Field 9 of the aggregate cpu line is cumulative steal ticks —
+            // the dashboard watches the DELTA between beats for co-tenant
+            // interference.
+            let steal = proc_metric("/proc/stat", 9).unwrap_or(0.0);
+            let telemetry = serde_json::json!({
+                "job": job,
+                "load1": load1,
+                "mem_avail_mb": mem_avail_mb,
+                "steal_total": steal,
+            });
             if let Err(e) = sqlx::query(
                 "UPDATE boxes SET last_seen = now(), \
+                 detail = COALESCE(detail, '{}'::jsonb) || $2, \
                  healthy = CASE WHEN COALESCE(detail->>'held','false') = 'true' \
                                 THEN healthy ELSE true END \
                  WHERE id = $1",
             )
                 .bind(&worker_id)
+                .bind(&telemetry)
                 .execute(&db)
                 .await
             {

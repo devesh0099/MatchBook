@@ -130,6 +130,7 @@ async fn claim_run_job(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Result<b
 
     let Some((id, hash)) = row else { return Ok(false) };
     tracing::info!("run job {id} ({hash})");
+    if let Ok(mut j) = cfg.current_job.lock() { *j = format!("run #{id}"); }
 
     let result = match execute_run(db, cfg, sandbox, &hash).await {
         Ok(v) => v,
@@ -140,6 +141,7 @@ async fn claim_run_job(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Result<b
         .bind(result)
         .execute(db)
         .await?;
+    if let Ok(mut j) = cfg.current_job.lock() { *j = "idle".into(); }
     Ok(true)
 }
 
@@ -190,6 +192,7 @@ async fn claim_submission(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Resul
     let Some((id, participant_id, hash)) = row else { return Ok(false) };
     let _ = participant_id;
     tracing::info!("submission {id} ({hash})");
+    if let Ok(mut j) = cfg.current_job.lock() { *j = format!("submission #{id}"); }
 
     match process_submission(db, cfg, sandbox, id, &hash).await {
         Ok(()) => {}
@@ -200,6 +203,7 @@ async fn claim_submission(db: &PgPool, cfg: &Config, sandbox: &Sandbox) -> Resul
                 .await?;
         }
     }
+    if let Ok(mut j) = cfg.current_job.lock() { *j = "idle".into(); }
     Ok(true)
 }
 

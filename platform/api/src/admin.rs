@@ -93,9 +93,9 @@ async fn health_summary(State(st): State<AppState>) -> R {
             .fetch_all(&st.db)
             .await
             .map_err(oops)?;
-    let boxes: Vec<(String, String, Option<i32>, bool, f64)> = sqlx::query_as(
+    let boxes: Vec<(String, String, Option<i32>, bool, f64, Option<serde_json::Value>)> = sqlx::query_as(
         "SELECT id, role, participant_id, healthy, \
-                EXTRACT(EPOCH FROM (now() - last_seen))::float8 \
+                EXTRACT(EPOCH FROM (now() - last_seen))::float8, detail \
          FROM boxes ORDER BY id",
     )
     .fetch_all(&st.db)
@@ -134,9 +134,13 @@ async fn health_summary(State(st): State<AppState>) -> R {
         "boxes": {
             "total": boxes.len(),
             "unhealthy": unhealthy,
-            "rows": boxes.into_iter().map(|(id, role, pid, healthy, age)| json!({
+            "rows": boxes.into_iter().map(|(id, role, pid, healthy, age, detail)| json!({
                 "id": id, "role": role, "participant_id": pid,
                 "healthy": healthy, "last_seen_secs_ago": age.round(),
+                "job": detail.as_ref().and_then(|d| d.get("job")).cloned(),
+                "load1": detail.as_ref().and_then(|d| d.get("load1")).cloned(),
+                "mem_avail_mb": detail.as_ref().and_then(|d| d.get("mem_avail_mb")).cloned(),
+                "steal_total": detail.as_ref().and_then(|d| d.get("steal_total")).cloned(),
             })).collect::<Vec<_>>(),
         },
         "submissions": sub_states.into_iter().map(|(s, n)| json!({"state": s, "count": n})).collect::<Vec<_>>(),

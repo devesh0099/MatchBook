@@ -234,6 +234,11 @@ export interface OpBoxRow {
   participant_id: number | null;
   healthy: boolean;
   last_seen_secs_ago: number;
+  /// Live telemetry, carried on every heartbeat.
+  job: string | null;
+  load1: number | null;
+  mem_avail_mb: number | null;
+  steal_total: number | null;
 }
 
 export interface OpHealth {

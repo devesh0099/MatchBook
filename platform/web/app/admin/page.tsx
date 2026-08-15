@@ -267,13 +267,32 @@ export default function AdminPage() {
       </Panel>
 
       <Panel title={`Boxes · ${health?.boxes.total ?? 0}`}>
+        <div
+          className="kicker"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'minmax(0,1fr) 96px 130px 70px 84px 70px 104px',
+            gap: 10,
+            padding: '8px 14px',
+            borderBottom: '1px solid var(--app-line)',
+            letterSpacing: '0.12em',
+          }}
+        >
+          <span>Box</span>
+          <span>Student</span>
+          <span>Doing</span>
+          <span style={{ textAlign: 'right' }}>Load</span>
+          <span style={{ textAlign: 'right' }}>Mem free</span>
+          <span style={{ textAlign: 'right' }}>Steal</span>
+          <span style={{ textAlign: 'right' }}>Heartbeat</span>
+        </div>
         {(health?.boxes.rows ?? []).map((b) => (
           <div
             key={b.id}
             className="mono"
             style={{
               display: 'grid',
-              gridTemplateColumns: 'minmax(0,1fr) 90px 110px 130px',
+              gridTemplateColumns: 'minmax(0,1fr) 96px 130px 70px 84px 70px 104px',
               gap: 10,
               padding: '8px 14px',
               borderBottom: '1px solid var(--app-line)',
@@ -281,13 +300,24 @@ export default function AdminPage() {
               fontSize: 12,
             }}
           >
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{b.id}</span>
-            <span style={{ color: 'var(--app-ink-2)' }}>{b.role}</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }} title={b.id}>{b.id}</span>
             <span style={{ color: 'var(--app-ink-2)' }}>
-              {b.participant_id != null ? `student ${b.participant_id}` : 'unbound'}
+              {b.participant_id != null ? `student ${b.participant_id}` : b.role}
+            </span>
+            <span style={{ color: b.job && b.job !== 'idle' ? 'var(--s-bench)' : 'var(--app-ink-3)', fontWeight: b.job && b.job !== 'idle' ? 700 : 400 }}>
+              {b.job ?? '—'}
+            </span>
+            <span style={{ textAlign: 'right', color: 'var(--app-ink-2)' }}>
+              {b.load1 != null ? b.load1.toFixed(2) : '—'}
+            </span>
+            <span style={{ textAlign: 'right', color: 'var(--app-ink-2)' }}>
+              {b.mem_avail_mb != null ? `${(b.mem_avail_mb / 1024).toFixed(1)}G` : '—'}
+            </span>
+            <span style={{ textAlign: 'right', color: 'var(--app-ink-3)' }}>
+              {b.steal_total != null ? b.steal_total : '—'}
             </span>
             <span style={{ textAlign: 'right', color: b.last_seen_secs_ago > 60 ? 'var(--s-fail)' : 'var(--app-ink-3)' }}>
-              seen {Math.round(b.last_seen_secs_ago)}s ago
+              {Math.round(b.last_seen_secs_ago)}s ago
             </span>
           </div>
         ))}
