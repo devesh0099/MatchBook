@@ -464,7 +464,12 @@ async fn run_bench_job(
         return Ok(());
     }
 
-    let seed = pinned_seed.unwrap_or_else(|| rand_seed() as u64);
+    // Precedence: a rejudge's pinned seed, then the configured fixed seed, then
+    // a fresh random one. The rejudge must always win — it is what puts every
+    // finalist on identical input.
+    let seed = pinned_seed
+        .or(cfg.bench_seed)
+        .unwrap_or_else(|| rand_seed() as u64);
     let stream = generate_stream(cfg, seed, BENCH_PROFILE, BENCH_EVENTS).await?;
 
     // The expected digest is the ORACLE's for this stream, computed outside the

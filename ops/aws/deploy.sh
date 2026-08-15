@@ -5,6 +5,7 @@
 #   ops/aws/deploy.sh --site-address matcher.example.com
 #   ops/aws/deploy.sh --from build             # resume after a failed node
 #   ops/aws/deploy.sh --only bench             # re-provision one node
+#   ops/aws/deploy.sh --bench-seed 424242      # fix the ranked seed
 #
 # Phases, in order:
 #
@@ -28,6 +29,12 @@ ONLY_PHASE=""
 ASSUME_YES=0
 SKIP_PREFLIGHT=0
 POOL_BOXES="${POOL_BOXES:-8}"
+# Fixed seed for ranked runs. Empty means a fresh random seed per submission,
+# which is the original behaviour and keeps the hidden stream ungameable — at
+# the cost that two submissions are measured on different workloads. One
+# identical engine spread 11% on p50 across eleven random seeds, so the live
+# leaderboard compares submissions only loosely. A rejudge always overrides it.
+BENCH_SEED="${BENCH_SEED:-}"
 
 PHASES=(infra wait build connect verify)
 
@@ -39,6 +46,7 @@ while (( $# )); do
     --from)         FROM_PHASE="$2"; shift 2 ;;
     --only)         ONLY_PHASE="$2"; shift 2 ;;
     --pool-boxes)   POOL_BOXES="$2"; shift 2 ;;
+    --bench-seed)   BENCH_SEED="$2"; shift 2 ;;
     --skip-preflight) SKIP_PREFLIGHT=1; shift ;;
     --yes|-y)       ASSUME_YES=1; shift ;;
     -h|--help)      usage 0 ;;
@@ -193,7 +201,7 @@ provision_bench() {
 
   log "bench node presents $ncpu CPUs: 0-$((half - 1)) for the OS, $half-$((ncpu - 1)) isolated"
   node bench "cd /opt/flashmatch && sudo BENCH_CPU=$half ISOLATED_CPUS=$half-$((ncpu - 1)) \
-    ops/bench-node-setup.sh --dedicated"
+    BENCH_SEED='$BENCH_SEED' ops/bench-node-setup.sh --dedicated"
 
   # isolcpus, nohz_full and rcu_nocbs only take effect on the next boot, so the
   # reboot is part of provisioning rather than a note for someone to action
@@ -287,19 +295,40 @@ sudo chmod 600 /opt/mebench/worker.env"
     # Enable exactly the units the setup script decided to create, rather than a
     # hardcoded {0..5}: the count is min(nproc-2, POOL_BOXES) and changing either
     # would silently leave workers unstarted or fail on units that do not exist.
+    # `enable --now` starts a STOPPED unit and does nothing to a running one, so
+    # re-provisioning installed a freshly compiled worker and left the old
+    # process running from the deleted inode — `readlink /proc/PID/exe` showed
+    # "(deleted)" while the binary on disk was an hour newer. No worker code
+    # change ever took effect through this path. `restart` after enabling is
+    # what actually picks up a new binary, and is a no-op on first deploy.
     node pool 'sudo systemctl daemon-reload
       units=$(cd /etc/systemd/system && ls mebench-pool@*.service 2>/dev/null | tr "\n" " ")
       [ -n "$units" ] || { echo "no mebench-pool units found — did pool-node-setup.sh run?" >&2; exit 1; }
       echo "enabling: $units"
-      sudo systemctl enable --now $units'
-    ok "pool workers started"
+      sudo systemctl enable $units
+      sudo systemctl restart $units'
+    ok "pool workers started (restarted onto the current binary)"
   fi
 
   if node_selected bench; then
     write_worker_env bench
-    node bench 'sudo systemctl daemon-reload && sudo systemctl enable --now mebench-bench'
-    ok "bench worker started"
+    node bench 'sudo systemctl daemon-reload \
+      && sudo systemctl enable mebench-bench \
+      && sudo systemctl restart mebench-bench'
+    ok "bench worker started (restarted onto the current binary)"
   fi
+
+  # Assert it, rather than trusting the restart. A worker still running a
+  # replaced binary is invisible until its behaviour silently disagrees with the
+  # code you think you deployed.
+  for r in pool bench; do
+    node_selected "$r" || continue
+    if node "$r" 'for p in $(pgrep -x worker); do sudo readlink /proc/$p/exe | grep -q "(deleted)" && exit 1; done; exit 0' 2>/dev/null; then
+      ok "$r: running the installed binary"
+    else
+      warn "$r: a worker is still executing a DELETED binary — the restart did not take"
+    fi
+  done
 
   # Registration is the proof that the security group rule and DB_BIND are both
   # right. If either is wrong the workers do not error visibly — they simply
