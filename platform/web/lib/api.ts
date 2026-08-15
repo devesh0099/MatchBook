@@ -290,6 +290,7 @@ export const op = {
   deployBox: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/deploy`, { method: 'POST' }),
   redeployBox: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/redeploy`, { method: 'POST' }),
   terminateBox: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/terminate`, { method: 'POST' }),
+  removeParticipant: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/remove`, { method: 'POST' }),
 };
 
 /// Which states are still moving. The UI polls every 2s while non-terminal —

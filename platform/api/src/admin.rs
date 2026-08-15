@@ -67,6 +67,7 @@ pub fn op_router(state: AppState) -> Router {
         .route("/op/participants/:id/deploy", post(deploy_box))
         .route("/op/participants/:id/redeploy", post(redeploy_box))
         .route("/op/participants/:id/terminate", post(terminate_box))
+        .route("/op/participants/:id/remove", post(remove_participant))
         .route("/op/events", get(events))
         .route("/op/participants", post(issue_credentials))
         .route("/op/requeue/:id", post(requeue))
@@ -175,10 +176,10 @@ async fn boxes_detail(State(st): State<AppState>) -> R {
 /// what renders in front of the Deploy/Redeploy button.
 async fn participants_status(State(st): State<AppState>) -> R {
     let rows: Vec<(
-        i32, String, Option<String>, String, Option<bool>,
+        i32, String, Option<String>, String, Option<String>, Option<bool>,
         Option<i64>, Option<String>, Option<serde_json::Value>, Option<i32>,
     )> = sqlx::query_as(
-        "SELECT p.id, p.handle, b.id, p.box_state, b.healthy, \
+        "SELECT p.id, p.handle, b.id, p.box_state, p.box_detail, b.healthy, \
                 latest.id, latest.state::text, latest.phase2, best.max_level \
          FROM participants p \
          LEFT JOIN boxes b ON b.participant_id = p.id \
@@ -188,6 +189,7 @@ async fn participants_status(State(st): State<AppState>) -> R {
          LEFT JOIN LATERAL (SELECT max_level FROM submissions \
                             WHERE participant_id = p.id AND max_level IS NOT NULL \
                             ORDER BY max_level DESC LIMIT 1) best ON true \
+         WHERE p.removed_at IS NULL \
          ORDER BY p.id",
     )
     .fetch_all(&st.db)
@@ -195,14 +197,22 @@ async fn participants_status(State(st): State<AppState>) -> R {
     .map_err(oops)?;
 
     // The activity string, computed once so the dashboard renders one field.
+    // While a box is (re)deploying, the daemon's own progress note
+    // (box_detail: launching / booting / provisioning / ready) is shown so the
+    // operator sees the deploy advance, not just a static "deploying".
     fn activity(
-        box_state: &str, healthy: Option<bool>, latest_state: Option<&str>,
-        phase2: &Option<serde_json::Value>,
+        box_state: &str, box_detail: Option<&str>, healthy: Option<bool>,
+        latest_state: Option<&str>, phase2: &Option<serde_json::Value>,
     ) -> String {
         match box_state {
-            "deploying" => return "deploying…".into(),
-            "redeploying" => return "redeploying…".into(),
-            "failed" => return "deploy failed".into(),
+            "deploying" | "redeploying" => {
+                let verb = if box_state == "redeploying" { "redeploy" } else { "deploy" };
+                return box_detail
+                    .filter(|d| !d.is_empty())
+                    .map(|d| format!("{verb}: {d}"))
+                    .unwrap_or_else(|| format!("{verb}ing…"));
+            }
+            "failed" => return box_detail.filter(|d| !d.is_empty()).map(|d| format!("failed: {d}")).unwrap_or_else(|| "deploy failed".into()),
             "none" => return "no box".into(),
             _ => {}
         }
@@ -230,8 +240,8 @@ async fn participants_status(State(st): State<AppState>) -> R {
     }
 
     Ok(Json(json!({
-        "participants": rows.into_iter().map(|(id, handle, box_id, box_state, healthy, sub, state, phase2, level)| {
-            let act = activity(&box_state, healthy, state.as_deref(), &phase2);
+        "participants": rows.into_iter().map(|(id, handle, box_id, box_state, box_detail, healthy, sub, state, phase2, level)| {
+            let act = activity(&box_state, box_detail.as_deref(), healthy, state.as_deref(), &phase2);
             json!({
                 "participant_id": id, "handle": handle, "box": box_id,
                 "box_state": box_state, "activity": act,
@@ -280,6 +290,43 @@ async fn redeploy_box(State(st): State<AppState>, Path(id): Path<i32>) -> R {
 }
 async fn terminate_box(State(st): State<AppState>, Path(id): Path<i32>) -> R {
     enqueue_box(&st, id, "terminate", "deploying").await
+}
+
+/// Remove a participant: tear down their box and stop tracking them. Soft —
+/// their submissions survive for the record, but they vanish from the
+/// dashboard, cannot log in, and their box is terminated. Their live session
+/// is revoked immediately.
+async fn remove_participant(State(st): State<AppState>, Path(id): Path<i32>) -> R {
+    // free the box (only if they have one)
+    let has_box: Option<(String,)> =
+        sqlx::query_as("SELECT box_state FROM participants WHERE id = $1 AND removed_at IS NULL")
+            .bind(id)
+            .fetch_optional(&st.db)
+            .await
+            .map_err(oops)?;
+    if has_box.as_ref().map(|b| b.0.as_str()) == Some("ready")
+        || has_box.as_ref().map(|b| b.0.as_str()) == Some("failed")
+    {
+        // enqueue a terminate so the daemon tears the instance down
+        sqlx::query("INSERT INTO box_requests (participant_id, action) VALUES ($1, 'terminate')")
+            .bind(id)
+            .execute(&st.db)
+            .await
+            .map_err(oops)?;
+    }
+    sqlx::query("UPDATE participants SET removed_at = now(), box_state = 'none' WHERE id = $1")
+        .bind(id)
+        .execute(&st.db)
+        .await
+        .map_err(oops)?;
+    // revoke their session so they cannot keep acting
+    sqlx::query("DELETE FROM sessions WHERE participant_id = $1")
+        .bind(id)
+        .execute(&st.db)
+        .await
+        .map_err(oops)?;
+    log(&st, None, "participant_removed", json!({ "participant_id": id })).await.map_err(oops)?;
+    Ok(Json(json!({ "removed": id })))
 }
 
 /// Contest close (PLAN §3 mechanics): Submit refuses from this moment;

@@ -127,7 +127,7 @@ pub async fn login(
     Json(body): Json<LoginBody>,
 ) -> Result<(HeaderMap, Json<serde_json::Value>), ApiError> {
     let row: Option<(i32, Option<String>)> =
-        sqlx::query_as("SELECT id, credential_hash FROM participants WHERE handle = $1")
+        sqlx::query_as("SELECT id, credential_hash FROM participants WHERE handle = $1 AND removed_at IS NULL")
             .bind(body.handle.trim())
             .fetch_optional(&st.db)
             .await

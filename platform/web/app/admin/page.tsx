@@ -345,7 +345,7 @@ export default function AdminPage() {
           className="kicker"
           style={{
             display: 'grid',
-            gridTemplateColumns: '48px minmax(0,1fr) 150px 64px 120px',
+            gridTemplateColumns: '48px minmax(0,1fr) 170px 56px 128px 34px',
             padding: '8px 14px',
             borderBottom: '1px solid var(--app-line)',
             letterSpacing: '0.12em',
@@ -356,6 +356,7 @@ export default function AdminPage() {
           <span>Activity</span>
           <span style={{ textAlign: 'right' }}>Best</span>
           <span style={{ textAlign: 'right' }}>Box</span>
+          <span></span>
         </div>
         {participants.map((p) => {
           // The status pill's tone follows what the box is doing.
@@ -374,7 +375,7 @@ export default function AdminPage() {
               className="mono"
               style={{
                 display: 'grid',
-                gridTemplateColumns: '48px minmax(0,1fr) 150px 64px 120px',
+                gridTemplateColumns: '48px minmax(0,1fr) 170px 56px 128px 34px',
                 alignItems: 'center',
                 padding: '7px 14px',
                 borderBottom: '1px solid var(--app-line)',
@@ -426,6 +427,26 @@ export default function AdminPage() {
                     {confirmAction === `re-${p.participant_id}` ? 'Confirm?' : 'Redeploy'}
                   </button>
                 )}
+              </span>
+              <span style={{ textAlign: 'right' }}>
+                <button
+                  title="Remove participant and tear down their box"
+                  onClick={() => {
+                    if (confirmAction !== `rm-${p.participant_id}`) { setConfirmAction(`rm-${p.participant_id}`); return; }
+                    setConfirmAction(null);
+                    void op.removeParticipant(p.participant_id)
+                      .then(() => { setNotice(`removed ${p.handle}`); refresh(); })
+                      .catch((e) => setNotice(`remove failed: ${String((e as Error).message ?? e)}`));
+                  }}
+                  style={{
+                    appearance: 'none', border: 0, background: 'transparent',
+                    color: confirmAction === `rm-${p.participant_id}` ? 'var(--s-fail)' : 'var(--app-ink-3)',
+                    cursor: 'pointer', fontSize: confirmAction === `rm-${p.participant_id}` ? 10 : 14,
+                    fontWeight: 700, padding: '2px 4px',
+                  }}
+                >
+                  {confirmAction === `rm-${p.participant_id}` ? 'sure?' : '×'}
+                </button>
               </span>
             </div>
           );

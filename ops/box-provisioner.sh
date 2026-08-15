@@ -119,12 +119,18 @@ do_deploy(){ # participant_id
 
 log "box provisioner up (ami=$AMI type=$ITYPE region=$REGION)"
 while true; do
-  # claim one pending request
-  row=$(sql "UPDATE box_requests SET state='running', claimed_by='$WORKER_ID', updated_at=now()
-             WHERE id=(SELECT id FROM box_requests WHERE state='pending' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
-             RETURNING id||'|'||participant_id||'|'||action")
-  if [[ -z "$row" ]]; then sleep 3; continue; fi
+  # claim one pending request. Wrapped in a CTE + final SELECT so ONLY the
+  # tuple is emitted — a bare UPDATE ... RETURNING leaks its "UPDATE 0" status
+  # tag on an empty match, which the parser then mistook for a request.
+  row=$(sql "WITH c AS (
+               UPDATE box_requests SET state='running', claimed_by='$WORKER_ID', updated_at=now()
+               WHERE id=(SELECT id FROM box_requests WHERE state='pending' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
+               RETURNING id, participant_id, action)
+             SELECT id||'|'||participant_id||'|'||action FROM c")
+  # Only a real claim contains the delimiter and a numeric id.
+  if [[ "$row" != *"|"* ]]; then sleep 3; continue; fi
   IFS='|' read -r req_id pid action <<< "$row"
+  [[ "$req_id" =~ ^[0-9]+$ ]] || { sleep 3; continue; }
   log "request $req_id: $action participant $pid"
   ok=1
   case "$action" in

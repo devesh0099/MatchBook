@@ -37,6 +37,10 @@ CREATE TABLE participants (
   box_state       text NOT NULL DEFAULT 'none',
   box_instance_id text,        -- the EC2 instance backing this participant
   box_detail      text,        -- last provisioner message (error, progress)
+  -- Soft removal: a removed participant is hidden from the dashboard, cannot
+  -- log in, and their box is torn down — but their submissions survive for
+  -- the record. Never hard-delete mid-event; that would orphan results.
+  removed_at      timestamptz,
   created_at  timestamptz DEFAULT now()
 );
 
