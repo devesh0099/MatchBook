@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/admin/events", get(events))
         .route("/admin/queue", get(queue_detail))
+        .route("/admin/participants", post(issue_credentials))
         .route("/admin/requeue/:id", post(requeue))
         .route("/admin/freeze", post(freeze))
         .route("/admin/unfreeze", post(unfreeze))
@@ -58,6 +59,45 @@ pub struct LimitQuery {
 }
 fn default_limit() -> i64 {
     100
+}
+
+#[derive(Deserialize)]
+pub struct IssueBody {
+    pub handle: String,
+}
+
+/// Issue (or reset) a participant's credentials. The password is generated
+/// here, returned ONCE in this response — for the printed slip — and only its
+/// Argon2id hash is stored. Re-issuing revokes every live session for that
+/// participant. This is the whole account-management surface: no signup, no
+/// email, no reset UX for under 20 people in a room.
+async fn issue_credentials(State(st): State<AppState>, Json(body): Json<IssueBody>) -> R {
+    let handle = body.handle.trim().to_string();
+    if handle.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "handle is empty".into()));
+    }
+    let password = crate::auth::generate_password();
+    let hash = crate::auth::hash_password(&password).map_err(oops)?;
+
+    let (id,): (i32,) = sqlx::query_as(
+        "INSERT INTO participants (handle, credential_hash) VALUES ($1, $2) \
+         ON CONFLICT (handle) DO UPDATE SET credential_hash = $2 RETURNING id",
+    )
+    .bind(&handle)
+    .bind(&hash)
+    .fetch_one(&st.db)
+    .await
+    .map_err(oops)?;
+    sqlx::query("DELETE FROM sessions WHERE participant_id = $1")
+        .bind(id)
+        .execute(&st.db)
+        .await
+        .map_err(oops)?;
+
+    log(&st, None, "credentials_issued", json!({ "participant_id": id, "handle": handle }))
+        .await
+        .map_err(oops)?;
+    Ok(Json(json!({ "participant_id": id, "handle": handle, "password": password })))
 }
 
 async fn events(State(st): State<AppState>, Query(q): Query<LimitQuery>) -> R {

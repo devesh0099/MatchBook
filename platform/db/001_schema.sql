@@ -19,10 +19,27 @@ CREATE TYPE sub_state AS ENUM (
   'phase2',                            -- the ladder; a stopped climb is still 'done'
   'done','error');
 
-CREATE TABLE participants (                 -- roster; credentials arrive in M3
+CREATE TABLE participants (
   id          serial PRIMARY KEY,
   handle      text UNIQUE NOT NULL,
+  -- Argon2id hash of the issued password (ops/issue-credentials.sh). NULL
+  -- means no credentials issued yet, and login is refused — there is no
+  -- anonymous path.
+  credential_hash text,
+  -- The participant -> box binding (M4). Informational here; the agent's own
+  -- config is what actually scopes its job claims.
+  box_id      text,
   created_at  timestamptz DEFAULT now()
+);
+
+-- Login sessions. The cookie carries a random token; only its sha256 is
+-- stored, so a leaked table replays nothing. One-day event, so expiry is a
+-- fixed window enforced at lookup rather than a refresh protocol.
+CREATE TABLE sessions (
+  token_hash     text PRIMARY KEY,
+  participant_id int REFERENCES participants(id) NOT NULL,
+  created_at     timestamptz DEFAULT now(),
+  last_seen      timestamptz DEFAULT now()
 );
 
 CREATE TABLE submissions (

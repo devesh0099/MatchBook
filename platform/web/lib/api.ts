@@ -7,21 +7,42 @@ export type SubState =
   | 'received'
   | 'compiling'
   | 'compile_failed'
+  | 'testing'
+  | 'tests_failed'
   | 'verifying'
   | 'verify_failed'
   | 'verify_timeout'
-  | 'verify_passed'
-  | 'bench_queued'
-  | 'pending_benchmark'
-  | 'benchmarking'
-  | 'bench_verify_failed'
-  | 'superseded'
+  | 'phase1'
+  | 'phase1_failed'
+  | 'phase2'
   | 'done'
   | 'error';
 
-export interface Participant {
-  id: number;
-  handle: string;
+export interface LadderLevel {
+  level: number;
+  outcome: string;
+  events: number;
+  deadline_ms: number;
+  p50_ns: number;
+  p95_ns: number;
+  p99_ns: number;
+  wall_s?: number | null;
+  events_processed?: number;
+  checked_events?: number | null;
+  notes?: string | null;
+}
+
+export interface Phase1Result {
+  outcome: string;
+  p50_ns: number;
+  p95_ns: number;
+  p99_ns: number;
+  events: number;
+  deadline_ms: number;
+  events_processed?: number;
+  runs?: unknown[] | null;
+  percentiles?: { p: number; ns: number; count?: number; inv?: number }[] | null;
+  notes?: string | null;
 }
 
 export interface Submission {
@@ -31,19 +52,18 @@ export interface Submission {
   state: SubState;
   created_at: string | null;
   updated_at: string | null;
-  verify_detail: VerifyDetail | null;
-  p50_ns: number | null;
-  p95_ns: number | null;
-  p99_ns: number | null;
-  /// Percentile curve from the run whose p50 IS the score.
-  percentiles: { p: number; ns: number; count?: number; inv?: number }[] | null;
-  /// Every kept run's own p50/p95/p99.
-  runs: { p50_ns: number; p95_ns?: number | null; p99_ns?: number | null; discarded?: boolean }[] | null;
-  /// Windowed p50/p95/p99 through the median run.
-  timeline: { t: number; event: number; p50_ns: number; p95_ns: number; p99_ns: number }[] | null;
-  probe_cost_ns: number | null;
-  run_p50s_ns: number[] | null;
-  discard_count: number | null;
+  /// One stable blob per phase — the same contract the dashboard reads.
+  phase0: {
+    compile?: { stderr?: string };
+    tests?: { total: number; passed: number; tests: { name: string; rule: string; passed: boolean; detail: string }[] };
+    verify?: VerifyDetail;
+  } | null;
+  phase1: Phase1Result | null;
+  phase2: { levels: LadderLevel[] } | null;
+  max_level: number | null;
+  top_p50_ns: number | null;
+  top_p95_ns: number | null;
+  top_p99_ns: number | null;
 }
 
 export interface OutEventView {
@@ -97,19 +117,17 @@ export interface VerifyDetail {
 export interface SubmitResponse {
   submission_id: number;
   source_hash: string;
-  bench_will_queue: boolean;
-  bench_reason: string;
-  bench_wait_secs: number;
 }
 
 export interface LeaderboardEntry {
   handle: string;
-  p50_ns: number;
-  p99_ns: number | null;
-  probe_cost_ns: number | null;
-  ci_low_ns: number;
-  ci_high_ns: number;
   submission_id: number;
+  /// Highest ladder level cleared; 0 ranks on the Phase I chain.
+  max_level: number;
+  /// The scoring chain at that level: p95, then p50, then p99.
+  chain_p95_ns: number | null;
+  chain_p50_ns: number | null;
+  chain_p99_ns: number | null;
 }
 
 export interface RunResult {
@@ -120,6 +138,8 @@ export interface RunResult {
     passed: number;
     tests: { name: string; rule: string; passed: boolean; detail: string }[];
   };
+  /// Phase I feedback — the exact instrument that judges, on every Run.
+  phase1?: Phase1Result;
   error?: string;
 }
 
@@ -143,27 +163,35 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  participants: () => call<Participant[]>('/participants'),
+  // Identity: the ONLY time credentials cross, and the cookie does the rest.
+  login: (handle: string, password: string) =>
+    call<{ participant_id: number; handle: string }>('/login', {
+      method: 'POST',
+      body: JSON.stringify({ handle, password }),
+    }),
+  logout: () => call<{ signed_out: boolean }>('/logout', { method: 'POST' }),
+  session: () => call<{ participant_id: number; handle: string }>('/session'),
 
-  getDraft: (participantId: number) =>
-    call<{ source: string | null }>(`/draft?participant_id=${participantId}`),
+  // Everything below is implicitly "mine" — the server derives the
+  // participant from the session cookie; no id is ever sent.
+  getDraft: () => call<{ source: string | null }>('/draft'),
 
-  saveDraft: (participantId: number, source: string) =>
+  saveDraft: (source: string) =>
     call<{ saved: boolean }>('/draft', {
       method: 'PUT',
-      body: JSON.stringify({ participant_id: participantId, source }),
+      body: JSON.stringify({ source }),
     }),
 
-  run: (participantId: number, source: string) =>
+  run: (source: string) =>
     call<{ run_id: number; source_hash: string }>('/run', {
       method: 'POST',
-      body: JSON.stringify({ participant_id: participantId, source }),
+      body: JSON.stringify({ source }),
     }),
 
-  submit: (participantId: number, source: string) =>
+  submit: (source: string) =>
     call<SubmitResponse>('/submit', {
       method: 'POST',
-      body: JSON.stringify({ participant_id: participantId, source }),
+      body: JSON.stringify({ source }),
     }),
 
   runResult: (id: number) =>
@@ -174,22 +202,14 @@ export const api = {
   submission: (id: number) =>
     call<{ submission: Submission; terminal: boolean }>(`/submissions/${id}`),
 
-  mine: (participantId: number) => call<Submission[]>(`/me?participant_id=${participantId}`),
+  mine: () => call<Submission[]>('/me'),
 
   leaderboard: () => call<{ frozen: boolean; entries: LeaderboardEntry[] }>('/leaderboard'),
 
-  /// Also carries bench eligibility, computed by the same rule submit()
-  /// enforces — so the editor's countdown can never promise a submission the
-  /// server would then refuse.
-  queue: (participantId: number) =>
-    call<{
-      depth: number;
-      ahead: number;
-      eta_secs: number;
-      bench_ready: boolean;
-      bench_reason: string;
-      bench_wait_secs: number;
-    }>(`/queue?participant_id=${participantId}`),
+  /// The one-at-a-time rule, by exactly the check submit() enforces — so the
+  /// editor's message can never promise a submission the server would refuse.
+  queue: () =>
+    call<{ evaluating: boolean; submission_id: number | null; reason: string }>('/queue'),
 };
 
 /// Which states are still moving. The UI polls every 2s while non-terminal —
@@ -197,10 +217,10 @@ export const api = {
 export function isTerminal(state: SubState): boolean {
   return [
     'compile_failed',
+    'tests_failed',
     'verify_failed',
     'verify_timeout',
-    'bench_verify_failed',
-    'superseded',
+    'phase1_failed',
     'done',
     'error',
   ].includes(state);
@@ -209,11 +229,15 @@ export function isTerminal(state: SubState): boolean {
 export function stateLabel(state: SubState): string {
   switch (state) {
     case 'received':
-      return 'Queued';
+      return 'Waiting for your box';
     case 'compiling':
       return 'Compiling';
     case 'compile_failed':
       return 'Compile failed';
+    case 'testing':
+      return 'Running the spec tests';
+    case 'tests_failed':
+      return 'Spec tests failed';
     case 'verifying':
       return 'Checking correctness';
     case 'verify_failed':
@@ -222,18 +246,12 @@ export function stateLabel(state: SubState): string {
     // bugs and conflating them wastes debugging time.
     case 'verify_timeout':
       return 'Timed out';
-    case 'verify_passed':
-      return 'Correct';
-    case 'bench_queued':
-      return 'Waiting for the benchmark node';
-    case 'pending_benchmark':
-      return 'Benchmark node unavailable — held, not lost';
-    case 'benchmarking':
-      return 'Benchmarking';
-    case 'bench_verify_failed':
-      return 'Diverged during the benchmark run';
-    case 'superseded':
-      return 'Superseded by newer code';
+    case 'phase1':
+      return 'Phase I — bulk run';
+    case 'phase1_failed':
+      return 'Phase I failed';
+    case 'phase2':
+      return 'Phase II — climbing the ladder';
     case 'done':
       return 'Done';
     case 'error':
@@ -244,16 +262,14 @@ export function stateLabel(state: SubState): string {
 export function stateTone(state: SubState): 'good' | 'bad' | 'warn' | 'busy' {
   switch (state) {
     case 'done':
-    case 'verify_passed':
       return 'good';
     case 'compile_failed':
+    case 'tests_failed':
     case 'verify_failed':
-    case 'bench_verify_failed':
+    case 'phase1_failed':
     case 'error':
       return 'bad';
     case 'verify_timeout':
-    case 'pending_benchmark':
-    case 'superseded':
       return 'warn';
     default:
       return 'busy';

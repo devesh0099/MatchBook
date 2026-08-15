@@ -97,7 +97,7 @@ export default function EditorPage() {
     if (!identity) return;
     let alive = true;
     api
-      .getDraft(identity.id)
+      .getDraft()
       .then((d) => {
         if (!alive) return;
         // A stored draft byte-identical to a frozen header is corruption from
@@ -116,14 +116,12 @@ export default function EditorPage() {
   const refreshMine = useCallback(() => {
     if (!identity) return;
     api
-      .mine(identity.id)
+      .mine()
       .then(setMine)
       .catch(() => {});
     api
-      .queue(identity.id)
-      .then((q) =>
-        setGate({ ready: q.bench_ready, wait: q.bench_wait_secs, reason: q.bench_reason }),
-      )
+      .queue()
+      .then((q) => setGate({ ready: !q.evaluating, wait: 0, reason: q.reason }))
       .catch(() => {});
   }, [identity]);
 
@@ -170,7 +168,7 @@ export default function EditorPage() {
       saveTimer.current = setTimeout(() => {
         setSave('saving');
         api
-          .saveDraft(identity.id, next)
+          .saveDraft(next)
           .then(() => setSave('saved'))
           .catch(() => setSave('error'));
       }, AUTOSAVE_MS);
@@ -184,9 +182,9 @@ export default function EditorPage() {
     setRunning(true);
     setRunResult(null);
     try {
-      await api.saveDraft(identity.id, latest.current);
+      await api.saveDraft(latest.current);
       setSave('saved');
-      const { run_id } = await api.run(identity.id, latest.current);
+      const { run_id } = await api.run(latest.current);
       setRunId(run_id);
     } catch (e) {
       setError(String((e as Error).message ?? e));
@@ -198,9 +196,9 @@ export default function EditorPage() {
     if (!identity || !gate?.ready) return;
     setError(null);
     try {
-      await api.saveDraft(identity.id, latest.current);
+      await api.saveDraft(latest.current);
       setSave('saved');
-      const res = await api.submit(identity.id, latest.current);
+      const res = await api.submit(latest.current);
       refreshMine();
       router.push(`/submissions/${res.submission_id}`);
     } catch (e) {
@@ -597,7 +595,7 @@ export default function EditorPage() {
                     </span>
                   </span>
                   <span className="mono" style={{ fontSize: 14, fontWeight: 700 }}>
-                    {s.p50_ns != null ? Math.round(s.p50_ns) : '—'}
+                    {s.max_level != null ? `L${s.max_level}` : '—'}
                   </span>
                 </button>
               ))}
@@ -642,7 +640,7 @@ export default function EditorPage() {
                   if (identity) {
                     setSave('saving');
                     api
-                      .saveDraft(identity.id, STARTING_BUFFER)
+                      .saveDraft(STARTING_BUFFER)
                       .then(() => setSave('saved'))
                       .catch(() => setSave('error'));
                   }

@@ -17,6 +17,7 @@
 //! FromRow.
 
 mod admin;
+mod auth;
 mod janitor;
 mod routes;
 mod state;

@@ -16,7 +16,7 @@ import { useEffect, useState } from 'react';
 import { api, type LeaderboardEntry } from '@/lib/api';
 import { useIdentity } from '@/lib/identity';
 
-const COLS = '56px minmax(0,1fr) 120px 120px 150px 96px';
+const COLS = '56px minmax(0,1fr) 90px 110px 110px 110px';
 
 export default function LeaderboardPage() {
   const { identity } = useIdentity();
@@ -135,10 +135,10 @@ export default function LeaderboardPage() {
         >
           <span>Rank</span>
           <span>Participant</span>
+          <span style={{ textAlign: 'right' }}>Level</span>
+          <span style={{ textAlign: 'right' }}>p95 ns</span>
           <span style={{ textAlign: 'right' }}>p50 ns</span>
           <span style={{ textAlign: 'right' }}>p99 ns</span>
-          <span style={{ textAlign: 'right' }}>Interval</span>
-          <span style={{ textAlign: 'right' }}>Probe</span>
         </div>
 
         {!loaded && <div style={{ padding: 16, color: 'var(--app-ink-3)' }}>Loading…</div>}
@@ -188,16 +188,16 @@ export default function LeaderboardPage() {
                 {me && <span style={{ fontSize: 10, color: 'var(--app-ink-3)' }}>you</span>}
               </span>
               <span style={{ textAlign: 'right', fontWeight: 700, fontSize: 15 }}>
-                {Math.round(e.p50_ns)}
+                {e.max_level}
+              </span>
+              <span style={{ textAlign: 'right', fontWeight: 700 }}>
+                {e.chain_p95_ns != null ? Math.round(e.chain_p95_ns) : '—'}
               </span>
               <span style={{ textAlign: 'right', color: 'var(--app-ink-2)' }}>
-                {e.p99_ns != null ? Math.round(e.p99_ns) : '—'}
+                {e.chain_p50_ns != null ? Math.round(e.chain_p50_ns) : '—'}
               </span>
-              <span style={{ textAlign: 'right', color: 'var(--app-ink-3)', fontSize: 12 }}>
-                [{Math.round(e.ci_low_ns)}, {Math.round(e.ci_high_ns)}]
-              </span>
-              <span style={{ textAlign: 'right', color: 'var(--app-ink-3)', fontSize: 12 }}>
-                {e.probe_cost_ns != null ? `${e.probe_cost_ns.toFixed(0)}ns` : '—'}
+              <span style={{ textAlign: 'right', color: 'var(--app-ink-3)' }}>
+                {e.chain_p99_ns != null ? Math.round(e.chain_p99_ns) : '—'}
               </span>
             </div>
           );

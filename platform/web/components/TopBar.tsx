@@ -1,17 +1,15 @@
 'use client';
 
 // The 46px bar across every view: brand, the four routes, the event clock, the
-// handle picker, and the theme switch.
+// signed-in handle, and the theme switch.
 //
-// The handle is a plain <select> rather than a modal gate. There is no auth —
-// it is a roster pick in localStorage — and a picker that stays visible on
-// every screen tells the truth about that better than a login-shaped dialog
-// would.
+// Identity is a server session (lib/identity.ts): the bar shows who the
+// cookie says you are and offers sign out; signing in lives at /login.
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { useIdentity, useRoster, writeIdentity } from '@/lib/identity';
+import { logout, useIdentity } from '@/lib/identity';
 import { useTheme } from '@/lib/theme';
 
 const ROUTES = [
@@ -61,8 +59,8 @@ const cellBase: React.CSSProperties = {
 
 export function TopBar() {
   const pathname = usePathname();
+  const router = useRouter();
   const { identity } = useIdentity();
-  const { roster } = useRoster();
   const { theme, setTheme } = useTheme();
   const clock = useClock();
 
@@ -143,53 +141,55 @@ export function TopBar() {
 
         <div style={{ width: 1, height: 20, background: 'var(--app-line)' }} />
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <label className="kicker" style={{ fontWeight: 400 }} htmlFor="handle">
-            Handle
-          </label>
-          <select
-            id="handle"
-            value={identity?.handle ?? ''}
-            onChange={(e) => {
-              const picked = roster.find((p) => p.handle === e.target.value);
-              if (picked) writeIdentity({ id: picked.id, handle: picked.handle });
-            }}
-            style={{
-              appearance: 'none',
-              border: '1px solid var(--app-rule)',
-              background: 'var(--app-bg)',
-              color: 'var(--app-ink)',
-              font: 'inherit',
-              fontWeight: 700,
-              fontSize: 12,
-              padding: '4px 10px',
-              borderRadius: 0,
-              cursor: 'pointer',
-            }}
-          >
-            <option value="" disabled>
-              pick one
-            </option>
-            {roster.map((p) => (
-              <option key={p.id} value={p.handle}>
-                {p.handle}
-              </option>
-            ))}
-          </select>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {identity ? (
+            <>
+              <span className="kicker" style={{ fontWeight: 400 }}>
+                Signed in
+              </span>
+              <span className="mono" style={{ fontSize: 13, fontWeight: 700 }}>
+                {identity.handle}
+              </span>
+              <button
+                onClick={async () => {
+                  await logout();
+                  router.push('/login');
+                }}
+                style={{
+                  appearance: 'none',
+                  border: '1px solid var(--app-rule)',
+                  background: 'transparent',
+                  color: 'var(--app-ink-2)',
+                  font: 'inherit',
+                  fontWeight: 700,
+                  fontSize: 10,
+                  letterSpacing: '0.1em',
+                  textTransform: 'uppercase',
+                  padding: '4px 9px',
+                  cursor: 'pointer',
+                }}
+              >
+                Sign out
+              </button>
+            </>
+          ) : (
+            <Link
+              href="/login"
+              style={{
+                fontWeight: 700,
+                fontSize: 11,
+                letterSpacing: '0.12em',
+                textTransform: 'uppercase',
+                color: 'var(--app-ink)',
+                border: '1px solid var(--app-rule)',
+                padding: '4px 10px',
+                textDecoration: 'none',
+              }}
+            >
+              Sign in
+            </Link>
+          )}
         </div>
-
-        <span
-          style={{
-            fontSize: 10,
-            letterSpacing: '0.06em',
-            color: 'var(--app-ink-3)',
-            border: '1px dashed var(--app-line)',
-            padding: '2px 6px',
-          }}
-          title="No authentication exists. Pick your own handle; everything you submit is attributed to it."
-        >
-          no login · local only
-        </span>
 
         <div style={{ display: 'flex', border: '1px solid var(--app-rule)' }}>
           {(['light', 'dark'] as const).map((t, i) => (

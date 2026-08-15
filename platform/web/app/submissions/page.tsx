@@ -1,14 +1,14 @@
 'use client';
 
-// Everything this participant has submitted today, newest first, plus the one
-// chart that answers "am I getting better".
+// Everything this participant has submitted today, newest first. (The
+// "across the day" chart returns ladder-aware in M6.)
 
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, isTerminal, type Submission } from '@/lib/api';
 import { useIdentity } from '@/lib/identity';
 import { inkOf, stateShort } from '@/components/StateTokens';
-import { HistorySeries } from '@/components/Charts';
 
 const POLL_MS = 2000;
 
@@ -21,7 +21,7 @@ export default function SubmissionsPage() {
   const load = useCallback(() => {
     if (!identity) return;
     api
-      .mine(identity.id)
+      .mine()
       .then((r) => {
         setSubs(r);
         setLoaded(true);
@@ -41,16 +41,16 @@ export default function SubmissionsPage() {
   if (ready && !identity) {
     return (
       <div className="page" style={{ paddingTop: 40 }}>
-        <div style={{ fontWeight: 800, fontSize: 22, marginBottom: 8 }}>Pick your handle</div>
+        <div style={{ fontWeight: 800, fontSize: 22, marginBottom: 8 }}>Signed out</div>
         <p style={{ color: 'var(--app-ink-2)', fontSize: 14 }}>
-          Choose it from the <strong>Handle</strong> menu in the top bar.
+          <Link href="/login">Sign in</Link> with the handle and password from your printed slip.
         </p>
       </div>
     );
   }
 
-  const ranked = subs.filter((s) => s.p50_ns != null);
-  const best = ranked.length ? Math.min(...ranked.map((s) => s.p50_ns as number)) : null;
+  const climbed = subs.filter((s) => s.max_level != null);
+  const best = climbed.length ? Math.max(...climbed.map((s) => s.max_level as number)) : null;
 
   return (
     <div className="page scroll-y">
@@ -70,35 +70,22 @@ export default function SubmissionsPage() {
             Your submissions
           </div>
           <div style={{ fontSize: 13, color: 'var(--app-ink-2)', marginTop: 8 }}>
-            {subs.length} today · {ranked.length} benchmarked. Only your best p50 counts on the
+            {subs.length} today · {climbed.length} climbed. Only your best climb counts on the
             leaderboard.
           </div>
         </div>
         {best != null && (
           <div style={{ textAlign: 'right' }}>
-            <div className="kicker">Best p50</div>
+            <div className="kicker">Best level</div>
             <div className="mono" style={{ fontSize: 38, fontWeight: 700, lineHeight: 1 }}>
-              {Math.round(best)}
+              {best}
             </div>
             <div className="mono" style={{ fontSize: 11, color: 'var(--app-ink-3)' }}>
-              ns / event
+              of the ladder
             </div>
           </div>
         )}
       </div>
-
-      {ranked.length > 1 && (
-        <div style={{ marginTop: 24 }}>
-          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 4 }}>Across the day</div>
-          <div style={{ fontSize: 12, color: 'var(--app-ink-2)', marginBottom: 12 }}>
-            Each point is a completed benchmark. p50 is the ranked number; p95 and p99 say whether
-            the tail came with you.
-          </div>
-          <div style={{ border: '1px solid var(--app-line)', background: 'var(--app-panel)', padding: 10 }}>
-            <HistorySeries submissions={subs} />
-          </div>
-        </div>
-      )}
 
       <div style={{ marginTop: 28, border: '1px solid var(--app-line)' }}>
         <div
@@ -114,8 +101,8 @@ export default function SubmissionsPage() {
         >
           <span>#</span>
           <span>State</span>
-          <span style={{ textAlign: 'right' }}>p50 ns</span>
-          <span style={{ textAlign: 'right' }}>p99 ns</span>
+          <span style={{ textAlign: 'right' }}>Level</span>
+          <span style={{ textAlign: 'right' }}>p95 ns</span>
           <span style={{ textAlign: 'right' }}>At</span>
         </div>
 
@@ -166,10 +153,10 @@ export default function SubmissionsPage() {
               {!isTerminal(s.state) && ' …'}
             </span>
             <span style={{ textAlign: 'right', fontWeight: 700, fontSize: 15 }}>
-              {s.p50_ns != null ? Math.round(s.p50_ns) : '—'}
+              {s.max_level != null ? `L${s.max_level}` : '—'}
             </span>
             <span style={{ textAlign: 'right', color: 'var(--app-ink-2)' }}>
-              {s.p99_ns != null ? Math.round(s.p99_ns) : '—'}
+              {s.top_p95_ns != null ? Math.round(s.top_p95_ns) : '—'}
             </span>
             <span style={{ textAlign: 'right', color: 'var(--app-ink-3)' }}>
               {s.created_at

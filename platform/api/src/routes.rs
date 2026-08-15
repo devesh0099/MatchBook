@@ -1,10 +1,10 @@
-//! Participant routes. All JSON, no auth: 18 known people in a supervised
-//! room pick a handle from a preloaded roster, and the frontend remembers the
-//! pick in localStorage. Operator routes live in `admin.rs` on a separate
+//! Participant routes. All JSON. Identity comes from the session cookie via
+//! the `Auth` extractor (auth.rs) — the client never says who it is, the
+//! server already knows. Operator routes live in `admin.rs` on a separate
 //! listener bound to loopback.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     routing::{get, post, put},
     Json, Router,
@@ -14,13 +14,16 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use common::SubState;
+use crate::auth::{self, Auth};
 use crate::state::{leaderboard_from_db, AppState, Storage};
 
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/participants", get(participants))
+        .route("/login", post(auth::login))
+        .route("/logout", post(auth::logout))
+        .route("/session", get(auth::session))
         .route("/draft", put(put_draft).get(get_draft))
         .route("/run", post(run))
         .route("/runs/:id", get(run_result))
@@ -44,40 +47,18 @@ fn internal(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) 
     err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }
 
-// ---------------------------------------------------------------- roster
-
-#[derive(Serialize, sqlx::FromRow)]
-pub struct Participant {
-    pub id: i32,
-    pub handle: String,
-}
-
-async fn participants(State(st): State<AppState>) -> ApiResult<Vec<Participant>> {
-    let rows: Vec<Participant> =
-        sqlx::query_as("SELECT id, handle FROM participants ORDER BY handle")
-            .fetch_all(&st.db)
-            .await
-            .map_err(internal)?;
-    Ok(Json(rows))
-}
-
 // ---------------------------------------------------------------- drafts
 
 #[derive(Deserialize)]
 pub struct DraftBody {
-    pub participant_id: i32,
     pub source: String,
-}
-
-#[derive(Deserialize)]
-pub struct WhoQuery {
-    pub participant_id: i32,
 }
 
 /// The server is the source of truth for the editor buffer, so a browser crash
 /// loses nothing. Debounced ~3s client-side.
 async fn put_draft(
     State(st): State<AppState>,
+    auth: Auth,
     Json(body): Json<DraftBody>,
 ) -> ApiResult<serde_json::Value> {
     if body.source.len() > MAX_SOURCE_BYTES {
@@ -87,7 +68,7 @@ async fn put_draft(
         "INSERT INTO drafts (participant_id, source, updated_at) VALUES ($1, $2, now()) \
          ON CONFLICT (participant_id) DO UPDATE SET source = $2, updated_at = now()",
     )
-    .bind(body.participant_id)
+    .bind(auth.participant_id)
     .bind(&body.source)
     .execute(&st.db)
     .await
@@ -95,13 +76,10 @@ async fn put_draft(
     Ok(Json(json!({ "saved": true })))
 }
 
-async fn get_draft(
-    State(st): State<AppState>,
-    Query(q): Query<WhoQuery>,
-) -> ApiResult<serde_json::Value> {
+async fn get_draft(State(st): State<AppState>, auth: Auth) -> ApiResult<serde_json::Value> {
     let row: Option<(String,)> =
         sqlx::query_as("SELECT source FROM drafts WHERE participant_id = $1")
-            .bind(q.participant_id)
+            .bind(auth.participant_id)
             .fetch_optional(&st.db)
             .await
             .map_err(internal)?;
@@ -137,12 +115,13 @@ async fn store_source(st: &AppState, source: &str) -> Result<String, String> {
 /// measurement core is single-file (PLAN-measurement-redesign §3 mechanics).
 async fn run(
     State(st): State<AppState>,
+    auth: Auth,
     Json(body): Json<DraftBody>,
 ) -> ApiResult<serde_json::Value> {
     if body.source.len() > MAX_SOURCE_BYTES {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "source exceeds 256 KB"));
     }
-    if let Some(active) = active_submission(&st, body.participant_id).await? {
+    if let Some(active) = active_submission(&st, auth.participant_id).await? {
         return Err(err(
             StatusCode::CONFLICT,
             format!("submission #{active} is being evaluated — Run is available again the moment it finishes"),
@@ -153,7 +132,7 @@ async fn run(
     let (id,): (i64,) = sqlx::query_as(
         "INSERT INTO run_jobs (participant_id, source_hash) VALUES ($1, $2) RETURNING id",
     )
-    .bind(body.participant_id)
+    .bind(auth.participant_id)
     .bind(&hash)
     .fetch_one(&st.db)
     .await
@@ -170,13 +149,21 @@ pub struct RunJobRow {
 }
 
 /// Polled by the editor until `state` is terminal. Run jobs are ephemeral and
-/// never become submissions.
-async fn run_result(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult<serde_json::Value> {
-    let row: Option<RunJobRow> = sqlx::query_as("SELECT id, state, result FROM run_jobs WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&st.db)
-        .await
-        .map_err(internal)?;
+/// never become submissions. Owner-only, and a foreign id reads as NOT FOUND
+/// rather than FORBIDDEN — existence is not leaked either.
+async fn run_result(
+    State(st): State<AppState>,
+    auth: Auth,
+    Path(id): Path<i64>,
+) -> ApiResult<serde_json::Value> {
+    let row: Option<RunJobRow> = sqlx::query_as(
+        "SELECT id, state, result FROM run_jobs WHERE id = $1 AND participant_id = $2",
+    )
+    .bind(id)
+    .bind(auth.participant_id)
+    .fetch_optional(&st.db)
+    .await
+    .map_err(internal)?;
     let Some(row) = row else {
         return Err(err(StatusCode::NOT_FOUND, "no such run"));
     };
@@ -200,6 +187,7 @@ pub struct SubmitResponse {
 /// PLAN-measurement-redesign §3). One-at-a-time is the only throttle.
 async fn submit(
     State(st): State<AppState>,
+    auth: Auth,
     Json(body): Json<DraftBody>,
 ) -> ApiResult<SubmitResponse> {
     if body.source.trim().is_empty() {
@@ -208,7 +196,7 @@ async fn submit(
     if body.source.len() > MAX_SOURCE_BYTES {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "source exceeds 256 KB"));
     }
-    if let Some(active) = active_submission(&st, body.participant_id).await? {
+    if let Some(active) = active_submission(&st, auth.participant_id).await? {
         return Err(err(
             StatusCode::CONFLICT,
             format!(
@@ -228,7 +216,7 @@ async fn submit(
         "INSERT INTO submissions (participant_id, source_hash, state) \
          VALUES ($1, $2, 'received') RETURNING id",
     )
-    .bind(body.participant_id)
+    .bind(auth.participant_id)
     .bind(&hash)
     .fetch_one(&mut *tx)
     .await
@@ -238,7 +226,7 @@ async fn submit(
         "INSERT INTO drafts (participant_id, source, updated_at) VALUES ($1, $2, now()) \
          ON CONFLICT (participant_id) DO UPDATE SET source = $2, updated_at = now()",
     )
-    .bind(body.participant_id)
+    .bind(auth.participant_id)
     .bind(&body.source)
     .execute(&mut *tx)
     .await
@@ -291,16 +279,21 @@ pub struct SubmissionRow {
 const SUBMISSION_COLUMNS: &str = "id, participant_id, source_hash, state, created_at, updated_at, \
      phase0, phase1, phase2, max_level, top_p50_ns, top_p95_ns, top_p99_ns";
 
+/// Owner-only; a foreign id reads as NOT FOUND, leaking neither content nor
+/// existence. The leaderboard is the public surface.
 async fn submission(
     State(st): State<AppState>,
+    auth: Auth,
     Path(id): Path<i64>,
 ) -> ApiResult<serde_json::Value> {
-    let row: Option<SubmissionRow> =
-        sqlx::query_as(&format!("SELECT {SUBMISSION_COLUMNS} FROM submissions WHERE id = $1"))
-            .bind(id)
-            .fetch_optional(&st.db)
-            .await
-            .map_err(internal)?;
+    let row: Option<SubmissionRow> = sqlx::query_as(&format!(
+        "SELECT {SUBMISSION_COLUMNS} FROM submissions WHERE id = $1 AND participant_id = $2"
+    ))
+    .bind(id)
+    .bind(auth.participant_id)
+    .fetch_optional(&st.db)
+    .await
+    .map_err(internal)?;
 
     let Some(row) = row else {
         return Err(err(StatusCode::NOT_FOUND, "no such submission"));
@@ -309,12 +302,12 @@ async fn submission(
     Ok(Json(json!({ "submission": row, "terminal": terminal })))
 }
 
-async fn me(State(st): State<AppState>, Query(q): Query<WhoQuery>) -> ApiResult<Vec<SubmissionRow>> {
+async fn me(State(st): State<AppState>, auth: Auth) -> ApiResult<Vec<SubmissionRow>> {
     let rows: Vec<SubmissionRow> = sqlx::query_as(&format!(
         "SELECT {SUBMISSION_COLUMNS} FROM submissions WHERE participant_id = $1 \
          ORDER BY created_at DESC LIMIT 100"
     ))
-    .bind(q.participant_id)
+    .bind(auth.participant_id)
     .fetch_all(&st.db)
     .await
     .map_err(internal)?;
@@ -358,8 +351,8 @@ async fn leaderboard(State(st): State<AppState>) -> ApiResult<serde_json::Value>
 /// Nobody queues behind anybody anymore — the box is theirs. What remains to
 /// report is the one-at-a-time rule: whether THEIR evaluation is in flight,
 /// by exactly the rule submit() enforces.
-async fn queue(State(st): State<AppState>, Query(q): Query<WhoQuery>) -> ApiResult<serde_json::Value> {
-    let active = active_submission(&st, q.participant_id).await?;
+async fn queue(State(st): State<AppState>, auth: Auth) -> ApiResult<serde_json::Value> {
+    let active = active_submission(&st, auth.participant_id).await?;
     Ok(Json(json!({
         "evaluating": active.is_some(),
         "submission_id": active,
