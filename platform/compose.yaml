@@ -68,6 +68,10 @@ services:
       ADMIN_BIND_ADDR: 0.0.0.0:8081
       AWS_REGION: ${AWS_REGION:-eu-west-1}
       S3_BUCKET: ${S3_BUCKET:-flashmatch-artifacts}
+      # Operator login for the /admin dashboard. Set in platform/.env on the
+      # web node; unset disables operator login entirely.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     expose:
       - "8080"
     ports:

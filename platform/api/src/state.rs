@@ -10,6 +10,10 @@ pub struct AppState {
     pub db: PgPool,
     pub redis: Option<redis::Client>,
     pub s3: Arc<Storage>,
+    /// (email, argon2 hash) for the /admin dashboard's operator login, from
+    /// ADMIN_EMAIL / ADMIN_PASSWORD env — deployment config, never the repo.
+    /// None disables operator login entirely.
+    pub op_credential: Option<Arc<(String, String)>>,
 }
 
 /// Blob storage: source, binaries, histograms, flamegraphs, keyed on source

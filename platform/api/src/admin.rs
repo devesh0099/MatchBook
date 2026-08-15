@@ -54,6 +54,36 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// The same operator surface, mounted on the PUBLIC listener under /op for
+/// the /admin dashboard — every route behind the operator session
+/// (auth::require_op) except login itself. The loopback listener above stays
+/// unchanged: reaching it is already SSH access to the web node, and curl
+/// ops keep working with no cookie.
+pub fn op_router(state: AppState) -> Router {
+    let guarded = Router::new()
+        .route("/op/health", get(health_summary))
+        .route("/op/boxes", get(boxes_detail))
+        .route("/op/participants/status", get(participants_status))
+        .route("/op/events", get(events))
+        .route("/op/participants", post(issue_credentials))
+        .route("/op/requeue/:id", post(requeue))
+        .route("/op/freeze", post(freeze))
+        .route("/op/unfreeze", post(unfreeze))
+        .route("/op/box/:id/:health", post(set_box_health))
+        .route("/op/close", post(close_submissions))
+        .route("/op/open", post(open_submissions))
+        .route("/op/rejudge", post(rejudge))
+        .route("/op/publish-final", post(publish_final))
+        .route("/op/logout", post(crate::auth::op_logout))
+        .route("/op/session", get(crate::auth::op_session))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth::require_op));
+
+    Router::new()
+        .route("/op/login", post(crate::auth::op_login))
+        .merge(guarded)
+        .with_state(state)
+}
+
 /// One glance: switches, boxes, pipeline states, backlogs, and the last
 /// self-healing events. If this reads clean, the event is healthy.
 async fn health_summary(State(st): State<AppState>) -> R {

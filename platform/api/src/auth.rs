@@ -178,6 +178,110 @@ pub async fn session(auth: Auth) -> Json<serde_json::Value> {
     Json(json!({ "participant_id": auth.participant_id, "handle": auth.handle }))
 }
 
+// ---------------------------------------------------------------- operator
+
+const OP_COOKIE: &str = "mb_op";
+
+fn op_cookie_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|part| {
+        let (k, v) = part.trim().split_once('=')?;
+        (k == OP_COOKIE).then(|| v.to_string())
+    })
+}
+
+async fn op_session_valid(st: &AppState, headers: &axum::http::HeaderMap) -> Option<String> {
+    let token = op_cookie_token(headers)?;
+    let th = token_hash(&token);
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT token_hash FROM admin_sessions \
+         WHERE token_hash = $1 AND created_at > now() - make_interval(hours => $2)",
+    )
+    .bind(&th)
+    .bind(SESSION_HOURS)
+    .fetch_optional(&st.db)
+    .await
+    .ok()?;
+    row.map(|r| r.0)
+}
+
+/// Middleware guarding every /op route except login: a live operator session
+/// or a 401, before any handler runs. The loopback listener stays unguarded —
+/// reaching it is already SSH access to the web node.
+pub async fn require_op(
+    State(st): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if op_session_valid(&st, req.headers()).await.is_some() {
+        return next.run(req).await;
+    }
+    (StatusCode::UNAUTHORIZED, Json(json!({ "error": "operator sign-in required" })))
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct OpLoginBody {
+    pub email: String,
+    pub password: String,
+}
+
+pub async fn op_login(
+    State(st): State<AppState>,
+    Json(body): Json<OpLoginBody>,
+) -> Result<(HeaderMap, Json<serde_json::Value>), ApiError> {
+    let Some(cred) = st.op_credential.as_deref() else {
+        return Err(unauthorized("operator login is not configured on this deployment"));
+    };
+    let (email, hash) = (&cred.0, &cred.1);
+    let reject = || unauthorized("wrong email or password");
+    if body.email.trim() != email {
+        return Err(reject());
+    }
+    let parsed = PasswordHash::new(hash).map_err(internal)?;
+    if Argon2::default().verify_password(body.password.as_bytes(), &parsed).is_err() {
+        return Err(reject());
+    }
+    let token = {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    sqlx::query("INSERT INTO admin_sessions (token_hash) VALUES ($1)")
+        .bind(token_hash(&token))
+        .execute(&st.db)
+        .await
+        .map_err(internal)?;
+    let mut headers = HeaderMap::new();
+    let cookie =
+        format!("{OP_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}", (SESSION_HOURS as i64) * 3600);
+    headers.insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    Ok((headers, Json(json!({ "operator": true }))))
+}
+
+pub async fn op_logout(
+    State(st): State<AppState>,
+    headers_in: axum::http::HeaderMap,
+) -> Result<(HeaderMap, Json<serde_json::Value>), ApiError> {
+    if let Some(th) = op_session_valid(&st, &headers_in).await {
+        sqlx::query("DELETE FROM admin_sessions WHERE token_hash = $1")
+            .bind(th)
+            .execute(&st.db)
+            .await
+            .map_err(internal)?;
+    }
+    let mut headers = HeaderMap::new();
+    let cookie = format!("{OP_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+    headers.insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    Ok((headers, Json(json!({ "signed_out": true }))))
+}
+
+pub async fn op_session(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Json<serde_json::Value> {
+    Json(json!({ "operator": op_session_valid(&st, &headers).await.is_some() }))
+}
+
 // ---------------------------------------------------------------- issuing
 
 /// Hash a password for storage. Used by the operator route that issues

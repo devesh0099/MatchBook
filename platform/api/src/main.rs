@@ -69,11 +69,27 @@ async fn main() -> Result<()> {
         bucket: std::env::var("S3_BUCKET").unwrap_or_else(|_| "flashmatch-artifacts".into()),
     });
 
-    let app_state = AppState { db: db.clone(), redis, s3 };
+    // The /admin dashboard's operator credential: deployment config only.
+    // The password is hashed once here and only the hash lives in memory.
+    let op_credential = match (std::env::var("ADMIN_EMAIL"), std::env::var("ADMIN_PASSWORD")) {
+        (Ok(email), Ok(pw)) if !email.trim().is_empty() && !pw.is_empty() => {
+            let hash = auth::hash_password(&pw).context("hashing ADMIN_PASSWORD")?;
+            tracing::info!("operator login enabled for {}", email.trim());
+            Some(Arc::new((email.trim().to_string(), hash)))
+        }
+        _ => {
+            tracing::info!("operator login disabled (ADMIN_EMAIL/ADMIN_PASSWORD unset)");
+            None
+        }
+    };
+
+    let app_state = AppState { db: db.clone(), redis, s3, op_credential };
 
     janitor::spawn(db.clone());
 
-    let public = routes::router(app_state.clone()).layer(TraceLayer::new_for_http());
+    let public = routes::router(app_state.clone())
+        .merge(admin::op_router(app_state.clone()))
+        .layer(TraceLayer::new_for_http());
     let operator = admin::router(app_state).layer(TraceLayer::new_for_http());
 
     let public_listener = tokio::net::TcpListener::bind(&bind).await.context("binding public port")?;

@@ -226,6 +226,59 @@ export const api = {
     call<{ evaluating: boolean; submission_id: number | null; reason: string }>('/queue'),
 };
 
+// ---------------------------------------------------------------- operator
+
+export interface OpBoxRow {
+  id: string;
+  role: string;
+  participant_id: number | null;
+  healthy: boolean;
+  last_seen_secs_ago: number;
+}
+
+export interface OpHealth {
+  ok: boolean;
+  flags: Record<string, unknown>[];
+  boxes: { total: number; unhealthy: number; rows: OpBoxRow[] };
+  submissions: { state: string; count: number }[];
+  run_jobs_pending: number;
+  rejudge: { state: string; count: number }[];
+  recent_self_healing: { kind: string; at: string }[];
+}
+
+export interface OpParticipantRow {
+  participant_id: number;
+  handle: string;
+  box: string | null;
+  latest_submission: number | null;
+  latest_state: string | null;
+  best_level: number | null;
+}
+
+/// The /admin dashboard's surface: the same operator actions the loopback
+/// listener offers, behind the operator session cookie.
+export const op = {
+  login: (email: string, password: string) =>
+    call<{ operator: boolean }>('/op/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+  logout: () => call<{ signed_out: boolean }>('/op/logout', { method: 'POST' }),
+  session: () => call<{ operator: boolean }>('/op/session'),
+  health: () => call<OpHealth>('/op/health'),
+  participants: () => call<{ participants: OpParticipantRow[] }>('/op/participants/status'),
+  events: (limit = 40) =>
+    call<{ events: { id: number; at: string; submission_id: number | null; kind: string; detail: unknown }[] }>(
+      `/op/events?limit=${limit}`,
+    ),
+  issue: (handle: string) =>
+    call<{ participant_id: number; handle: string; password: string }>('/op/participants', {
+      method: 'POST',
+      body: JSON.stringify({ handle }),
+    }),
+  act: (path: string) => call<Record<string, unknown>>(`/op/${path}`, { method: 'POST' }),
+};
+
 /// Which states are still moving. The UI polls every 2s while non-terminal —
 /// plain JSON polling, no websockets.
 export function isTerminal(state: SubState): boolean {

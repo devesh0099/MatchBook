@@ -42,6 +42,17 @@ CREATE TABLE sessions (
   last_seen      timestamptz DEFAULT now()
 );
 
+-- Operator sessions for the /admin dashboard. Separate lane from student
+-- sessions on purpose: a student token must never be upgradeable into an
+-- operator one by any bug short of a table mixup. The credential itself is
+-- deployment config (ADMIN_EMAIL / ADMIN_PASSWORD env on the API), never a
+-- row here and never in the repo.
+CREATE TABLE admin_sessions (
+  token_hash text PRIMARY KEY,
+  created_at timestamptz DEFAULT now(),
+  last_seen  timestamptz DEFAULT now()
+);
+
 CREATE TABLE submissions (
   id            bigserial PRIMARY KEY,
   participant_id int REFERENCES participants(id) NOT NULL,
