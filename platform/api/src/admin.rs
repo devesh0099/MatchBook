@@ -205,19 +205,27 @@ async fn participants_status(State(st): State<AppState>) -> R {
         box_state: &str, box_detail: Option<&str>, healthy: Option<bool>,
         latest_state: Option<&str>, phase2: &Option<serde_json::Value>,
     ) -> String {
+        // A live, healthy heartbeat is the ground truth for "the box is up and
+        // serving." It OVERRIDES a stale provisioner state: if the daemon was
+        // restarted (a web-node redeploy restarts it) between provisioning the
+        // box and writing box_state='ready', the participant would otherwise be
+        // stuck on "deploying…" forever even though the box is heartbeating.
+        // Once the box joins the heartbeat list, we show its real activity.
+        let live = healthy == Some(true);
         match box_state {
-            "deploying" | "redeploying" => {
+            "none" => return "no box".into(),
+            "removing" => return "removing…".into(),
+            "deploying" | "redeploying" if !live => {
                 let verb = if box_state == "redeploying" { "redeploy" } else { "deploy" };
                 return box_detail
                     .filter(|d| !d.is_empty())
                     .map(|d| format!("{verb}: {d}"))
                     .unwrap_or_else(|| format!("{verb}ing…"));
             }
-            "failed" => return box_detail.filter(|d| !d.is_empty()).map(|d| format!("failed: {d}")).unwrap_or_else(|| "deploy failed".into()),
-            "none" => return "no box".into(),
+            "failed" if !live => return box_detail.filter(|d| !d.is_empty()).map(|d| format!("failed: {d}")).unwrap_or_else(|| "deploy failed".into()),
             _ => {}
         }
-        // box_state == ready: reflect what it's actually doing.
+        // Ready — or live despite a stale state: reflect what it's actually doing.
         match latest_state {
             Some("received") => "queued".into(),
             Some("compiling") => "compiling".into(),

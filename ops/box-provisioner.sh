@@ -149,6 +149,34 @@ do_deploy(){ # participant_id
 }
 
 log "box provisioner up (ami=$AMI type=$ITYPE region=$REGION)"
+
+# Startup reconcile. A previous daemon may have died — or been restarted by a
+# web-node redeploy — mid-request, orphaning a box_requests row in 'running' and
+# stranding the participant in 'deploying'. Since this is the only daemon, ANY
+# 'running' request at startup is orphaned. Heal before serving:
+#  1. A (re)deploy that actually finished (box now heartbeats healthy) becomes
+#     ready — the state the dead daemon never got to write.
+sql "UPDATE participants p SET box_state='ready', box_detail='recovered (box healthy)'
+      WHERE p.box_state IN ('deploying','redeploying')
+        AND EXISTS (SELECT 1 FROM boxes b WHERE b.participant_id=p.id AND b.healthy)" >/dev/null
+#  2. remove/terminate are idempotent (they re-check the instance) — re-queue so
+#     an interrupted teardown completes rather than stranding the participant.
+sql "UPDATE box_requests SET state='pending', claimed_by=NULL, updated_at=now()
+      WHERE state='running' AND action IN ('remove','terminate')" >/dev/null
+#  3. An interrupted launch can't be safely resumed (the box may be half-built),
+#     so surface it as failed — the operator can Redeploy for a clean box.
+sql "UPDATE participants p SET box_state='failed',
+        box_detail='interrupted — daemon restarted mid-deploy; redeploy'
+      WHERE p.box_state IN ('deploying','redeploying')
+        AND EXISTS (SELECT 1 FROM box_requests r
+                    WHERE r.participant_id=p.id AND r.state='running'
+                      AND r.action IN ('deploy','redeploy'))" >/dev/null
+#  4. Clear the orphaned launch requests so the in-flight guard no longer blocks
+#     a fresh Deploy/Redeploy for that participant.
+orphans=$(sql "WITH c AS (UPDATE box_requests SET state='failed', updated_at=now()
+               WHERE state='running' RETURNING id) SELECT count(*) FROM c" | tr -d '[:space:]')
+[[ "$orphans" =~ ^[0-9]+$ && "$orphans" -gt 0 ]] && log "reconciled $orphans orphaned request(s) from a prior daemon"
+
 while true; do
   # claim one pending request. Wrapped in a CTE + final SELECT so ONLY the
   # tuple is emitted — a bare UPDATE ... RETURNING leaks its "UPDATE 0" status
