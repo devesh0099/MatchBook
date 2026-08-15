@@ -1,0 +1,13 @@
+# THE toolchain pin — the single source of truth for every Rust build.
+#
+# rustup reads this automatically: a plain `cargo build` in platform/ selects
+# (and if needed installs) exactly this version, on any machine. The API
+# Dockerfile copies this file into the build stage so the image builds with
+# the same version even if its base-image tag drifts, and
+# ops/check-toolchain.sh fails loudly when the two pins disagree.
+#
+# When `cargo update` regenerates Cargo.lock on a newer toolchain, raise this
+# pin (and the Dockerfile FROM tag) in the same commit — the CI job that
+# builds the image is what catches it if you forget.
+[toolchain]
+channel = "1.96.0"

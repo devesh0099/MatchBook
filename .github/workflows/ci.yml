@@ -1,0 +1,46 @@
+# CI exists for one headline reason and earns its keep on two more.
+#
+# The headline: the API Docker image once stopped building and NOBODY NOTICED,
+# because `docker compose build` on the web node was the only thing that ever
+# exercised it (STATUS §7). The `api-image` job below builds it on every push,
+# so a Cargo.lock regenerated on a newer toolchain turns into a red X the same
+# day, not a surprise on provisioning day.
+#
+# The others: the engine's ctest gate (the contest itself), and the Rust
+# workspace against the pinned toolchain in platform/rust-toolchain.toml —
+# with ops/check-toolchain.sh failing the build if the Dockerfile's FROM tag
+# and the toolchain pin ever disagree.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure and build
+        run: cmake -S engine -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j"$(nproc)"
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure
+
+  platform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain pins agree
+        run: bash ops/check-toolchain.sh
+      # rustup reads platform/rust-toolchain.toml and installs the pinned
+      # version on its own; no third-party action needed.
+      - name: cargo build
+        working-directory: platform
+        run: cargo build --workspace --locked
+
+  api-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build the API image
+        run: docker build -f platform/api/Dockerfile .

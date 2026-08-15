@@ -1,16 +1,16 @@
 # Built from the repo root so the shared `common` crate is in context.
 #
-# The toolchain pin has to be at least as new as the MSRV of everything in
-# Cargo.lock, and that ratchets upward on its own. This was 1.83 and had
-# silently stopped building: cpufeatures moved to edition 2024, which Cargo 1.83
-# cannot even parse, and time/icu_provider now want 1.88. Nothing in this repo
-# changed to cause it — the lock file was simply regenerated on a newer host
-# toolchain, and no CI builds this image, so it broke unobserved.
+# The toolchain version is pinned ONCE, in platform/rust-toolchain.toml, and
+# copied in below: the rust image ships rustup, so cargo auto-installs the
+# pinned version if this FROM tag ever drifts from it — the build self-heals
+# instead of failing on an MSRV the stale image cannot parse. Keep the tag
+# matching the pin anyway (ops/check-toolchain.sh enforces it, and CI builds
+# this image on every push) so the normal case downloads nothing.
 #
-# Keep this at least as new as the toolchain Cargo.lock was resolved with —
-# 1.96 at the time of writing — rather than chasing individual MSRVs upward one
-# failure at a time. `docker compose build` on the web node is the only thing
-# that exercises this image, so a stale pin is invisible until provisioning day.
+# History of why this exists: the pin was once 1.83 and had silently stopped
+# building — Cargo.lock was regenerated on a newer host toolchain, cpufeatures
+# moved to edition 2024 which Cargo 1.83 cannot even parse, and nothing built
+# this image between provisioning days.
 #
 # The DISTRO is pinned as well as the version. `rust:1.96-slim` is trixie, and
 # linking against its glibc produced a binary the bookworm runtime stage below
@@ -20,7 +20,7 @@ FROM rust:1.96-slim-bookworm AS build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
-COPY platform/Cargo.toml platform/Cargo.lock* ./
+COPY platform/rust-toolchain.toml platform/Cargo.toml platform/Cargo.lock* ./
 COPY platform/common ./common
 COPY platform/api ./api
 COPY platform/worker ./worker
