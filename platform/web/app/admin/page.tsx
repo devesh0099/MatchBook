@@ -42,6 +42,23 @@ function Panel({ title, right, children }: { title: string; right?: React.ReactN
   );
 }
 
+// Small per-row box button (Deploy / Redeploy / Retry).
+function boxBtn(confirming: boolean): React.CSSProperties {
+  return {
+    appearance: 'none',
+    border: `1px solid ${confirming ? 'var(--s-slow)' : 'var(--app-rule)'}`,
+    background: 'transparent',
+    color: confirming ? 'var(--s-slow)' : 'var(--app-ink)',
+    font: 'inherit',
+    fontWeight: 700,
+    fontSize: 10,
+    letterSpacing: '0.08em',
+    textTransform: 'uppercase',
+    padding: '4px 10px',
+    cursor: 'pointer',
+  };
+}
+
 function ActionButton({
   label,
   danger,
@@ -328,7 +345,7 @@ export default function AdminPage() {
           className="kicker"
           style={{
             display: 'grid',
-            gridTemplateColumns: '54px minmax(0,1fr) 150px 130px 90px',
+            gridTemplateColumns: '48px minmax(0,1fr) 150px 64px 120px',
             padding: '8px 14px',
             borderBottom: '1px solid var(--app-line)',
             letterSpacing: '0.12em',
@@ -336,33 +353,83 @@ export default function AdminPage() {
         >
           <span>#</span>
           <span>Handle</span>
-          <span>Latest</span>
-          <span>State</span>
+          <span>Activity</span>
           <span style={{ textAlign: 'right' }}>Best</span>
+          <span style={{ textAlign: 'right' }}>Box</span>
         </div>
-        {participants.map((p) => (
-          <div
-            key={p.participant_id}
-            className="mono"
-            style={{
-              display: 'grid',
-              gridTemplateColumns: '54px minmax(0,1fr) 150px 130px 90px',
-              padding: '7px 14px',
-              borderBottom: '1px solid var(--app-line)',
-              fontSize: 12,
-            }}
-          >
-            <span style={{ color: 'var(--app-ink-3)' }}>{p.participant_id}</span>
-            <span style={{ fontFamily: 'var(--font-body)', fontWeight: 600, fontSize: 13 }}>{p.handle}</span>
-            <span style={{ color: 'var(--app-ink-3)' }}>
-              {p.latest_submission != null ? `#${p.latest_submission}` : '—'}
-            </span>
-            <span style={{ color: 'var(--app-ink-2)' }}>{p.latest_state ?? '—'}</span>
-            <span style={{ textAlign: 'right', fontWeight: 700 }}>
-              {p.best_level != null ? `L${p.best_level}` : '—'}
-            </span>
-          </div>
-        ))}
+        {participants.map((p) => {
+          // The status pill's tone follows what the box is doing.
+          const a = p.activity;
+          const tone =
+            p.box_state === 'failed' ? 'var(--s-fail)' :
+            p.box_state === 'deploying' || p.box_state === 'redeploying' ? 'var(--s-slow)' :
+            a === 'no box' ? 'var(--app-ink-3)' :
+            a === 'IDLE' ? 'var(--app-ink-2)' :
+            a === 'box unhealthy' ? 'var(--s-fail)' :
+            'var(--s-bench)';
+          const busy = p.box_state === 'deploying' || p.box_state === 'redeploying';
+          return (
+            <div
+              key={p.participant_id}
+              className="mono"
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '48px minmax(0,1fr) 150px 64px 120px',
+                alignItems: 'center',
+                padding: '7px 14px',
+                borderBottom: '1px solid var(--app-line)',
+                fontSize: 12,
+              }}
+            >
+              <span style={{ color: 'var(--app-ink-3)' }}>{p.participant_id}</span>
+              <span style={{ fontFamily: 'var(--font-body)', fontWeight: 600, fontSize: 13 }}>{p.handle}</span>
+              <span
+                style={{
+                  color: tone,
+                  fontWeight: 700,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={p.box ?? ''}
+              >
+                {busy && '⟳ '}{a}
+              </span>
+              <span style={{ textAlign: 'right', fontWeight: 700 }}>
+                {p.best_level != null ? `L${p.best_level}` : '—'}
+              </span>
+              <span style={{ textAlign: 'right' }}>
+                {p.box_state === 'none' || p.box_state === 'failed' ? (
+                  <button
+                    onClick={() => {
+                      void op.deployBox(p.participant_id)
+                        .then(() => { setNotice(`deploying box for ${p.handle}…`); refresh(); })
+                        .catch((e) => setNotice(`deploy failed: ${String((e as Error).message ?? e)}`));
+                    }}
+                    style={boxBtn(false)}
+                  >
+                    {p.box_state === 'failed' ? 'Retry' : 'Deploy'}
+                  </button>
+                ) : busy ? (
+                  <span style={{ color: 'var(--s-slow)', fontSize: 11 }}>working…</span>
+                ) : (
+                  <button
+                    onClick={() => {
+                      if (confirmAction !== `re-${p.participant_id}`) { setConfirmAction(`re-${p.participant_id}`); return; }
+                      setConfirmAction(null);
+                      void op.redeployBox(p.participant_id)
+                        .then(() => { setNotice(`redeploying box for ${p.handle}…`); refresh(); })
+                        .catch((e) => setNotice(`redeploy failed: ${String((e as Error).message ?? e)}`));
+                    }}
+                    style={boxBtn(confirmAction === `re-${p.participant_id}`)}
+                  >
+                    {confirmAction === `re-${p.participant_id}` ? 'Confirm?' : 'Redeploy'}
+                  </button>
+                )}
+              </span>
+            </div>
+          );
+        })}
         <form
           onSubmit={(e) => {
             e.preventDefault();

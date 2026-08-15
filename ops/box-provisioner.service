@@ -1,0 +1,20 @@
+[Unit]
+# The dashboard's box-provisioning daemon (M8). Runs on the web node, OUTSIDE
+# the API container, so the internet-facing API never holds AWS launch rights.
+Description=flashmatch box provisioner
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Config (AMI, subnet, sg, profile, type, region, web ip, pg pass) is written
+# by ops/aws/deploy.sh into this file; AWS creds come from the instance role
+# or a scoped key file referenced here.
+EnvironmentFile=/opt/flashmatch/provisioner.env
+ExecStart=/opt/flashmatch/ops/box-provisioner.sh
+Restart=always
+RestartSec=5
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target

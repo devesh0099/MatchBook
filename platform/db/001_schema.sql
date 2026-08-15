@@ -29,8 +29,31 @@ CREATE TABLE participants (
   -- The participant -> box binding (M4). Informational here; the agent's own
   -- config is what actually scopes its job claims.
   box_id      text,
+  -- Dashboard-driven box lifecycle (M8). The operator deploys a box per
+  -- participant from the /admin dashboard; the provisioning daemon
+  -- (ops/box-provisioner.sh) drives the AWS side and moves this through:
+  --   none -> deploying -> ready ; redeploy: ready -> redeploying -> ready
+  -- 'failed' surfaces a provisioning error on the dashboard.
+  box_state       text NOT NULL DEFAULT 'none',
+  box_instance_id text,        -- the EC2 instance backing this participant
+  box_detail      text,        -- last provisioner message (error, progress)
   created_at  timestamptz DEFAULT now()
 );
+
+-- The deploy/redeploy/terminate queue. The dashboard writes a request; the
+-- provisioning daemon claims it FOR UPDATE SKIP LOCKED and fulfills it, so
+-- the public API never touches AWS — it only enqueues intent.
+CREATE TABLE box_requests (
+  id             bigserial PRIMARY KEY,
+  participant_id int REFERENCES participants(id) NOT NULL,
+  action         text NOT NULL,               -- deploy | redeploy | terminate
+  state          text NOT NULL DEFAULT 'pending', -- pending|running|done|failed
+  claimed_by     text,
+  detail         text,
+  created_at     timestamptz DEFAULT now(),
+  updated_at     timestamptz DEFAULT now()
+);
+CREATE INDEX ON box_requests (state, id);
 
 -- Login sessions. The cookie carries a random token; only its sha256 is
 -- stored, so a leaked table replays nothing. One-day event, so expiry is a

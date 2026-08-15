@@ -255,8 +255,12 @@ export interface OpParticipantRow {
   participant_id: number;
   handle: string;
   box: string | null;
+  /// Lifecycle: none | deploying | ready | redeploying | failed.
+  box_state: string;
+  /// Live activity string: 'no box' | 'deploying…' | 'IDLE' | 'Phase I' |
+  /// 'Phase II · L3' | 'box unhealthy' | …
+  activity: string;
   latest_submission: number | null;
-  latest_state: string | null;
   best_level: number | null;
 }
 
@@ -282,6 +286,10 @@ export const op = {
       body: JSON.stringify({ handle }),
     }),
   act: (path: string) => call<Record<string, unknown>>(`/op/${path}`, { method: 'POST' }),
+  // Box lifecycle (M8): the dashboard's Deploy / Redeploy / Terminate.
+  deployBox: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/deploy`, { method: 'POST' }),
+  redeployBox: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/redeploy`, { method: 'POST' }),
+  terminateBox: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/terminate`, { method: 'POST' }),
 };
 
 /// Which states are still moving. The UI polls every 2s while non-terminal —

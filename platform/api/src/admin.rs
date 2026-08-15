@@ -64,6 +64,9 @@ pub fn op_router(state: AppState) -> Router {
         .route("/op/health", get(health_summary))
         .route("/op/boxes", get(boxes_detail))
         .route("/op/participants/status", get(participants_status))
+        .route("/op/participants/:id/deploy", post(deploy_box))
+        .route("/op/participants/:id/redeploy", post(redeploy_box))
+        .route("/op/participants/:id/terminate", post(terminate_box))
         .route("/op/events", get(events))
         .route("/op/participants", post(issue_credentials))
         .route("/op/requeue/:id", post(requeue))
@@ -166,31 +169,117 @@ async fn boxes_detail(State(st): State<AppState>) -> R {
     })))
 }
 
-/// Per-student rows for the dashboard: who they are, which box serves them,
-/// what their latest submission is doing, and their best climb.
+/// Per-student rows for the dashboard: identity, box lifecycle state, a live
+/// activity string (IDLE / Phase I / Phase II · L3 …) derived from the box
+/// state and the latest submission, and their best climb. The `activity` is
+/// what renders in front of the Deploy/Redeploy button.
 async fn participants_status(State(st): State<AppState>) -> R {
-    let rows: Vec<(i32, String, Option<String>, Option<i64>, Option<String>, Option<i32>)> =
-        sqlx::query_as(
-            "SELECT p.id, p.handle, b.id, latest.id, latest.state::text, best.max_level \
-             FROM participants p \
-             LEFT JOIN boxes b ON b.participant_id = p.id \
-             LEFT JOIN LATERAL (SELECT id, state FROM submissions \
-                                WHERE participant_id = p.id \
-                                ORDER BY created_at DESC, id DESC LIMIT 1) latest ON true \
-             LEFT JOIN LATERAL (SELECT max_level FROM submissions \
-                                WHERE participant_id = p.id AND max_level IS NOT NULL \
-                                ORDER BY max_level DESC LIMIT 1) best ON true \
-             ORDER BY p.id",
-        )
-        .fetch_all(&st.db)
+    let rows: Vec<(
+        i32, String, Option<String>, String, Option<bool>,
+        Option<i64>, Option<String>, Option<serde_json::Value>, Option<i32>,
+    )> = sqlx::query_as(
+        "SELECT p.id, p.handle, b.id, p.box_state, b.healthy, \
+                latest.id, latest.state::text, latest.phase2, best.max_level \
+         FROM participants p \
+         LEFT JOIN boxes b ON b.participant_id = p.id \
+         LEFT JOIN LATERAL (SELECT id, state, phase2 FROM submissions \
+                            WHERE participant_id = p.id \
+                            ORDER BY created_at DESC, id DESC LIMIT 1) latest ON true \
+         LEFT JOIN LATERAL (SELECT max_level FROM submissions \
+                            WHERE participant_id = p.id AND max_level IS NOT NULL \
+                            ORDER BY max_level DESC LIMIT 1) best ON true \
+         ORDER BY p.id",
+    )
+    .fetch_all(&st.db)
+    .await
+    .map_err(oops)?;
+
+    // The activity string, computed once so the dashboard renders one field.
+    fn activity(
+        box_state: &str, healthy: Option<bool>, latest_state: Option<&str>,
+        phase2: &Option<serde_json::Value>,
+    ) -> String {
+        match box_state {
+            "deploying" => return "deploying…".into(),
+            "redeploying" => return "redeploying…".into(),
+            "failed" => return "deploy failed".into(),
+            "none" => return "no box".into(),
+            _ => {}
+        }
+        // box_state == ready: reflect what it's actually doing.
+        match latest_state {
+            Some("received") => "queued".into(),
+            Some("compiling") => "compiling".into(),
+            Some("testing") => "running tests".into(),
+            Some("verifying") => "verifying".into(),
+            Some("phase1") => "Phase I".into(),
+            Some("phase2") => {
+                let cleared = phase2
+                    .as_ref()
+                    .and_then(|p| p.get("levels"))
+                    .and_then(|l| l.as_array())
+                    .map(|a| a.iter().filter(|lv| lv.get("outcome").and_then(|o| o.as_str()) == Some("ok")).count())
+                    .unwrap_or(0);
+                format!("Phase II · L{}", cleared.max(1))
+            }
+            // terminal or no submission -> the box is idle (or unhealthy)
+            _ => {
+                if healthy == Some(false) { "box unhealthy".into() } else { "IDLE".into() }
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "participants": rows.into_iter().map(|(id, handle, box_id, box_state, healthy, sub, state, phase2, level)| {
+            let act = activity(&box_state, healthy, state.as_deref(), &phase2);
+            json!({
+                "participant_id": id, "handle": handle, "box": box_id,
+                "box_state": box_state, "activity": act,
+                "latest_submission": sub, "best_level": level,
+            })
+        }).collect::<Vec<_>>(),
+    })))
+}
+
+// -------------------------------------------------- box lifecycle (M8)
+
+/// Enqueue a provisioning request; the daemon fulfills it. The API never
+/// touches AWS. Guards against a duplicate in-flight request per participant.
+async fn enqueue_box(st: &AppState, id: i32, action: &str, deploying_state: &str) -> R {
+    let exists: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM box_requests WHERE participant_id = $1 AND state IN ('pending','running')",
+    )
+    .bind(id)
+    .fetch_optional(&st.db)
+    .await
+    .map_err(oops)?;
+    if exists.is_some() {
+        return Err((axum::http::StatusCode::CONFLICT, "a box request is already in flight".into()));
+    }
+    sqlx::query("INSERT INTO box_requests (participant_id, action) VALUES ($1, $2)")
+        .bind(id)
+        .bind(action)
+        .execute(&st.db)
         .await
         .map_err(oops)?;
-    Ok(Json(json!({
-        "participants": rows.into_iter().map(|(id, handle, box_id, sub, state, level)| json!({
-            "participant_id": id, "handle": handle, "box": box_id,
-            "latest_submission": sub, "latest_state": state, "best_level": level,
-        })).collect::<Vec<_>>(),
-    })))
+    sqlx::query("UPDATE participants SET box_state = $2, box_detail = NULL WHERE id = $1")
+        .bind(id)
+        .bind(deploying_state)
+        .execute(&st.db)
+        .await
+        .map_err(oops)?;
+    log(st, None, &format!("box_{action}"), json!({ "participant_id": id })).await.map_err(oops)?;
+    Ok(Json(json!({ "queued": action, "participant_id": id })))
+}
+
+async fn deploy_box(State(st): State<AppState>, Path(id): Path<i32>) -> R {
+    enqueue_box(&st, id, "deploy", "deploying").await
+}
+async fn redeploy_box(State(st): State<AppState>, Path(id): Path<i32>) -> R {
+    enqueue_box(&st, id, "redeploy", "redeploying").await
+}
+async fn terminate_box(State(st): State<AppState>, Path(id): Path<i32>) -> R {
+    enqueue_box(&st, id, "terminate", "deploying").await
 }
 
 /// Contest close (PLAN §3 mechanics): Submit refuses from this moment;
