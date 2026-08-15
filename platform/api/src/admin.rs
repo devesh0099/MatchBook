@@ -44,7 +44,119 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/open", post(open_submissions))
         .route("/admin/rejudge", post(rejudge))
         .route("/admin/publish-final", post(publish_final))
+        // M7: the dashboard read surface. Read-only queries over the same
+        // tables everything else writes; a future dashboard UI renders these
+        // three and is done. The one-glance answer to "is the event healthy"
+        // is /admin/health.
+        .route("/admin/health", get(health_summary))
+        .route("/admin/boxes", get(boxes_detail))
+        .route("/admin/participants/status", get(participants_status))
         .with_state(state)
+}
+
+/// One glance: switches, boxes, pipeline states, backlogs, and the last
+/// self-healing events. If this reads clean, the event is healthy.
+async fn health_summary(State(st): State<AppState>) -> R {
+    let flags: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT key, value FROM settings WHERE key IN \
+                        ('leaderboard_frozen','submissions_closed','final_published')")
+            .fetch_all(&st.db)
+            .await
+            .map_err(oops)?;
+    let boxes: Vec<(String, String, Option<i32>, bool, f64)> = sqlx::query_as(
+        "SELECT id, role, participant_id, healthy, \
+                EXTRACT(EPOCH FROM (now() - last_seen))::float8 \
+         FROM boxes ORDER BY id",
+    )
+    .fetch_all(&st.db)
+    .await
+    .map_err(oops)?;
+    let sub_states: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT state::text, count(*) FROM submissions GROUP BY state ORDER BY 2 DESC",
+    )
+    .fetch_all(&st.db)
+    .await
+    .map_err(oops)?;
+    let (runs_pending,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM run_jobs WHERE state IN ('received','running')")
+            .fetch_one(&st.db)
+            .await
+            .map_err(oops)?;
+    let rejudge: Vec<(String, i64)> =
+        sqlx::query_as("SELECT state, count(*) FROM rejudge_jobs GROUP BY state")
+            .fetch_all(&st.db)
+            .await
+            .map_err(oops)?;
+    let heals: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT kind, at FROM events_log \
+         WHERE kind IN ('janitor_reset_dead_box','janitor_reset_early', \
+                        'janitor_reset_measure','agent_startup_reclaim','box_unhealthy') \
+         ORDER BY id DESC LIMIT 10",
+    )
+    .fetch_all(&st.db)
+    .await
+    .map_err(oops)?;
+
+    let unhealthy = boxes.iter().filter(|b| !b.3).count();
+    Ok(Json(json!({
+        "ok": unhealthy == 0,
+        "flags": flags.into_iter().map(|(k, v)| json!({k: v})).collect::<Vec<_>>(),
+        "boxes": {
+            "total": boxes.len(),
+            "unhealthy": unhealthy,
+            "rows": boxes.into_iter().map(|(id, role, pid, healthy, age)| json!({
+                "id": id, "role": role, "participant_id": pid,
+                "healthy": healthy, "last_seen_secs_ago": age.round(),
+            })).collect::<Vec<_>>(),
+        },
+        "submissions": sub_states.into_iter().map(|(s, n)| json!({"state": s, "count": n})).collect::<Vec<_>>(),
+        "run_jobs_pending": runs_pending,
+        "rejudge": rejudge.into_iter().map(|(s, n)| json!({"state": s, "count": n})).collect::<Vec<_>>(),
+        "recent_self_healing": heals.into_iter().map(|(k, at)| json!({"kind": k, "at": at})).collect::<Vec<_>>(),
+    })))
+}
+
+/// The full box registry, detail blob included — hygiene reports, steal
+/// events, current job land in `detail` as agents learn to report them.
+async fn boxes_detail(State(st): State<AppState>) -> R {
+    let rows: Vec<(String, String, Option<i32>, bool, chrono::DateTime<chrono::Utc>, Option<serde_json::Value>)> =
+        sqlx::query_as("SELECT id, role, participant_id, healthy, last_seen, detail FROM boxes ORDER BY id")
+            .fetch_all(&st.db)
+            .await
+            .map_err(oops)?;
+    Ok(Json(json!({
+        "boxes": rows.into_iter().map(|(id, role, pid, healthy, seen, detail)| json!({
+            "id": id, "role": role, "participant_id": pid, "healthy": healthy,
+            "last_seen": seen, "detail": detail,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// Per-student rows for the dashboard: who they are, which box serves them,
+/// what their latest submission is doing, and their best climb.
+async fn participants_status(State(st): State<AppState>) -> R {
+    let rows: Vec<(i32, String, Option<String>, Option<i64>, Option<String>, Option<i32>)> =
+        sqlx::query_as(
+            "SELECT p.id, p.handle, b.id, latest.id, latest.state::text, best.max_level \
+             FROM participants p \
+             LEFT JOIN boxes b ON b.participant_id = p.id \
+             LEFT JOIN LATERAL (SELECT id, state FROM submissions \
+                                WHERE participant_id = p.id \
+                                ORDER BY created_at DESC, id DESC LIMIT 1) latest ON true \
+             LEFT JOIN LATERAL (SELECT max_level FROM submissions \
+                                WHERE participant_id = p.id AND max_level IS NOT NULL \
+                                ORDER BY max_level DESC LIMIT 1) best ON true \
+             ORDER BY p.id",
+        )
+        .fetch_all(&st.db)
+        .await
+        .map_err(oops)?;
+    Ok(Json(json!({
+        "participants": rows.into_iter().map(|(id, handle, box_id, sub, state, level)| json!({
+            "participant_id": id, "handle": handle, "box": box_id,
+            "latest_submission": sub, "latest_state": state, "best_level": level,
+        })).collect::<Vec<_>>(),
+    })))
 }
 
 /// Contest close (PLAN §3 mechanics): Submit refuses from this moment;
