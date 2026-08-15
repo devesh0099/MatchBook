@@ -288,7 +288,7 @@ export default function AdminPage() {
           className="kicker"
           style={{
             display: 'grid',
-            gridTemplateColumns: 'minmax(0,1fr) 96px 130px 70px 84px 70px 104px',
+            gridTemplateColumns: 'minmax(200px,1.4fr) 104px 150px 66px 88px 64px 96px',
             gap: 10,
             padding: '8px 14px',
             borderBottom: '1px solid var(--app-line)',
@@ -309,7 +309,7 @@ export default function AdminPage() {
             className="mono"
             style={{
               display: 'grid',
-              gridTemplateColumns: 'minmax(0,1fr) 96px 130px 70px 84px 70px 104px',
+              gridTemplateColumns: 'minmax(200px,1.4fr) 104px 150px 66px 88px 64px 96px',
               gap: 10,
               padding: '8px 14px',
               borderBottom: '1px solid var(--app-line)',
@@ -317,7 +317,7 @@ export default function AdminPage() {
               fontSize: 12,
             }}
           >
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }} title={b.id}>{b.id}</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }} title={b.id}>{b.id.replace(/^(agent|golden)-ip-/, '').replace(/-0$/, '')}</span>
             <span style={{ color: 'var(--app-ink-2)' }}>
               {b.participant_id != null ? `student ${b.participant_id}` : b.role}
             </span>
@@ -345,7 +345,7 @@ export default function AdminPage() {
           className="kicker"
           style={{
             display: 'grid',
-            gridTemplateColumns: '48px minmax(0,1fr) 170px 56px 128px 34px',
+            gridTemplateColumns: '44px minmax(120px,1.1fr) minmax(190px,1.4fr) 52px 118px 32px',
             padding: '8px 14px',
             borderBottom: '1px solid var(--app-line)',
             letterSpacing: '0.12em',
@@ -375,7 +375,7 @@ export default function AdminPage() {
               className="mono"
               style={{
                 display: 'grid',
-                gridTemplateColumns: '48px minmax(0,1fr) 170px 56px 128px 34px',
+                gridTemplateColumns: '44px minmax(120px,1.1fr) minmax(190px,1.4fr) 52px 118px 32px',
                 alignItems: 'center',
                 padding: '7px 14px',
                 borderBottom: '1px solid var(--app-line)',
