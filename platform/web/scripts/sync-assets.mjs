@@ -33,6 +33,136 @@ function ts(value) {
   return JSON.stringify(value);
 }
 
+// Extract the frozen API surface for the editor's static IntelliSense. The
+// headers are FROZEN and small, so targeted line matching is reliable here in
+// a way it never would be on arbitrary C++ — and generating from the real
+// files means the completions cannot drift from the contract, same reason the
+// editor buffer is generated.
+function parseApi(headers) {
+  const symbols = [];
+  const push = (s) => symbols.push({ doc: '', parent: '', ...s });
+
+  for (const [file, src] of Object.entries(headers)) {
+    const lines = src.split('\n');
+
+    const docAbove = (i) => {
+      const doc = [];
+      for (let j = i - 1; j >= 0; --j) {
+        const t = lines[j].trim();
+        if (t.startsWith('//')) doc.unshift(t.replace(/^\/\/ ?/, ''));
+        else break;
+      }
+      return doc.join('\n');
+    };
+
+    let currentClass = '';
+    let inOutNamespace = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      let m;
+
+      if (/^namespace out \{/.test(line)) inOutNamespace = true;
+      if (/^\}\s*\/\/ namespace out/.test(line)) inOutNamespace = false;
+      if ((m = line.match(/^class (\w+)/))) currentClass = m[1];
+
+      // enum class X : uint8_t { A = 0, B = 1 };   (always one line here)
+      if ((m = line.match(/^enum class (\w+)\s*:\s*\w+\s*\{([^}]*)\};/))) {
+        const [, name, body] = m;
+        push({ kind: 'enum', name, qualified: name, signature: line.trim(), doc: docAbove(i), file });
+        for (const mm of body.matchAll(/(\w+)\s*=\s*(\d+)/g)) {
+          push({
+            kind: 'enumMember',
+            name: mm[1],
+            qualified: `${name}::${mm[1]}`,
+            signature: `${name}::${mm[1]} = ${mm[2]}`,
+            parent: name,
+            file,
+          });
+        }
+        continue;
+      }
+
+      // struct X {  (fields until the closing brace; skips methods/operators)
+      if ((m = line.match(/^struct (?:__attribute__\(\(packed\)\)\s+)?(\w+) \{/))) {
+        const name = m[1];
+        push({ kind: 'struct', name, qualified: name, signature: `struct ${name}`, doc: docAbove(i), file });
+        for (let j = i + 1; j < lines.length && !/^\};/.test(lines[j]); j++) {
+          const f = lines[j].match(/^\s+([A-Za-z_][\w:<>, ]*?)\s+([\w, [\]]+);(?:\s*\/\/\s*(.*))?$/);
+          if (!f) continue;
+          const [, type, namesRaw, comment] = f;
+          for (const fieldName of namesRaw.split(',').map((s) => s.trim().replace(/\[\d+\]$/, ''))) {
+            if (!/^[A-Za-z]\w*$/.test(fieldName)) continue;
+            push({
+              kind: 'field',
+              name: fieldName,
+              qualified: `${name}::${fieldName}`,
+              signature: `${type} ${name}::${fieldName}`,
+              doc: comment ?? '',
+              parent: name,
+              file,
+            });
+          }
+        }
+        continue;
+      }
+
+      // using LevelVec = ...;
+      if ((m = line.match(/^using (\w+) = .+;/))) {
+        push({ kind: 'alias', name: m[1], qualified: m[1], signature: line.trim(), doc: docAbove(i), file });
+        continue;
+      }
+
+      // inline helpers: the out:: constructors and build_book. Signatures may
+      // wrap; accumulate lines until the parameter list closes.
+      if ((m = line.match(/^inline (\w+) (\w+)\(/))) {
+        let sig = line.trim();
+        let j = i;
+        while (!sig.includes(')') && j + 1 < lines.length) sig += ' ' + lines[++j].trim();
+        sig = sig.replace(/\s*\{.*$/, '').replace(/\s+/g, ' ');
+        const name = m[2];
+        push({
+          kind: 'function',
+          name,
+          qualified: inOutNamespace ? `out::${name}` : name,
+          signature: sig,
+          doc: docAbove(i),
+          parent: inOutNamespace ? 'out' : '',
+          file,
+        });
+        continue;
+      }
+
+      // virtual interface methods (on_new, emit, snapshot, bid_levels, ...)
+      if ((m = line.match(/^\s*virtual\s+[\w:]+\s+(\w+)\(.*\).*;/))) {
+        push({
+          kind: 'method',
+          name: m[1],
+          qualified: `${currentClass}::${m[1]}`,
+          signature: line.trim().replace(/^virtual\s+/, '').replace(/\s*=\s*0;$/, ';'),
+          doc: docAbove(i),
+          parent: currentClass,
+          file,
+        });
+        continue;
+      }
+
+      // extern "C" mebench::IMatchingEngine* create_engine();
+      if ((m = line.match(/^extern "C" ([\w:*]+ )?(\w+)\(\);/))) {
+        push({
+          kind: 'function',
+          name: m[2],
+          qualified: m[2],
+          signature: line.trim(),
+          doc: docAbove(i),
+          file,
+        });
+      }
+    }
+  }
+  return symbols;
+}
+
 async function generateBoilerplate() {
   const skeleton = await readFile(join(engine, 'boilerplate/src/engine.cpp'), 'utf8');
 
@@ -73,6 +203,8 @@ async function generateBoilerplate() {
     return `<h${level} id="${id}">${inner}</h${level}>`;
   });
 
+  const api = parseApi(headers);
+
   const out = `// GENERATED by scripts/sync-assets.mjs — do not edit.
 //
 // Regenerated on every build from engine/boilerplate/src/engine.cpp and the
@@ -83,6 +215,20 @@ export const STARTING_BUFFER = ${ts(skeleton)};
 export const HEADERS: Record<string, string> = ${ts(headers)};
 
 export const HEADER_NAMES = ${ts(HEADERS)} as const;
+
+// The frozen API surface, parsed from the headers above, for the editor's
+// static completion and hover providers (lib/cppIntellisense.ts).
+export type ApiSymbol = {
+  kind: 'enum' | 'enumMember' | 'struct' | 'field' | 'alias' | 'function' | 'method';
+  name: string;
+  qualified: string;
+  signature: string;
+  doc: string;
+  parent: string;
+  file: string;
+};
+
+export const API_SYMBOLS: ApiSymbol[] = ${ts(api)};
 
 export const SPEC_MARKDOWN = ${ts(specText)};
 

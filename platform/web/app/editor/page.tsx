@@ -10,6 +10,7 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, isTerminal, type RunResult, type Submission } from '@/lib/api';
 import { HEADER_NAMES, HEADERS, STARTING_BUFFER } from '@/lib/boilerplate.generated';
+import { registerMebenchIntellisense } from '@/lib/cppIntellisense';
 import { useIdentity } from '@/lib/identity';
 import { useTheme } from '@/lib/theme';
 import { inkOf, stateShort } from '@/components/StateTokens';
@@ -18,8 +19,11 @@ import { inkOf, stateShort } from '@/components/StateTokens';
 // to submit; it must not depend on the room's internet.
 loader.config({ paths: { vs: '/monaco/vs' } });
 
-// No LSP, no clangd. The compiler's own errors, shown verbatim, are the
-// feedback loop (impl spec section 3).
+// No LSP, no clangd — diagnostics stay with the compiler, whose errors are
+// shown verbatim after Run (impl spec section 3). Completion and hover for the
+// FROZEN API only come from a static provider generated from the real headers
+// (lib/cppIntellisense.ts); the participant's own symbols get Monaco's plain
+// word-based suggestions.
 const EDITOR_OPTIONS = {
   minimap: { enabled: false },
   fontSize: 12.5,
@@ -29,7 +33,7 @@ const EDITOR_OPTIONS = {
   renderWhitespace: 'selection',
   tabSize: 2,
   automaticLayout: true,
-  quickSuggestions: false,
+  quickSuggestions: true,
   padding: { top: 12, bottom: 12 },
   renderLineHighlight: 'none',
   overviewRulerLanes: 0,
@@ -395,6 +399,7 @@ export default function EditorPage() {
               defaultLanguage="cpp"
               path="engine.cpp"
               keepCurrentModel
+              beforeMount={registerMebenchIntellisense}
               value={source}
               onChange={(v) => {
                 const next = v ?? '';
@@ -411,6 +416,7 @@ export default function EditorPage() {
                 theme={theme === 'dark' ? 'vs-dark' : 'vs'}
                 defaultLanguage="cpp"
                 path={tab}
+                beforeMount={registerMebenchIntellisense}
                 value={shown}
                 options={{ ...EDITOR_OPTIONS, readOnly: true, domReadOnly: true }}
               />
