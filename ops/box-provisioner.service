@@ -10,11 +10,13 @@ Type=simple
 # Config (AMI, subnet, sg, profile, type, region, web ip, pg pass) is written
 # by ops/aws/deploy.sh into this file; AWS creds come from the instance role
 # or a scoped key file referenced here.
+# Runs as root: it reads the root-only secrets (provisioner.env, the sealed
+# seeds) and drives AWS + docker exec. It is deliberately separate from the
+# public API container, which stays unprivileged with no AWS launch rights.
 EnvironmentFile=/opt/flashmatch/provisioner.env
 ExecStart=/opt/flashmatch/ops/box-provisioner.sh
 Restart=always
 RestartSec=5
-User=ubuntu
 
 [Install]
 WantedBy=multi-user.target
