@@ -33,6 +33,8 @@ ISOLATED_CPUS="${ISOLATED_CPUS:-4-7}"
 # against CPU 4 — so a correct setup fails its own gate, on a box where CPU 4
 # may not exist at all.
 export BENCH_CPU="${BENCH_CPU:-4}"
+# Ranked-run seed. Empty = random per submission (the original behaviour).
+BENCH_SEED="${BENCH_SEED:-}"
 
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 
@@ -99,12 +101,19 @@ echo "==> removing everything that could wake up mid-measurement"
 # under snap.amazon-ssm-agent.amazon-ssm-agent.service. Checking the wrong name
 # is worse than not checking: it reports ok for the exact thing it exists to
 # catch.
-# MASK, not disable. Two ways `disable` silently fails, both seen on this AMI:
-# a socket-activated service comes straight back (snapd.service reported
-# "disabled" while running, because snapd.socket was still enabled), and a
-# STATIC unit ignores disable entirely (systemd-tmpfiles-clean.timer re-armed on
-# the next boot). Masking symlinks the unit to /dev/null and survives reboots,
-# which is what matters now that activating CPU isolation requires one.
+# Prefer MASK, fall back to disable. Neither verb alone is sufficient, and both
+# failure modes were seen on this AMI:
+#
+#   disable is silently useless for a socket-activated service (snapd.service
+#   reported "disabled" while running, because snapd.socket was still enabled)
+#   and for a STATIC unit (systemd-tmpfiles-clean.timer re-armed on next boot).
+#
+#   mask is impossible for a unit whose real file sits at the path mask wants
+#   for its /dev/null symlink — which is where snap installs its generated
+#   units, so masking snap.amazon-ssm-agent.amazon-ssm-agent.service fails with
+#   "File ... already exists".
+#
+# Masking survives reboots, which matters now that CPU isolation needs one.
 for svc in amazon-cloudwatch-agent amazon-ssm-agent unattended-upgrades \
            snapd snapd.socket snapd.seeded.service \
            snap.amazon-ssm-agent.amazon-ssm-agent.service \
@@ -114,7 +123,19 @@ for svc in amazon-cloudwatch-agent amazon-ssm-agent unattended-upgrades \
            sysstat-collect.timer sysstat-summary.timer \
            fwupd-refresh.timer update-notifier-download.timer \
            update-notifier-motd.timer; do
-  systemctl mask --now "$svc" 2>/dev/null && echo "    masked $svc" || true
+  # mask, then FALL BACK to disable. `systemctl mask` works by symlinking
+  # /etc/systemd/system/<unit> to /dev/null, so it cannot mask a unit whose real
+  # file already lives at that path — which is exactly where snap installs its
+  # generated units. It fails with "File ... already exists", the `|| true`
+  # swallows it, and snap.amazon-ssm-agent.amazon-ssm-agent.service stays
+  # running: the one agent this list exists to stop. `disable` handles that unit
+  # correctly, and with snapd itself masked nothing re-enables it across a
+  # reboot. Neither verb covers every case, so try both.
+  if systemctl mask --now "$svc" 2>/dev/null; then
+    echo "    masked $svc"
+  elif systemctl disable --now "$svc" 2>/dev/null; then
+    echo "    disabled $svc (mask refused: a real unit file occupies the mask path)"
+  fi
 done
 systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
 
@@ -132,7 +153,11 @@ systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
 remaining=$(systemctl list-timers --no-pager --no-legend 2>/dev/null | awk '{print $NF}' | grep -v '^$' || true)
 for t in $remaining; do
   unit="${t%.service}.timer"
-  systemctl mask --now "$unit" 2>/dev/null && echo "    masked $unit (not in the explicit list — consider adding it)" || true
+  if systemctl mask --now "$unit" 2>/dev/null; then
+    echo "    masked $unit (not in the explicit list — consider adding it)"
+  elif systemctl disable --now "$unit" 2>/dev/null; then
+    echo "    disabled $unit (mask refused; not in the explicit list)"
+  fi
 done
 
 # Masking leaves the unit loaded in a failed state, where list-timers still
@@ -337,6 +362,13 @@ Environment=MEBENCH_GEN=$PREFIX/bin/gen
 Environment=MEBENCH_REFERENCE_SO=$PREFIX/lib/libreference_engine.so
 Environment=MEBENCH_CXX=/usr/bin/g++
 Environment=MEBENCH_MARCH=x86-64-v3
+# Fixed seed for ranked runs. Unset means a fresh random seed per submission,
+# which makes the hidden stream ungameable but measures every submission on a
+# DIFFERENT workload — one identical engine spread 11% on p50 across eleven
+# seeds, so the live leaderboard compares submissions only loosely. Setting it
+# makes the live board directly comparable, at the cost that a participant
+# submitting repeatedly can tune to this one stream. A rejudge overrides it.
+Environment=MEBENCH_BENCH_SEED=$BENCH_SEED
 EnvironmentFile=$PREFIX/worker.env
 ExecStart=/usr/bin/numactl --cpunodebind=0 --membind=0 \\
           /usr/bin/setarch -R /usr/bin/chrt -f 99 /usr/bin/taskset -c $BENCH_CPU \\

@@ -62,6 +62,20 @@ pub struct Config {
     pub harness_bin: String,
     pub gen_bin: String,
     pub reference_so: String,
+    /// Fixed seed for ranked runs, from MEBENCH_BENCH_SEED. None means a fresh
+    /// random seed per submission, which is the original behaviour.
+    ///
+    /// Randomising is what makes the hidden stream ungameable: an engine tuned
+    /// to one book shape gains nothing when the next submission draws another.
+    /// The cost is that two submissions are measured on DIFFERENT workloads, so
+    /// the live leaderboard compares them only loosely — measured at 11% spread
+    /// on p50 for one identical engine across eleven seeds. That is why the
+    /// rejudge pins one seed for everyone and is the authoritative ranking.
+    ///
+    /// Set this to make the live board directly comparable, accepting that a
+    /// participant who submits repeatedly can now tune to the one stream.
+    /// A rejudge still overrides it: pinned_seed takes precedence.
+    pub bench_seed: Option<u64>,
     pub storage: Arc<Storage>,
 }
 
@@ -111,6 +125,8 @@ async fn main() -> Result<()> {
         harness_bin: env_or("MEBENCH_HARNESS", "/opt/mebench/bin/harness"),
         gen_bin: env_or("MEBENCH_GEN", "/opt/mebench/bin/gen"),
         reference_so: env_or("MEBENCH_REFERENCE_SO", "/opt/mebench/lib/libreference_engine.so"),
+        // Unset or unparseable means random-per-submission, as before.
+        bench_seed: std::env::var("MEBENCH_BENCH_SEED").ok().and_then(|v| v.trim().parse().ok()),
         storage,
     };
 
