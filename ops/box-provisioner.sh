@@ -103,6 +103,37 @@ terminate_participant_box(){ # participant_id
   sql "DELETE FROM boxes WHERE participant_id=$pid" >/dev/null
 }
 
+# The operator's staged removal order: verify the instance, destroy it, WAIT
+# until it is actually gone, clean the registry row, and only THEN set
+# removed_at — which is what finally drops the row from the dashboard.
+do_remove(){ # participant_id
+  local pid="$1" iid i state
+  iid=$(sql "SELECT box_instance_id FROM participants WHERE id=$pid" | tr -d '[:space:]')
+  if [[ -n "$iid" && "$iid" != NULL ]]; then
+    set_detail "$pid" "checking instance $iid"
+    state=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$iid" \
+      --query 'Reservations[].Instances[].State.Name' --output text 2>/dev/null | tr -d '[:space:]')
+    if [[ -n "$state" && "$state" != terminated ]]; then
+      set_detail "$pid" "terminating $iid"
+      aws ec2 terminate-instances --region "$REGION" --instance-ids "$iid" >/dev/null 2>&1 || true
+      # wait until the instance is actually gone (or terminated), up to ~3 min
+      for i in $(seq 30); do
+        state=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$iid" \
+          --query 'Reservations[].Instances[].State.Name' --output text 2>/dev/null | tr -d '[:space:]')
+        [[ -z "$state" || "$state" == terminated ]] && break
+        set_detail "$pid" "waiting for shutdown ($state)"
+        sleep 6
+      done
+    fi
+    log "instance $iid gone for participant $pid"
+  fi
+  # only after the box is verified gone: clean the registry row, then remove.
+  set_detail "$pid" "cleaning registry"
+  sql "DELETE FROM boxes WHERE participant_id=$pid" >/dev/null
+  sql "UPDATE participants SET removed_at=now(), box_state='none', box_instance_id=NULL, box_detail=NULL WHERE id=$pid" >/dev/null
+  log "participant $pid removed (box torn down first)"
+}
+
 do_deploy(){ # participant_id
   local pid="$1" iid ip
   set_detail "$pid" "launching instance"
@@ -138,10 +169,13 @@ while true; do
     redeploy)   terminate_participant_box "$pid"; do_deploy "$pid" || ok=0 ;;
     terminate)  terminate_participant_box "$pid"
                 sql "UPDATE participants SET box_state='none', box_instance_id=NULL, box_detail=NULL WHERE id=$pid" >/dev/null ;;
+    remove)     do_remove "$pid" ;;
     *)          log "unknown action $action"; ok=0 ;;
   esac
 
-  if [[ "$action" != terminate ]]; then
+  # deploy/redeploy own the ready/failed transition; terminate and remove set
+  # their own terminal participant state above.
+  if [[ "$action" != terminate && "$action" != remove ]]; then
     if [[ "$ok" == 1 ]]; then
       sql "UPDATE participants SET box_state='ready' WHERE id=$pid" >/dev/null
     else

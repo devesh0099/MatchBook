@@ -363,12 +363,12 @@ export default function AdminPage() {
           const a = p.activity;
           const tone =
             p.box_state === 'failed' ? 'var(--s-fail)' :
-            p.box_state === 'deploying' || p.box_state === 'redeploying' ? 'var(--s-slow)' :
+            p.box_state === 'deploying' || p.box_state === 'redeploying' || p.box_state === 'removing' ? 'var(--s-slow)' :
             a === 'no box' ? 'var(--app-ink-3)' :
             a === 'IDLE' ? 'var(--app-ink-2)' :
             a === 'box unhealthy' ? 'var(--s-fail)' :
             'var(--s-bench)';
-          const busy = p.box_state === 'deploying' || p.box_state === 'redeploying';
+          const busy = p.box_state === 'deploying' || p.box_state === 'redeploying' || p.box_state === 'removing';
           return (
             <div
               key={p.participant_id}

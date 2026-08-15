@@ -292,41 +292,61 @@ async fn terminate_box(State(st): State<AppState>, Path(id): Path<i32>) -> R {
     enqueue_box(&st, id, "terminate", "deploying").await
 }
 
-/// Remove a participant: tear down their box and stop tracking them. Soft —
-/// their submissions survive for the record, but they vanish from the
-/// dashboard, cannot log in, and their box is terminated. Their live session
-/// is revoked immediately.
+/// Remove a participant with a VERIFIED, staged teardown (the operator's
+/// requested order): the participant is not dropped from the list until their
+/// box is confirmed destroyed and its registry row cleaned. Their session is
+/// revoked at once so they cannot act during teardown; their submissions
+/// survive for the record.
+///
+///   has a box  -> box_state='removing', enqueue a 'remove' request; the
+///                 daemon checks the instance, terminates it, waits for it to
+///                 be gone, deletes the box row, THEN sets removed_at (which
+///                 is what finally hides the row from the dashboard).
+///   no box     -> removed immediately; there is nothing to tear down.
 async fn remove_participant(State(st): State<AppState>, Path(id): Path<i32>) -> R {
-    // free the box (only if they have one)
-    let has_box: Option<(String,)> =
+    let box_state: Option<(String,)> =
         sqlx::query_as("SELECT box_state FROM participants WHERE id = $1 AND removed_at IS NULL")
             .bind(id)
             .fetch_optional(&st.db)
             .await
             .map_err(oops)?;
-    if has_box.as_ref().map(|b| b.0.as_str()) == Some("ready")
-        || has_box.as_ref().map(|b| b.0.as_str()) == Some("failed")
-    {
-        // enqueue a terminate so the daemon tears the instance down
-        sqlx::query("INSERT INTO box_requests (participant_id, action) VALUES ($1, 'terminate')")
-            .bind(id)
-            .execute(&st.db)
-            .await
-            .map_err(oops)?;
-    }
-    sqlx::query("UPDATE participants SET removed_at = now(), box_state = 'none' WHERE id = $1")
-        .bind(id)
-        .execute(&st.db)
-        .await
-        .map_err(oops)?;
-    // revoke their session so they cannot keep acting
+    let Some((state,)) = box_state else {
+        return Ok(Json(json!({ "removed": id, "note": "already removed" })));
+    };
+
+    // revoke the session immediately either way
     sqlx::query("DELETE FROM sessions WHERE participant_id = $1")
         .bind(id)
         .execute(&st.db)
         .await
         .map_err(oops)?;
-    log(&st, None, "participant_removed", json!({ "participant_id": id })).await.map_err(oops)?;
-    Ok(Json(json!({ "removed": id })))
+
+    if state == "none" {
+        sqlx::query("UPDATE participants SET removed_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&st.db)
+            .await
+            .map_err(oops)?;
+        log(&st, None, "participant_removed", json!({ "participant_id": id })).await.map_err(oops)?;
+        return Ok(Json(json!({ "removed": id })));
+    }
+
+    // has a box: stage the teardown through the daemon, keep the row visible
+    // (showing "removing…") until the box is verified gone.
+    sqlx::query(
+        "UPDATE participants SET box_state = 'removing', box_detail = 'queued for teardown' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&st.db)
+    .await
+    .map_err(oops)?;
+    sqlx::query("INSERT INTO box_requests (participant_id, action) VALUES ($1, 'remove')")
+        .bind(id)
+        .execute(&st.db)
+        .await
+        .map_err(oops)?;
+    log(&st, None, "participant_removing", json!({ "participant_id": id })).await.map_err(oops)?;
+    Ok(Json(json!({ "removing": id })))
 }
 
 /// Contest close (PLAN §3 mechanics): Submit refuses from this moment;
