@@ -77,6 +77,7 @@ pub fn op_router(state: AppState) -> Router {
         .route("/op/close", post(close_submissions))
         .route("/op/open", post(open_submissions))
         .route("/op/rejudge", post(rejudge))
+        .route("/op/rejudge/status", get(rejudge_status))
         .route("/op/publish-final", post(publish_final))
         .route("/op/logout", post(crate::auth::op_logout))
         .route("/op/session", get(crate::auth::op_session))
@@ -370,6 +371,20 @@ async fn open_submissions(State(st): State<AppState>) -> R {
 /// works"). The golden box claims these; the sealed seed reaches it as
 /// MEBENCH_SEED3 when the operator starts that role, never through here.
 async fn rejudge(State(st): State<AppState>) -> R {
+    // Snapshot the provisional leaderboard AT THIS MOMENT — the standings as
+    // they were before Phase III — so the public board can always show the
+    // pre-rejudge picture no matter how the recomputation later shifts.
+    let provisional = leaderboard_from_db(&st.db).await.map_err(oops)?;
+    let snap = serde_json::to_value(&provisional).map_err(oops)?;
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('pre_phase3_leaderboard', $1) \
+         ON CONFLICT (key) DO UPDATE SET value = $1",
+    )
+    .bind(&snap)
+    .execute(&st.db)
+    .await
+    .map_err(oops)?;
+
     let rows: Vec<(i64,)> = sqlx::query_as(
         "WITH final AS ( \
            SELECT DISTINCT ON (participant_id) id, participant_id, source_hash \
@@ -382,8 +397,64 @@ async fn rejudge(State(st): State<AppState>) -> R {
     .await
     .map_err(oops)?;
 
-    log(&st, None, "rejudge_queued", json!({ "jobs": rows.len() })).await.map_err(oops)?;
+    log(&st, None, "rejudge_queued", json!({ "jobs": rows.len(), "snapshot": provisional.len() }))
+        .await
+        .map_err(oops)?;
     Ok(Json(json!({ "queued": rows.len() })))
+}
+
+/// Phase III live status for the dashboard: the golden box, how far the
+/// rejudge has got, which contestant is being measured right now, and the
+/// final leaderboard forming as results land.
+async fn rejudge_status(State(st): State<AppState>) -> R {
+    let golden: Option<(String, bool, f64, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT id, healthy, EXTRACT(EPOCH FROM (now()-last_seen))::float8, detail \
+         FROM boxes WHERE role = 'golden' ORDER BY last_seen DESC LIMIT 1",
+    )
+    .fetch_optional(&st.db)
+    .await
+    .map_err(oops)?;
+
+    let counts: Vec<(String, i64)> =
+        sqlx::query_as("SELECT state, count(*) FROM rejudge_jobs GROUP BY state")
+            .fetch_all(&st.db)
+            .await
+            .map_err(oops)?;
+    let get = |s: &str| counts.iter().find(|(k, _)| k == s).map(|(_, n)| *n).unwrap_or(0);
+    let total: i64 = counts.iter().map(|(_, n)| *n).sum();
+
+    // which contestant is running now (from the golden box's live job note)
+    let current = golden
+        .as_ref()
+        .and_then(|g| g.3.as_ref())
+        .and_then(|d| d.get("job"))
+        .and_then(|j| j.as_str())
+        .filter(|j| *j != "idle")
+        .map(str::to_string);
+
+    // the final leaderboard forming, ranked by the chain
+    let results: Vec<(String, Option<bool>, Option<f64>, Option<f64>, Option<f64>, Option<i64>)> =
+        sqlx::query_as(
+            "SELECT p.handle, r.finished, r.p95_ns, r.p50_ns, r.p99_ns, r.events_processed \
+             FROM rejudge_results r JOIN participants p ON p.id = r.participant_id \
+             ORDER BY r.finished DESC NULLS LAST, r.p95_ns ASC NULLS LAST, r.p50_ns ASC NULLS LAST",
+        )
+        .fetch_all(&st.db)
+        .await
+        .map_err(oops)?;
+
+    Ok(Json(json!({
+        "golden": golden.map(|(id, healthy, age, detail)| json!({
+            "id": id, "healthy": healthy, "last_seen_secs_ago": age.round(), "detail": detail,
+        })),
+        "progress": { "total": total, "done": get("done"), "running": get("running"),
+                      "pending": get("received"), "errored": get("error") },
+        "current": current,
+        "results": results.into_iter().map(|(handle, finished, p95, p50, p99, ev)| json!({
+            "handle": handle, "finished": finished, "p95_ns": p95, "p50_ns": p50,
+            "p99_ns": p99, "events_processed": ev,
+        })).collect::<Vec<_>>(),
+    })))
 }
 
 async fn publish_final(State(st): State<AppState>) -> R {

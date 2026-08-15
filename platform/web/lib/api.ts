@@ -220,6 +220,9 @@ export const api = {
   /// contest. Empty until the operator publishes them.
   final: () => call<{ published: boolean; entries: FinalEntry[] }>('/final'),
 
+  /// The provisional standings as they stood at the start of Phase III.
+  provisional: () => call<{ entries: LeaderboardEntry[] }>('/provisional'),
+
   /// The one-at-a-time rule, by exactly the check submit() enforces — so the
   /// editor's message can never promise a submission the server would refuse.
   queue: () =>
@@ -291,7 +294,18 @@ export const op = {
   redeployBox: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/redeploy`, { method: 'POST' }),
   terminateBox: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/terminate`, { method: 'POST' }),
   removeParticipant: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/remove`, { method: 'POST' }),
+  rejudgeStatus: () => call<RejudgeStatus>('/op/rejudge/status'),
 };
+
+export interface RejudgeStatus {
+  golden: { id: string; healthy: boolean; last_seen_secs_ago: number; detail: Record<string, unknown> | null } | null;
+  progress: { total: number; done: number; running: number; pending: number; errored: number };
+  current: string | null;
+  results: {
+    handle: string; finished: boolean | null;
+    p95_ns: number | null; p50_ns: number | null; p99_ns: number | null; events_processed: number | null;
+  }[];
+}
 
 /// Which states are still moving. The UI polls every 2s while non-terminal —
 /// plain JSON polling, no websockets.

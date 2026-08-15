@@ -23,6 +23,8 @@ export default function LeaderboardPage() {
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [frozen, setFrozen] = useState(false);
   const [finalEntries, setFinalEntries] = useState<FinalEntry[] | null>(null);
+  const [showProvisional, setShowProvisional] = useState(false);
+  const [provisional, setProvisional] = useState<LeaderboardEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -52,19 +54,113 @@ export default function LeaderboardPage() {
 
   const ranked = entries;
 
-  // Once the golden box has spoken, its standings ARE the contest — the live
-  // board below stays as the day's history.
-  if (finalEntries) {
+  // The provisional board as it stood at the start of Phase III (only
+  // reachable once final standings exist, via the toggle).
+  if (finalEntries && showProvisional) {
     return (
       <div className="page scroll-y">
-        <div style={{ padding: '28px 0 16px', borderBottom: '2px solid var(--app-rule)' }}>
-          <div style={{ fontWeight: 800, fontSize: 38, letterSpacing: '-0.02em', lineHeight: 1 }}>
-            Final standings
+        <div
+          style={{
+            padding: '28px 0 16px',
+            borderBottom: '2px solid var(--app-rule)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-end',
+            gap: 20,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 34, letterSpacing: '-0.02em', lineHeight: 1 }}>
+              Before the rejudge
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--app-ink-2)', marginTop: 8, maxWidth: '70ch' }}>
+              The provisional live standings as they stood when Phase III began — measured on each
+              participant&apos;s own box. The final standings above are the authoritative result.
+            </div>
           </div>
-          <div style={{ fontSize: 13, color: 'var(--app-ink-2)', marginTop: 8 }}>
-            Re-measured after the contest on the golden box, on a sealed stream, from each
-            participant&apos;s last submitted code. p95 ranks first, then p50, then p99.
+          <button
+            onClick={() => setShowProvisional(false)}
+            style={{
+              appearance: 'none', border: '1px solid var(--app-rule)', background: 'transparent',
+              color: 'var(--app-ink)', font: 'inherit', fontWeight: 700, fontSize: 11,
+              letterSpacing: '0.1em', textTransform: 'uppercase', padding: '7px 12px', cursor: 'pointer',
+            }}
+          >
+            ← Back to final standings
+          </button>
+        </div>
+        <div style={{ marginTop: 22, border: '1px solid var(--app-line)' }}>
+          <div className="kicker" style={{ display: 'grid', gridTemplateColumns: COLS, padding: '10px 16px', background: 'var(--app-panel)', borderBottom: '2px solid var(--app-rule)' }}>
+            <span>Rank</span><span>Participant</span>
+            <span style={{ textAlign: 'right' }}>Level</span>
+            <span style={{ textAlign: 'right' }}>p95 ns</span>
+            <span style={{ textAlign: 'right' }}>p50 ns</span>
+            <span style={{ textAlign: 'right' }}>p99 ns</span>
           </div>
+          {provisional.length === 0 && <div style={{ padding: 16, color: 'var(--app-ink-3)' }}>Loading…</div>}
+          {provisional.map((e, i) => (
+            <div key={e.handle} className="mono" style={{ display: 'grid', gridTemplateColumns: COLS, alignItems: 'center', padding: '9px 16px', borderBottom: '1px solid var(--app-line)', fontSize: 13 }}>
+              <span style={{ fontWeight: 700, color: i < 3 ? 'var(--color-accent)' : 'var(--app-ink-3)' }}>{String(i + 1).padStart(2, '0')}</span>
+              <span style={{ fontFamily: 'var(--font-body)', fontWeight: identity?.handle === e.handle ? 800 : 500, fontSize: 14 }}>{e.handle}</span>
+              <span style={{ textAlign: 'right', fontWeight: 700 }}>{e.max_level}</span>
+              <span style={{ textAlign: 'right', fontWeight: 700 }}>{e.chain_p95_ns != null ? Math.round(e.chain_p95_ns) : '—'}</span>
+              <span style={{ textAlign: 'right', color: 'var(--app-ink-2)' }}>{e.chain_p50_ns != null ? Math.round(e.chain_p50_ns) : '—'}</span>
+              <span style={{ textAlign: 'right', color: 'var(--app-ink-3)' }}>{e.chain_p99_ns != null ? Math.round(e.chain_p99_ns) : '—'}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Once the golden box has spoken, its standings ARE the contest — but the
+  // provisional board (as it stood at the start of Phase III) stays viewable.
+  if (finalEntries && !showProvisional) {
+    return (
+      <div className="page scroll-y">
+        <div
+          style={{
+            padding: '28px 0 16px',
+            borderBottom: '2px solid var(--app-rule)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'flex-end',
+            gap: 20,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 38, letterSpacing: '-0.02em', lineHeight: 1 }}>
+              Final standings
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--app-ink-2)', marginTop: 8, maxWidth: '70ch' }}>
+              Re-measured after the contest on the golden box, on a sealed stream, from each
+              participant&apos;s last submitted code. p95 ranks first, then p50, then p99.
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              api.provisional().then((r) => setProvisional(r.entries)).catch(() => {});
+              setShowProvisional(true);
+            }}
+            style={{
+              appearance: 'none',
+              border: '1px solid var(--app-rule)',
+              background: 'transparent',
+              color: 'var(--app-ink)',
+              font: 'inherit',
+              fontWeight: 700,
+              fontSize: 11,
+              letterSpacing: '0.1em',
+              textTransform: 'uppercase',
+              padding: '7px 12px',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            View pre-rejudge board
+          </button>
         </div>
         <div style={{ marginTop: 22, border: '1px solid var(--app-line)' }}>
           <div

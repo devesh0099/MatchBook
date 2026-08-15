@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/me", get(me))
         .route("/leaderboard", get(leaderboard))
         .route("/final", get(final_standings))
+        .route("/provisional", get(provisional_leaderboard))
         .route("/queue", get(queue))
         .route("/health", get(|| async { "ok" }))
         .with_state(state)
@@ -406,6 +407,18 @@ async fn final_standings(State(st): State<AppState>) -> ApiResult<serde_json::Va
     .await
     .map_err(internal)?;
     Ok(Json(json!({ "published": true, "entries": rows })))
+}
+
+/// The provisional (live) standings as they stood the moment Phase III began
+/// — snapshotted at rejudge time. Lets the public board offer a "how it looked
+/// before the rejudge" view alongside the final standings.
+async fn provisional_leaderboard(State(st): State<AppState>) -> ApiResult<serde_json::Value> {
+    let row: Option<(serde_json::Value,)> =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'pre_phase3_leaderboard'")
+            .fetch_optional(&st.db)
+            .await
+            .map_err(internal)?;
+    Ok(Json(json!({ "entries": row.map(|r| r.0).unwrap_or(json!([])) })))
 }
 
 // ---------------------------------------------------------------- status

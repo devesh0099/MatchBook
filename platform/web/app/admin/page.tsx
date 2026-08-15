@@ -8,7 +8,7 @@
 // lane from participant sessions by construction.
 
 import { useCallback, useEffect, useState } from 'react';
-import { op, type OpHealth, type OpParticipantRow } from '@/lib/api';
+import { op, type OpHealth, type OpParticipantRow, type RejudgeStatus } from '@/lib/api';
 
 const field: React.CSSProperties = {
   width: '100%',
@@ -104,10 +104,12 @@ export default function AdminPage() {
   const [newHandle, setNewHandle] = useState('');
   const [confirmAction, setConfirmAction] = useState<string | null>(null);
 
+  const [rejudge, setRejudge] = useState<RejudgeStatus | null>(null);
   const refresh = useCallback(() => {
     op.health().then(setHealth).catch(() => {});
     op.participants().then((r) => setParticipants(r.participants)).catch(() => {});
     op.events().then((r) => setEvents(r.events)).catch(() => {});
+    op.rejudgeStatus().then(setRejudge).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -475,6 +477,90 @@ export default function AdminPage() {
           <ActionButton label="Issue" onClick={() => {}} />
         </form>
       </Panel>
+
+      {rejudge && rejudge.progress.total > 0 && (
+        <Panel
+          title="Phase III · golden-box rejudge"
+          right={
+            <span className="mono" style={{ fontSize: 11, color: 'var(--app-ink-3)' }}>
+              {rejudge.golden
+                ? `golden ${rejudge.golden.healthy && rejudge.golden.last_seen_secs_ago < 60 ? 'live' : 'offline'} · seen ${Math.round(rejudge.golden.last_seen_secs_ago)}s ago`
+                : 'no golden box'}
+            </span>
+          }
+        >
+          <div style={{ padding: '12px 14px' }}>
+            {/* progress */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+              <span className="mono" style={{ fontSize: 20, fontWeight: 800 }}>
+                {rejudge.progress.done}/{rejudge.progress.total}
+              </span>
+              <span className="kicker" style={{ fontWeight: 400 }}>rejudged</span>
+              {rejudge.progress.errored > 0 && (
+                <span className="mono" style={{ color: 'var(--s-fail)', fontSize: 12 }}>
+                  {rejudge.progress.errored} errored
+                </span>
+              )}
+              <div style={{ flex: 1, minWidth: 120, height: 6, background: 'var(--app-line)' }}>
+                <div
+                  style={{
+                    width: `${rejudge.progress.total ? (100 * rejudge.progress.done) / rejudge.progress.total : 0}%`,
+                    height: '100%',
+                    background: 'var(--s-pass)',
+                  }}
+                />
+              </div>
+            </div>
+            {/* who's running now */}
+            <div className="mono" style={{ fontSize: 12, marginTop: 10, color: 'var(--s-bench)', fontWeight: 700 }}>
+              {rejudge.current ? `▶ ${rejudge.current}` : rejudge.progress.done < rejudge.progress.total ? 'starting…' : 'complete'}
+            </div>
+          </div>
+          {/* the final leaderboard forming live */}
+          {rejudge.results.length > 0 && (
+            <>
+              <div
+                className="kicker"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '40px minmax(0,1fr) 100px 90px 90px 120px',
+                  padding: '8px 14px',
+                  borderTop: '1px solid var(--app-line)',
+                  borderBottom: '1px solid var(--app-line)',
+                }}
+              >
+                <span>#</span><span>Handle</span>
+                <span style={{ textAlign: 'right' }}>p95 ns</span>
+                <span style={{ textAlign: 'right' }}>p50 ns</span>
+                <span style={{ textAlign: 'right' }}>p99 ns</span>
+                <span style={{ textAlign: 'right' }}>Outcome</span>
+              </div>
+              {rejudge.results.map((r, i) => (
+                <div
+                  key={r.handle}
+                  className="mono"
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '40px minmax(0,1fr) 100px 90px 90px 120px',
+                    padding: '6px 14px',
+                    borderBottom: '1px solid var(--app-line)',
+                    fontSize: 12,
+                  }}
+                >
+                  <span style={{ fontWeight: 700, color: i < 3 ? 'var(--color-accent)' : 'var(--app-ink-3)' }}>{i + 1}</span>
+                  <span style={{ fontFamily: 'var(--font-body)', fontWeight: 600 }}>{r.handle}</span>
+                  <span style={{ textAlign: 'right', fontWeight: 700 }}>{r.p95_ns ? Math.round(r.p95_ns) : '—'}</span>
+                  <span style={{ textAlign: 'right', color: 'var(--app-ink-2)' }}>{r.p50_ns ? Math.round(r.p50_ns) : '—'}</span>
+                  <span style={{ textAlign: 'right', color: 'var(--app-ink-3)' }}>{r.p99_ns ? Math.round(r.p99_ns) : '—'}</span>
+                  <span style={{ textAlign: 'right', fontWeight: 700, color: r.finished ? 'var(--s-pass)' : 'var(--s-fail)' }}>
+                    {r.finished ? 'finished' : 'DNF'}
+                  </span>
+                </div>
+              ))}
+            </>
+          )}
+        </Panel>
+      )}
 
       <Panel title="Pipeline">
         <div style={{ display: 'flex', gap: 22, padding: '12px 14px', flexWrap: 'wrap' }}>

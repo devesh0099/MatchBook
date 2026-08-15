@@ -570,6 +570,11 @@ pub async fn run_golden(db: PgPool, cfg: Config) -> Result<()> {
             continue;
         };
         tracing::info!("rejudge job {job_id}: participant {participant_id}, submission {submission_id}");
+        // Report which contestant is being measured, so the dashboard's Phase
+        // III panel shows the golden box's live progress.
+        if let Ok(mut j) = cfg.current_job.lock() {
+            *j = format!("rejudge · participant {participant_id} · submission {submission_id}");
+        }
         match rejudge_one(&db, &cfg, &sandbox, seed3, participant_id, submission_id, &hash).await {
             Ok(()) => {
                 sqlx::query("UPDATE rejudge_jobs SET state = 'done', updated_at = now() WHERE id = $1")
@@ -587,6 +592,7 @@ pub async fn run_golden(db: PgPool, cfg: Config) -> Result<()> {
                           serde_json::json!({ "error": e.to_string() })).await?;
             }
         }
+        if let Ok(mut j) = cfg.current_job.lock() { *j = "idle".into(); }
     }
 }
 
