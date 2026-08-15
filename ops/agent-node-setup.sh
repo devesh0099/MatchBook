@@ -222,6 +222,10 @@ Wants=isolate.service
 
 [Service]
 Type=simple
+# %H: systemd does not inherit a HOSTNAME variable, and without it every
+# agent computed the same worker id ("agent-worker-0") — two boxes upserting
+# one registry row.
+Environment=HOSTNAME=%H
 Environment=BOX_ID=0
 Environment=MEBENCH_INCLUDE=$PREFIX/include
 Environment=MEBENCH_TESTS=$PREFIX/tests

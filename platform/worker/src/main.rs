@@ -120,7 +120,16 @@ async fn main() -> Result<()> {
         bucket: env_or("S3_BUCKET", "flashmatch-artifacts"),
     });
 
-    let hostname = env_or("HOSTNAME", "worker");
+    // HOSTNAME is a shell convention, not part of a systemd unit's
+    // environment — and two boxes falling back to the same name upsert one
+    // registry row. /etc/hostname is the authority when the variable is gone.
+    let hostname = std::env::var("HOSTNAME").ok().filter(|h| !h.trim().is_empty()).unwrap_or_else(|| {
+        std::fs::read_to_string("/etc/hostname")
+            .map(|h| h.trim().to_string())
+            .ok()
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| "worker".into())
+    });
     let box_id: u32 = env_or("BOX_ID", "0").parse().unwrap_or(0);
     let cfg = Config {
         worker_id: format!("{role}-{hostname}-{box_id}"),

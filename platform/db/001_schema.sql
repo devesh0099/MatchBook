@@ -100,7 +100,11 @@ CREATE TABLE events_log (                   -- operator audit trail
 CREATE TABLE boxes (
   id             text PRIMARY KEY,
   role           text NOT NULL,             -- agent | golden
-  participant_id int REFERENCES participants(id),
+  -- Deliberately NOT a foreign key: the registry records what each agent
+  -- CLAIMS its binding is, and an agent must be able to register before the
+  -- roster is loaded — a box that came up first crash-looped on the FK. A
+  -- dangling binding is a dashboard-visible condition, not an error.
+  participant_id int,
   instance_id    text,
   ip             text,
   healthy        boolean NOT NULL DEFAULT true,
