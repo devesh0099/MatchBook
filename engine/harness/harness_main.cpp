@@ -41,6 +41,7 @@
 #include "common/decode.h"
 #include "harness/bench.h"
 #include "harness/hash_sink.h"
+#include "harness/solution.h"
 #include "harness/verify.h"
 #include "mebench/wire.h"
 
@@ -54,6 +55,7 @@ constexpr int kExitFailed = 1;
 constexpr int kExitUsage = 2;
 constexpr int kExitTimeout = 3;
 constexpr int kExitUnhealthy = 4;  // the node, not the submission
+constexpr int kExitDeadline = 5;   // the gate: correct so far, too slow to finish
 
 bool g_timeout_json = false;
 
@@ -104,8 +106,24 @@ void usage() {
       "                       stream's own profile needs to fill its book\n"
       "  --digest HEX         the correctness run's digest; a mismatch is its own outcome,\n"
       "                       not a generic failure\n"
+      "  --deadline-ms N      per-run wall budget over the whole run, warm-up included.\n"
+      "                       A miss is a gate failure (exit 5), reported with percentiles\n"
+      "                       up to the cut. 0 disables (default)\n"
+      "  --solution FILE      baked answer key from `harness solve`; validates output at\n"
+      "                       every checkpoint, so a deadline-cut run is still checked\n"
       "  -o FILE              write the JSON result to FILE\n"
-      "  --json               machine-readable result\n");
+      "  --json               machine-readable result\n"
+      "\n"
+      "  harness solve  [stream options] -o FILE [--checkpoint-every N]\n"
+      "                       run the reference once and bake its answer key: checkpoint\n"
+      "                       digests every N events (default 100000) plus the final digest\n"
+      "\n"
+      "  harness ladder --engine ENGINE --levels FILE [--json]\n"
+      "                       climb a level table: each line is\n"
+      "                         ID STREAM SOLUTION DEADLINE_MS\n"
+      "                       ('#' comments allowed). One attempt per level, in order;\n"
+      "                       the climb ends at the first miss. Results stream one line\n"
+      "                       per level as it finishes, then a summary\n");
 }
 
 bool parse_u64(const char* s, uint64_t& out) {
@@ -333,7 +351,7 @@ int run_digest(int argc, char** argv) {
 }
 
 int run_bench(int argc, char** argv) {
-  std::string engine_spec, stream_path, profile_name = "cancel_heavy", json_path;
+  std::string engine_spec, stream_path, profile_name = "cancel_heavy", json_path, solution_path;
   uint64_t seed = 0, events = 0;
   int stream_fd = -1;
   bool have_seed = false, as_json = false, warmup_given = false;
@@ -365,6 +383,10 @@ int run_bench(int argc, char** argv) {
     } else if (a == "--digest" && has_next) {
       opts.expected_digest = std::strtoull(argv[++i], nullptr, 16);
       opts.have_expected_digest = true;
+    } else if (a == "--deadline-ms" && has_next) {
+      opts.deadline_s = std::strtod(argv[++i], nullptr) / 1000.0;
+    } else if (a == "--solution" && has_next) {
+      solution_path = argv[++i];
     } else if (a == "--no-mlock") {
       opts.lock_memory = false;
     } else if ((a == "--json" || a == "-o") && has_next && a == "-o") {
@@ -405,10 +427,34 @@ int run_bench(int argc, char** argv) {
 
 
   std::string err;
+  mebench::harness::Solution sol;
+  if (!solution_path.empty()) {
+    if (!mebench::harness::read_solution(solution_path, sol, err)) {
+      std::fprintf(stderr, "%s\n", err.c_str());
+      return kExitUsage;
+    }
+    if (sol.events != stream.size()) {
+      std::fprintf(stderr, "solution describes %" PRIu64 " events, stream has %zu\n", sol.events,
+                   stream.size());
+      return kExitUsage;
+    }
+    opts.solution = &sol;
+  }
+
   auto engine = mebench::harness::EngineSource::open(engine_spec, err);
   if (!engine) {
     std::fprintf(stderr, "%s\n", err.c_str());
     return kExitUsage;
+  }
+
+  // The asynchronous backstop for an engine stuck inside a callback; bench()
+  // arms the per-run alarm, this installs where it lands.
+  if (opts.deadline_s > 0) {
+    g_timeout_json = as_json;
+    struct sigaction sa {};
+    sa.sa_handler = on_alarm;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGALRM, &sa, nullptr);
   }
 
   const auto r = mebench::harness::bench(stream, *engine, opts);
@@ -429,8 +475,231 @@ int run_bench(int argc, char** argv) {
     case mebench::harness::BenchOutcome::Ok: return kExitPassed;
     case mebench::harness::BenchOutcome::DigestMismatch: return kExitFailed;
     case mebench::harness::BenchOutcome::NodeUnhealthy: return kExitUnhealthy;
+    case mebench::harness::BenchOutcome::DeadlineMissed: return kExitDeadline;
   }
   return kExitFailed;
+}
+
+// `harness solve` — bake the answer key for a fixed stream. The reference runs
+// ONCE, here, at bake time; judge time is a table lookup (solution.h).
+int run_solve(int argc, char** argv) {
+  std::string stream_path, out_path, profile_name = "cancel_heavy";
+  uint64_t seed = 0, events = 0, checkpoint_every = 100000;
+  int stream_fd = -1;
+  bool have_seed = false;
+
+  for (int i = 0; i < argc; ++i) {
+    const std::string a = argv[i];
+    const bool has_next = (i + 1) < argc;
+    if (a == "--stream" && has_next) {
+      stream_path = argv[++i];
+    } else if (a == "--stream-fd" && has_next) {
+      stream_fd = std::atoi(argv[++i]);
+    } else if (a == "--seed" && has_next) {
+      if (!parse_u64(argv[++i], seed)) return usage(), kExitUsage;
+      have_seed = true;
+    } else if (a == "--events" && has_next) {
+      if (!parse_u64(argv[++i], events)) return usage(), kExitUsage;
+    } else if (a == "--profile" && has_next) {
+      profile_name = argv[++i];
+    } else if (a == "--checkpoint-every" && has_next) {
+      if (!parse_u64(argv[++i], checkpoint_every) || checkpoint_every == 0)
+        return usage(), kExitUsage;
+    } else if ((a == "-o" || a == "--out") && has_next) {
+      out_path = argv[++i];
+    } else {
+      std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
+      return kExitUsage;
+    }
+  }
+  if (out_path.empty()) {
+    std::fprintf(stderr, "-o FILE is required\n");
+    return kExitUsage;
+  }
+
+  std::vector<mebench::WireEvent> stream;
+  mebench::Profile stream_profile{};
+  uint32_t stream_live_target = 0;
+  if (!load_stream(stream_path, stream_fd, have_seed, seed, profile_name, events, stream,
+                   stream_profile, stream_live_target))
+    return kExitUsage;
+
+  std::string err;
+  auto engine = mebench::harness::EngineSource::open("builtin", err);
+  if (!engine) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return kExitUsage;
+  }
+
+  mebench::harness::Solution sol;
+  sol.seed = seed;
+  sol.profile_id = static_cast<uint32_t>(stream_profile);
+  sol.events = stream.size();
+  sol.checkpoint_interval = checkpoint_every;
+
+  std::unique_ptr<mebench::IMatchingEngine> e(engine->create());
+  mebench::harness::HashSink sink;
+  for (uint64_t i = 0; i < stream.size(); ++i) {
+    const mebench::DecodedEvent d = mebench::decode(stream[i], i);
+    mebench::dispatch(*e, d, sink);
+    if ((i + 1) % checkpoint_every == 0) sol.checkpoints.push_back(sink.digest());
+  }
+  sol.final_digest = sink.digest();
+
+  if (!mebench::harness::write_solution(out_path, sol, err)) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return kExitFailed;
+  }
+  std::printf("wrote %s: %" PRIu64 " events, %zu checkpoints every %" PRIu64
+              ", final digest %016llx\n",
+              out_path.c_str(), sol.events, sol.checkpoints.size(), sol.checkpoint_interval,
+              static_cast<unsigned long long>(sol.final_digest));
+  return kExitPassed;
+}
+
+// `harness ladder` — Phase II (PLAN-measurement-redesign §3): walk the level
+// table in order, one attempt per level, stop at the first miss. Each level's
+// result is printed AS IT FINISHES: if a later level's stuck engine dies on
+// the SIGALRM backstop, everything already climbed is on stdout.
+int run_ladder(int argc, char** argv) {
+  std::string engine_spec, levels_path;
+  bool as_json = false;
+
+  for (int i = 0; i < argc; ++i) {
+    const std::string a = argv[i];
+    const bool has_next = (i + 1) < argc;
+    if (a == "--engine" && has_next) {
+      engine_spec = argv[++i];
+    } else if (a == "--levels" && has_next) {
+      levels_path = argv[++i];
+    } else if (a == "--json") {
+      as_json = true;
+    } else {
+      std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
+      return kExitUsage;
+    }
+  }
+  if (engine_spec.empty() || levels_path.empty()) {
+    std::fprintf(stderr, "--engine and --levels are required\n");
+    return kExitUsage;
+  }
+
+  struct Level {
+    uint64_t id;
+    std::string stream, solution;
+    double deadline_ms;
+  };
+  std::vector<Level> levels;
+  {
+    std::FILE* f = std::fopen(levels_path.c_str(), "r");
+    if (!f) {
+      std::fprintf(stderr, "could not open %s\n", levels_path.c_str());
+      return kExitUsage;
+    }
+    char line[4096];
+    while (std::fgets(line, sizeof line, f)) {
+      char s1[2048], s2[2048];
+      unsigned long long id = 0;
+      double dl = 0;
+      if (line[0] == '#' || line[0] == '\n') continue;
+      if (std::sscanf(line, "%llu %2047s %2047s %lf", &id, s1, s2, &dl) != 4) {
+        std::fprintf(stderr, "bad level line: %s", line);
+        std::fclose(f);
+        return kExitUsage;
+      }
+      levels.push_back(Level{id, s1, s2, dl});
+    }
+    std::fclose(f);
+  }
+
+  std::string err;
+  auto engine = mebench::harness::EngineSource::open(engine_spec, err);
+  if (!engine) {
+    std::fprintf(stderr, "%s\n", err.c_str());
+    return kExitUsage;
+  }
+
+  // Backstop for an engine stuck inside a callback; bench() arms it per run.
+  g_timeout_json = as_json;
+  struct sigaction sa {};
+  sa.sa_handler = on_alarm;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGALRM, &sa, nullptr);
+
+  uint64_t max_level = 0;
+  double top_p50 = 0, top_p95 = 0, top_p99 = 0;
+  bool stopped = false;
+
+  for (const auto& lv : levels) {
+    if (stopped) break;
+
+    // Streams load per level and free before the next: the top rungs are the
+    // big ones, and two of them resident at once would double peak RSS.
+    std::vector<mebench::WireEvent> stream;
+    mebench::Profile profile{};
+    uint32_t live_target = 0;
+    if (!load_stream(lv.stream, -1, false, 0, "", 0, stream, profile, live_target))
+      return kExitUsage;
+
+    mebench::harness::Solution sol;
+    if (!mebench::harness::read_solution(lv.solution, sol, err)) {
+      std::fprintf(stderr, "%s\n", err.c_str());
+      return kExitUsage;
+    }
+    if (sol.events != stream.size()) {
+      std::fprintf(stderr, "level %" PRIu64 ": solution/stream event count mismatch\n", lv.id);
+      return kExitUsage;
+    }
+
+    mebench::harness::BenchOptions opts;
+    opts.runs = 1;  // one attempt per level, by design
+    opts.deadline_s = lv.deadline_ms / 1000.0;
+    opts.solution = &sol;
+    opts.warmup = std::min<uint64_t>(mebench::generator::warmup_events(profile, live_target),
+                                     stream.size() / 2);
+
+    const auto r = mebench::harness::bench(stream, *engine, opts);
+    const char* outcome = mebench::harness::bench_outcome_name(r.outcome);
+    const auto& run = r.runs.empty() ? mebench::harness::RunResult{} : r.runs.back();
+
+    if (as_json) {
+      std::printf("{\"level\":%" PRIu64 ",\"outcome\":\"%s\",\"events\":%zu,\"deadline_ms\":%g"
+                  ",\"p50_ns\":%g,\"p95_ns\":%g,\"p99_ns\":%g,\"wall_s\":%g"
+                  ",\"events_processed\":%" PRIu64 ",\"checked_events\":%" PRIu64 "}\n",
+                  lv.id, outcome, stream.size(), lv.deadline_ms, run.p50_ns, run.p95_ns,
+                  run.p99_ns, run.wall_s, run.events_processed, run.checked_events);
+    } else {
+      if (r.outcome == mebench::harness::BenchOutcome::Ok) {
+        std::printf("level %-3" PRIu64 " PASS      p95 %.1f ns · p50 %.1f ns · p99 %.1f ns · "
+                    "%.2f s\n",
+                    lv.id, run.p95_ns, run.p50_ns, run.p99_ns, run.wall_s);
+      } else {
+        std::printf("level %-3" PRIu64 " %-9s %" PRIu64 " of %zu events · %s\n", lv.id, outcome,
+                    run.events_processed, stream.size(), r.notes.c_str());
+      }
+    }
+    std::fflush(stdout);
+
+    if (r.outcome == mebench::harness::BenchOutcome::Ok) {
+      max_level = lv.id;
+      top_p50 = run.p50_ns;
+      top_p95 = run.p95_ns;
+      top_p99 = run.p99_ns;
+    } else {
+      stopped = true;
+      if (r.outcome == mebench::harness::BenchOutcome::NodeUnhealthy) return kExitUnhealthy;
+    }
+  }
+
+  if (as_json) {
+    std::printf("{\"summary\":1,\"max_level\":%" PRIu64 ",\"top_p95_ns\":%g,\"top_p50_ns\":%g"
+                ",\"top_p99_ns\":%g,\"climb_complete\":%d}\n",
+                max_level, top_p95, top_p50, top_p99, stopped ? 0 : 1);
+  } else {
+    std::printf("\nclimbed to level %" PRIu64 "%s\n", max_level,
+                stopped ? "" : " — cleared the whole table");
+  }
+  return kExitPassed;
 }
 
 }  // namespace
@@ -444,6 +713,8 @@ int main(int argc, char** argv) {
   if (mode == "verify") return run_verify(argc - 2, argv + 2);
   if (mode == "bench") return run_bench(argc - 2, argv + 2);
   if (mode == "digest") return run_digest(argc - 2, argv + 2);
+  if (mode == "solve") return run_solve(argc - 2, argv + 2);
+  if (mode == "ladder") return run_ladder(argc - 2, argv + 2);
   if (mode == "-h" || mode == "--help") {
     usage();
     return 0;

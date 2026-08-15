@@ -22,6 +22,7 @@ enum class BenchOutcome {
   Ok,
   DigestMismatch,   // passed correctness, diverged on the benchmark stream
   NodeUnhealthy,    // repeated steal-time discards; a human should look
+  DeadlineMissed,   // the gate: too slow to finish the stream in its budget
 };
 
 const char* bench_outcome_name(BenchOutcome o);
@@ -53,6 +54,12 @@ struct RunResult {
   double wall_s = 0.0;  // so the real node measures job cost instead of us estimating it
   uint64_t steal_delta = 0;
   bool discarded = false;
+  // Deadline-cut runs keep everything measured up to the cut: the percentile
+  // chain judges non-finishers too (PLAN-measurement-redesign §3), so the
+  // histogram to the cut is a result, not debris.
+  bool deadline_missed = false;
+  uint64_t events_processed = 0;  // input events dispatched before the cut (= all when it finished)
+  uint64_t checked_events = 0;    // events validated against the solution table (0 = unchecked)
   uint64_t digest = 0;
   /// This run's own percentile distribution. Kept per run so the published
   /// curve can come from the run that actually decided the score.
@@ -86,6 +93,8 @@ struct BenchResult {
 
   uint64_t events_total = 0;
   uint64_t events_timed = 0;
+  double deadline_s = 0.0;        // echoed from the options; 0 = no gate
+  uint64_t events_processed = 0;  // from the run that decided a missed gate
   double tsc_ticks_per_ns = 0.0;
   bool memory_locked = false;
   std::string build_fingerprint;
@@ -107,6 +116,18 @@ struct BenchOptions {
   bool have_expected_digest = false;
   uint32_t max_discards = 3;  // three in a row means the node, not the submission
   bool lock_memory = true;
+
+  // The gate (PLAN-measurement-redesign §3): a per-run wall budget over the
+  // WHOLE run, warm-up included. 0 disables. A miss stops the job — the
+  // remaining runs would only re-measure a failed gate — but the cut run's
+  // percentiles and events_processed are kept and reported.
+  double deadline_s = 0.0;
+
+  // The baked answer key (solution.h). When set, every run's cumulative
+  // digest is recorded at the table's checkpoints and compared: a completed
+  // run must match the final digest, a cut run must match every checkpoint it
+  // passed. Replaces --digest for streams that have a baked solution.
+  const struct Solution* solution = nullptr;
 };
 
 BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engine,

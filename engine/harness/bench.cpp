@@ -1,9 +1,11 @@
 #include "harness/bench.h"
 
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <random>
@@ -11,6 +13,7 @@
 
 #include "common/decode.h"
 #include "harness/hash_sink.h"
+#include "harness/solution.h"
 #include "harness/timing.h"
 
 extern "C" {
@@ -150,6 +153,7 @@ const char* bench_outcome_name(BenchOutcome o) {
     case BenchOutcome::Ok: return "ok";
     case BenchOutcome::DigestMismatch: return "digest_mismatch";
     case BenchOutcome::NodeUnhealthy: return "node_unhealthy";
+    case BenchOutcome::DeadlineMissed: return "deadline_missed";
   }
   return "?";
 }
@@ -253,6 +257,17 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
   r.probe_cost_ns = measure_probe_cost_ns(events, std::min<uint64_t>(events.size(), 2'000'000),
                                           r.tsc_ticks_per_ns);
 
+  // The gate and the answer key. The deadline covers the WHOLE run, warm-up
+  // included; checkpoints anchor to input-event counts from the stream's
+  // start, so warm-up output is validated too.
+  r.deadline_s = opts.deadline_s;
+  const Solution* sol = opts.solution;
+  const uint64_t cp_interval = (sol && sol->checkpoint_interval > 0) ? sol->checkpoint_interval : 0;
+  if (sol) {
+    r.expected_digest = sol->final_digest;
+    r.digest_checked = true;
+  }
+
   uint32_t consecutive_discards = 0;
   uint32_t completed = 0;
 
@@ -270,10 +285,52 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
       return r;
     }
 
+    // The asynchronous backstop for an engine stuck inside a callback: the
+    // in-loop check below only runs between events. The caller installs the
+    // SIGALRM handler; a stuck run dies there with a timeout report.
+    if (opts.deadline_s > 0) alarm(static_cast<unsigned>(std::ceil(opts.deadline_s)) + 5u);
+
+    const auto wall0 = std::chrono::steady_clock::now();
+
+    uint64_t next_cp = cp_interval ? cp_interval : UINT64_MAX;
+    uint64_t cp_entry = 0;    // index into sol->checkpoints
+    uint64_t checked = 0;     // input events validated so far
+    bool cp_mismatch = false;
+    bool cut = false;
+    uint64_t processed = 0;
+
+    // Both loops call this after each dispatch, OUTSIDE the rdtscp pair, so
+    // neither the compare nor the occasional clock read lands in a sample.
+    // Returns false when the run must stop.
+    auto gate = [&](uint64_t done) {
+      if (done == next_cp) {
+        if (sink.digest() != sol->checkpoints[cp_entry]) {
+          cp_mismatch = true;
+          return false;
+        }
+        checked = done;
+        ++cp_entry;
+        next_cp = cp_entry < sol->checkpoints.size() ? (cp_entry + 1) * cp_interval : UINT64_MAX;
+      }
+      if (opts.deadline_s > 0 && (done & 8191u) == 0) {
+        const double el =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count();
+        if (el > opts.deadline_s) {
+          cut = true;
+          return false;
+        }
+      }
+      return true;
+    };
+
     // Warm the branch predictor, caches and the book itself. The digest covers
     // the WHOLE stream, warmup included, so it stays comparable with the
-    // correctness run's digest over the same seed.
-    for (uint64_t i = 0; i < warmup; ++i) dispatch(*e, buf.data()[i], sink);
+    // solution digest over the same seed.
+    for (uint64_t i = 0; i < warmup; ++i) {
+      dispatch(*e, buf.data()[i], sink);
+      processed = i + 1;
+      if (!gate(processed)) break;
+    }
 
     // The timed region is split into windows, and each event is recorded ONCE —
     // into the window histogram, which is folded into the run histogram at each
@@ -287,27 +344,46 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
     std::vector<WindowPoint> timeline;
     timeline.reserve(kTimelineWindows + 1);
 
-    const auto wall0 = std::chrono::steady_clock::now();
-    for (uint64_t i = warmup; i < buf.size(); ++i) {
-      const uint64_t t0 = rdtscp();
-      dispatch(*e, buf.data()[i], sink);
-      const uint64_t t1 = rdtscp();
-      hdr_record_value(window.raw(), static_cast<int64_t>(t1 - t0));
+    if (!cut && !cp_mismatch) {
+      for (uint64_t i = warmup; i < buf.size(); ++i) {
+        const uint64_t t0 = rdtscp();
+        dispatch(*e, buf.data()[i], sink);
+        const uint64_t t1 = rdtscp();
+        hdr_record_value(window.raw(), static_cast<int64_t>(t1 - t0));
+        processed = i + 1;
 
-      if (i - window_start + 1 >= window_size || i + 1 == buf.size()) {
-        timeline.push_back(WindowPoint{
-            static_cast<double>(i + 1 - warmup) / static_cast<double>(timed),
-            window_start,
-            window.at(50.0) / per_ns_live,
-            window.at(95.0) / per_ns_live,
-            window.at(99.0) / per_ns_live,
-        });
-        hdr_add(hist.raw(), window.raw());
-        hdr_reset(window.raw());
-        window_start = i + 1;
+        if (i - window_start + 1 >= window_size || i + 1 == buf.size()) {
+          timeline.push_back(WindowPoint{
+              static_cast<double>(i + 1 - warmup) / static_cast<double>(timed),
+              window_start,
+              window.at(50.0) / per_ns_live,
+              window.at(95.0) / per_ns_live,
+              window.at(99.0) / per_ns_live,
+          });
+          hdr_add(hist.raw(), window.raw());
+          hdr_reset(window.raw());
+          window_start = i + 1;
+        }
+        if (!gate(processed)) break;
       }
     }
     const auto wall1 = std::chrono::steady_clock::now();
+    if (opts.deadline_s > 0) alarm(0);
+
+    // A cut run's partial window still holds real samples — fold them in, so
+    // the percentile chain of a non-finisher covers everything it processed.
+    if (window.count() > 0) {
+      timeline.push_back(WindowPoint{
+          timed ? static_cast<double>(processed > warmup ? processed - warmup : 0) /
+                      static_cast<double>(timed)
+                : 0.0,
+          window_start,
+          window.at(50.0) / per_ns_live,
+          window.at(95.0) / per_ns_live,
+          window.at(99.0) / per_ns_live,
+      });
+      hdr_add(hist.raw(), window.raw());
+    }
 
     if (have_steal) read_steal_time(steal_after);
 
@@ -315,6 +391,9 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
     run.timeline = std::move(timeline);
     run.digest = sink.digest();
     run.steal_delta = have_steal ? (steal_after - steal_before) : 0;
+    run.deadline_missed = cut;
+    run.events_processed = processed;
+    run.checked_events = checked;
     const double per_ns = r.tsc_ticks_per_ns > 0 ? r.tsc_ticks_per_ns : 1.0;
     run.p50_ns = hist.at(50.0) / per_ns;
     run.p95_ns = hist.at(95.0) / per_ns;
@@ -323,6 +402,52 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
     run.mean_ns = hist.mean() / per_ns;
     run.max_ns = hist.max() / per_ns;
     run.wall_s = std::chrono::duration<double>(wall1 - wall0).count();
+
+    // A checkpoint mismatch is a wrong answer, localized between the last
+    // checkpoint that matched and the one that did not. Speed cannot be bought
+    // with wrongness, so the job stops here.
+    if (cp_mismatch) {
+      r.runs.push_back(run);
+      r.digest = run.digest;
+      r.outcome = BenchOutcome::DigestMismatch;
+      std::ostringstream s;
+      s << "output diverged from the baked solution between events " << checked << " and "
+        << next_cp;
+      r.notes = s.str();
+      return r;
+    }
+
+    // The gate. The cut run's percentiles and progress ARE the result — the
+    // rejudge ranks non-finishers on them — and further runs would only
+    // re-measure a failed gate.
+    if (cut) {
+      // The cut run's distribution is published like any other — the rejudge
+      // ranks non-finishers on p99, so the curve behind it must exist.
+      hdr_iter cut_iter;
+      hdr_iter_percentile_init(&cut_iter, hist.raw(), /*ticks_per_half_distance=*/5);
+      while (hdr_iter_next(&cut_iter)) {
+        run.percentiles.push_back(HdrPoint{
+            cut_iter.specifics.percentiles.percentile,
+            static_cast<double>(cut_iter.highest_equivalent_value) / per_ns,
+            static_cast<uint64_t>(cut_iter.cumulative_count),
+        });
+      }
+      r.runs.push_back(run);
+      r.digest = run.digest;
+      r.events_processed = run.events_processed;
+      r.outcome = BenchOutcome::DeadlineMissed;
+      r.p50_ns = run.p50_ns;
+      r.p95_ns = run.p95_ns;
+      r.p99_ns = run.p99_ns;
+      r.p999_ns = run.p999_ns;
+      r.percentiles = run.percentiles;
+      r.timeline = run.timeline;
+      std::ostringstream s;
+      s << "deadline of " << opts.deadline_s << " s missed at " << run.events_processed << " of "
+        << buf.size() << " events; output verified through event " << run.checked_events;
+      r.notes = s.str();
+      return r;
+    }
 
     // The one contamination signal a submission cannot cause itself. Non-zero
     // means a co-tenant took CPU from this run; discard it and try again.
@@ -411,6 +536,10 @@ BenchResult bench(const std::vector<WireEvent>& events, const EngineSource& engi
   if (opts.have_expected_digest && r.digest != opts.expected_digest) {
     r.outcome = BenchOutcome::DigestMismatch;
   }
+  if (sol && r.digest != sol->final_digest) {
+    r.outcome = BenchOutcome::DigestMismatch;
+    if (r.notes.empty()) r.notes = "final digest does not match the baked solution";
+  }
   for (const auto& run : r.runs) {
     if (!run.discarded && run.digest != r.digest) {
       r.outcome = BenchOutcome::DigestMismatch;
@@ -428,6 +557,18 @@ std::string format_bench_report(const BenchResult& r) {
 
   if (r.outcome == BenchOutcome::NodeUnhealthy) {
     s << "NODE UNHEALTHY\n  " << r.notes << "\n";
+    return s.str();
+  }
+  if (r.outcome == BenchOutcome::DeadlineMissed) {
+    const double frac =
+        r.events_total ? 100.0 * static_cast<double>(r.events_processed) / r.events_total : 0.0;
+    s.precision(0);
+    s << "DEADLINE MISSED\n\n  " << r.events_processed << " of " << r.events_total << " events ("
+      << frac << "%) inside " << r.deadline_s << " s.\n";
+    s.precision(1);
+    s << "  The deadline is a gate, not a score. Percentiles up to the cut:\n"
+      << "  p95 " << r.p95_ns << " ns · p50 " << r.p50_ns << " ns · p99 " << r.p99_ns << " ns\n";
+    if (!r.notes.empty()) s << "  " << r.notes << "\n";
     return s.str();
   }
   if (r.outcome == BenchOutcome::DigestMismatch) {
@@ -489,6 +630,7 @@ std::string format_bench_json(const BenchResult& r) {
     << ",\"p50_net_of_probe_ns\":" << (r.p50_ns > r.probe_cost_ns ? r.p50_ns - r.probe_cost_ns : 0.0) << ",\"ci_low_ns\":" << r.ci_low_ns
     << ",\"ci_high_ns\":" << r.ci_high_ns << ",\"discard_count\":" << r.discard_count
     << ",\"events_timed\":" << r.events_timed << ",\"events_total\":" << r.events_total
+    << ",\"deadline_s\":" << r.deadline_s << ",\"events_processed\":" << r.events_processed
     << ",\"tsc_ticks_per_ns\":" << r.tsc_ticks_per_ns
     << ",\"memory_locked\":" << (r.memory_locked ? 1 : 0) << ",\"digest\":\"" << std::hex
     << r.digest << std::dec << "\",\"build_fingerprint\":\"" << r.build_fingerprint << "\"";
@@ -502,7 +644,10 @@ std::string format_bench_json(const BenchResult& r) {
       << ",\"p95_ns\":" << run.p95_ns << ",\"p999_ns\":" << run.p999_ns << ",\"mean_ns\":" << run.mean_ns
       << ",\"max_ns\":" << run.max_ns << ",\"wall_s\":" << run.wall_s
       << ",\"steal_delta\":" << run.steal_delta
-      << ",\"discarded\":" << (run.discarded ? 1 : 0) << "}";
+      << ",\"discarded\":" << (run.discarded ? 1 : 0)
+      << ",\"deadline_missed\":" << (run.deadline_missed ? 1 : 0)
+      << ",\"events_processed\":" << run.events_processed
+      << ",\"checked_events\":" << run.checked_events << "}";
   }
   s << "],\"median_run_index\":" << r.median_run_index << ",\"percentiles\":[";
   for (size_t i = 0; i < r.percentiles.size(); ++i) {

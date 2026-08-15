@@ -49,6 +49,7 @@ add_library(harness_lib STATIC
   harness/invariants.cpp
   harness/verify.cpp
   harness/bench.cpp
+  harness/solution.cpp
   harness/timing.cpp)
 target_include_directories(harness_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(harness_lib PRIVATE MEBENCH_BUILD_FINGERPRINT="${MEBENCH_FINGERPRINT}")
@@ -142,6 +143,17 @@ add_test(NAME bench_digest_mismatch_caught
          COMMAND harness bench --seed 2026 --profile cancel_heavy --events 300000 --runs 2
                  --warmup 50000 --digest deadbeef --engine $<TARGET_FILE:reference_engine>)
 set_tests_properties(bench_digest_mismatch_caught PROPERTIES WILL_FAIL TRUE)
+
+# The M1 gate/solution/ladder machinery, end to end: solve bakes an answer key,
+# bench honors deadlines and checkpoints, ladder climbs and stops at the first
+# miss, a wrong engine is caught by the baked solution, and a stuck engine dies
+# on the SIGALRM backstop (PLAN-measurement-redesign M1).
+add_test(NAME gate_solution_ladder
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/ladder_test.sh
+                 $<TARGET_FILE:gen> $<TARGET_FILE:harness>
+                 $<TARGET_FILE:reference_engine> $<TARGET_FILE:mutant_engine>
+                 ${CMAKE_CURRENT_BINARY_DIR}/ladder_test_work)
+set_tests_properties(gate_solution_ladder PROPERTIES TIMEOUT 300)
 
 # Every mutation must be CAUGHT. A gate that only ever sees correct engines has
 # not been tested (plan section 13).
