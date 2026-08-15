@@ -241,6 +241,14 @@ fi
 if should_run connect; then
   step "binding each box to its participant and starting the agents"
 
+  # The sealed event seeds live ONLY on the web node
+  # (/opt/flashmatch/platform/.seeds, generated from urandom, never printed).
+  # Every box gets them through worker.env; absent the file, the unit's dev
+  # defaults apply — fine for a scratch deployment, never for the event.
+  SEED_LINES="$(node web 'cat /opt/flashmatch/platform/.seeds 2>/dev/null' || true)"
+  [[ -n "$SEED_LINES" ]] && ok "sealed seeds found on the web node (values withheld)" \
+                         || warn "no .seeds on the web node — agents will use DEV seeds"
+
   for (( i = 1; i <= AGENT_COUNT; i++ )); do
     role="agent$i"
     node_selected "$role" || continue
@@ -251,6 +259,7 @@ DATABASE_URL=postgres://mebench:$POSTGRES_PASSWORD@$WEB_PRIVATE_IP:5432/mebench
 S3_BUCKET=$S3_BUCKET_TF
 AWS_REGION=$AWS_REGION_TF
 MEBENCH_PARTICIPANT_ID=$i
+$SEED_LINES
 ENVEOF
 sudo chmod 600 /opt/mebench/worker.env"
     # `restart`, not just `enable --now`: a re-provision installs a fresh
