@@ -196,6 +196,25 @@ std::string t_partial_fill_resting_survives(IMatchingEngine& e) {
   return expect_book(e, 0, 1, 60, 1);
 }
 
+// The aggressor's quantity is consumed EXACTLY by the first order at a level
+// while a second order is still resting there. A match loop that only stops on
+// "level empty" (and not on remaining == 0) walks one order too far and emits a
+// phantom zero-quantity Trade against the second order. The correct output is
+// just the single full-fill Trade; the second order is untouched.
+std::string t_exact_fill_no_zero_qty_trade(IMatchingEngine& e) {
+  Rec r;
+  e.on_new(ord(1, Side::Sell, 10000, 40, 1, 1, 1), r);  // A: 40 @ 10000, firm 1
+  e.on_new(ord(2, Side::Sell, 10000, 60, 2, 1, 2), r);  // B: 60 @ 10000, firm 2 (behind A)
+  r.clear();
+  e.on_new(ord(3, Side::Buy, 10000, 40, 3, 1, 3), r);  // buy exactly 40
+  if (auto d = diff(r.ev, {out::ack(3, rf(3, 1, 3), 10000, Side::Buy),
+                           out::trade(3, rf(1, 1, 1), rf(3, 1, 3), 10000, 40, Side::Buy)});
+      !d.empty()) {
+    return d;
+  }
+  return expect_book(e, 0, 1, 60, 1);  // only B (60) rests; no phantom fill
+}
+
 // A4: a marketable limit that only partially fills rests its remainder
 // silently — no second Ack, no Expired.
 std::string t_marketable_limit_rests_remainder(IMatchingEngine& e) {
@@ -769,6 +788,7 @@ const Case kCases[] = {
     {"price_priority_best_first", "§1.1 Core", t_price_priority},
     {"time_priority_fifo_within_level", "§1.1 Core", t_time_priority_fifo},
     {"partial_fill_resting_order_survives", "§1.1 Core", t_partial_fill_resting_survives},
+    {"exact_fill_no_zero_qty_trade", "§1.1 Core", t_exact_fill_no_zero_qty_trade},
     {"marketable_limit_rests_remainder_silently", "A4", t_marketable_limit_rests_remainder},
     {"limit_order_respects_its_limit_price", "§1.1 Core", t_limit_price_bound},
     {"book_is_never_left_crossed", "invariants", t_book_never_crossed},
