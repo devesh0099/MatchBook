@@ -1,12 +1,9 @@
 # Matching Engine Challenge — Specification
 
-Version 1.1. Normative. Where the reference implementation and this document
-disagree, this document wins and the reference is a bug.
-
 You implement `create_engine()` in one translation unit, `engine.cpp`. Your engine
 receives decoded order events and emits output events into a sink. Grading is two
 stages: a **correctness gate** (pass or fail) and, once passed, a **latency benchmark**
-ranked on p50 per-event latency.
+ranked on p95 per-event latency.
 
 Three definitions the rules depend on:
 
@@ -209,19 +206,19 @@ model is explicit:
 
 ### 3.2 How you are scored
 
-- **Within one run:** ~10.3M per-event latencies → HdrHistogram → **p50 is your score for
-  that run**. p99 and p99.9 are reported but not ranked.
+- **Within one run:** ~10.3M per-event latencies → HdrHistogram → **p95 is your score for
+  that run**. p50 and p99 are the tiebreakers; p99.9 is reported but not ranked.
 - **Across runs:** the run is repeated 9 times → **your score is the median of the nine
-  per-run p50s**.
+  per-run p95s**.
 
 Per-event latencies are never averaged across runs.
 
 Positions are exact, **sorted by score ascending**. You are ranked on your **best**
 submission, not your latest — a later experiment that measures worse costs you nothing.
-Identical scores break on the **earlier submission**: if two engines measure the same, the
-one that got there first is placed above.
+Equal p95 scores break on **p50**, then **p99**; if all three still tie, the **earlier
+submission** is placed above.
 
-A confidence interval across your nine per-run medians is published beside each score. It
+A confidence interval across your nine per-run p95s is published beside each score. It
 shows how separated a close pair really is; it does **not** affect rank.
 
 ## 4. Contest rules
