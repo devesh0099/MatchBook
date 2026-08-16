@@ -89,17 +89,10 @@ MEBENCH_COMPILE_CPUS=0
 MEBENCH_BAKE=/opt/mebench/bake
 ENVEOF
 sudo chmod 600 /opt/mebench/worker.env" || return 1
-  # Heal the baked boot-deadlock BEFORE touching the agent. The current AMI
-  # ships mebench-tune.service with `After=multi-user.target` while it is
-  # WantedBy that target, so a fresh launch deadlocks: the target waits for
-  # tune, tune waits for the target, and cloud-init + the agent hang forever.
-  # Drop that edge and reload so the box can actually reach multi-user.target.
-  # (agent-node-setup.sh fixes this at the source; this covers already-baked
-  # AMIs and is a harmless no-op once one is re-baked.)
-  ssh_box "$ip" "sudo sed -i '/^After=multi-user.target\$/d' /etc/systemd/system/mebench-tune.service; sudo systemctl daemon-reload; sudo systemctl start mebench-tune.service 2>/dev/null" || return 1
-  # Start the agent under a REMOTE timeout: even if the box is wedged for some
-  # other reason, `systemctl restart` must never block the daemon indefinitely
-  # (there is no exec timeout on the SSH itself) — a bounded failure lets the
+  # Enable + start the agent (the fleet AMI ships it disabled and unbound —
+  # no baked worker.env — so it only ever runs once bound here). Under a REMOTE
+  # timeout so `systemctl restart` can never block the daemon indefinitely
+  # (there is no exec timeout on the SSH itself): a bounded failure lets the
   # request fall to 'failed' and surface a Retry instead of hanging on
   # "provisioning" forever.
   ssh_box "$ip" 'sudo systemctl enable mebench-agent >/dev/null 2>&1; sudo timeout 90 systemctl restart mebench-agent && sleep 3 && systemctl is-active mebench-agent' || return 1
