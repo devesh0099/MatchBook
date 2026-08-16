@@ -160,7 +160,7 @@ export default function SubmissionAnalytics({
                 {verify.reproducer
                   .map(
                     (e) =>
-                      `#${e.seq} ${e.type} ${e.side ?? ''} ${e.tif ?? ''} px=${e.px} qty=${e.qty} session=${e.session} coid=${e.coid}`,
+                      `#${e.seq} ${e.type} ${e.side ?? ''} ${e.tif ?? ''} price=${e.price} qty=${e.qty} session=${e.session} coid=${e.coid}`,
                   )
                   .join('\n')}
               </pre>
