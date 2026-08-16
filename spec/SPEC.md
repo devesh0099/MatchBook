@@ -196,19 +196,16 @@ model is explicit:
 ### 3.2 How you are scored
 
 - **Within one run:** the per-event latencies feed an HdrHistogram, and **p95 is your
-  score for that run**. p50 and p99 are the tiebreakers; p99.9 is reported but not ranked.
+  score for that run**. p50 and p99 are the tiebreakers.
 - **Across runs:** each benchmark is repeated several times, and **your score is the
   median of the per-run p95s**.
 
 Per-event latencies are never averaged across runs.
 
 Positions are exact, **sorted by score ascending**. You are ranked on your **best**
-submission, not your latest, so a later experiment that measures worse costs you nothing.
-Equal p95 scores break on **p50**, then **p99**; if all three still tie, the **earlier
-submission** is placed above.
-
-A confidence interval across your per-run results is published beside each score. It
-shows how separated a close pair really is; it does **not** affect rank.
+submission, so a later experiment that measures worse never costs you. Equal p95 scores
+break on **p50**, then **p99**; if all three still tie, the **earlier submission** is
+placed above.
 
 ## 4. Contest rules
 

@@ -76,12 +76,6 @@ export default function SpecPage() {
           </nav>
 
           <div style={{ minWidth: 0 }}>
-            <p style={{ fontSize: 15, lineHeight: 1.65, maxWidth: '68ch' }}>
-              This document is normative. Where the reference implementation and this document
-              disagree, this document wins and the reference is a bug. Everything in the three
-              header tabs is frozen and compiled as-is on the server, which is why your copy of them
-              is read-only.
-            </p>
             <div
               style={{
                 borderLeft: '3px solid var(--color-accent)',

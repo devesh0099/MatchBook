@@ -452,10 +452,14 @@ async fn rejudge(State(st): State<AppState>) -> R {
     .await
     .map_err(oops)?;
 
+    // The golden box rejudges each participant's BEST submission, not their
+    // latest — the same one the live board ranks. The `leaderboard` view
+    // already picks it (highest level, then the p95/p50/p99 chain), so a
+    // later experiment that measured worse never costs a finalist their peak.
     let rows: Vec<(i64,)> = sqlx::query_as(
         "WITH final AS ( \
-           SELECT DISTINCT ON (participant_id) id, participant_id, source_hash \
-           FROM submissions ORDER BY participant_id, created_at DESC, id DESC) \
+           SELECT l.submission_id AS id, l.participant_id AS participant_id, s.source_hash \
+           FROM leaderboard l JOIN submissions s ON s.id = l.submission_id) \
          INSERT INTO rejudge_jobs (participant_id, submission_id, source_hash) \
          SELECT participant_id, id, source_hash FROM final \
          RETURNING id",
