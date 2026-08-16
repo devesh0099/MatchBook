@@ -92,9 +92,9 @@ export default function SpecPage() {
                 maxWidth: '66ch',
               }}
             >
-              Ranking is p50 latency per event, taken as the median of nine per-run medians.
-              Correctness is binary and comes first: an engine that is wrong is not ranked at all,
-              however fast it is.
+              Ranking is p95 latency per event, taken as the median of nine per-run p95s
+              (p50 then p99 break ties). Correctness is binary and comes first: an engine
+              that is wrong is not ranked at all, however fast it is.
             </div>
 
             {/* Build-time content from our own repo; there is no untrusted input path here. */}

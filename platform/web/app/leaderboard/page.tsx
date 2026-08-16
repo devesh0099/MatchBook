@@ -1,9 +1,9 @@
 'use client';
 
-// Ranked on p50, ascending. Correctness is a gate, not a tiebreak: nothing
+// Ranked on p95, ascending. Correctness is a gate, not a tiebreak: nothing
 // reaches this table until it has passed the hidden check.
 //
-// The row order is the SERVER's, not ours. Equal p50s break on the earlier
+// The row order is the SERVER's, not ours. Equal p95s break on the earlier
 // submission, and that timestamp is deliberately not in the payload — so a
 // client-side sort could only ever get ties wrong. Render in the order given.
 //
@@ -248,8 +248,8 @@ export default function LeaderboardPage() {
             Leaderboard
           </div>
           <div style={{ fontSize: 13, color: 'var(--app-ink-2)', marginTop: 8, maxWidth: '74ch' }}>
-            Ranked on p50 nanoseconds per event, ascending. Equal scores rank on the earlier
-            submission. Correctness is a gate, not a tiebreak.
+            Ranked on p95 nanoseconds per event, ascending. Equal scores rank on p50, then
+            p99, then the earlier submission. Correctness is a gate, not a tiebreak.
           </div>
         </div>
         <div className="mono" style={{ fontSize: 11, color: 'var(--app-ink-3)', textAlign: 'right' }}>

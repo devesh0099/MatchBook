@@ -99,7 +99,7 @@ export function TopBar() {
             textTransform: 'uppercase',
           }}
         >
-          p50 · ns/event
+          p95 · ns/event
         </div>
       </div>
 
