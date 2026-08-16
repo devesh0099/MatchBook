@@ -41,6 +41,12 @@ CREATE TABLE participants (
   -- log in, and their box is torn down — but their submissions survive for
   -- the record. Never hard-delete mid-event; that would orphan results.
   removed_at      timestamptz,
+  -- Hidden from the PUBLIC leaderboard (and the Phase III rejudge selection)
+  -- without losing platform access: a forfeited entrant who still wants to use
+  -- the tooling keeps logging in, running, and submitting, but never appears on
+  -- the board. Toggled live by ops/hide-participant.sh; the leaderboard view
+  -- filters on it. Distinct from removed_at, which revokes access entirely.
+  hidden      boolean NOT NULL DEFAULT false,
   created_at  timestamptz DEFAULT now()
 );
 
@@ -254,7 +260,7 @@ SELECT DISTINCT ON (s.participant_id)
        s.created_at
 FROM submissions s
 JOIN participants p ON p.id = s.participant_id
-WHERE s.state = 'done' AND s.max_level IS NOT NULL
+WHERE s.state = 'done' AND s.max_level IS NOT NULL AND p.hidden IS NOT TRUE
 ORDER BY s.participant_id,
          s.max_level DESC,
          CASE WHEN s.max_level > 0 THEN s.top_p95_ns
