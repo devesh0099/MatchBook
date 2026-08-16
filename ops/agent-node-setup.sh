@@ -157,7 +157,11 @@ chmod +x /usr/local/sbin/mebench-tune
 cat > /etc/systemd/system/mebench-tune.service <<'EOF'
 [Unit]
 Description=mebench box tuning
-After=multi-user.target
+# NOT After=multi-user.target: this unit is WantedBy that target, so ordering
+# after it deadlocks — the target waits for tune to start while tune waits for
+# the target to be reached, and the whole boot (cloud-init, the agent) hangs.
+# Order after basic.target instead; it runs as part of reaching multi-user.
+After=basic.target
 
 [Service]
 Type=oneshot
