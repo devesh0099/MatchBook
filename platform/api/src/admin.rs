@@ -28,7 +28,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::state::{leaderboard_from_db, AppState};
+use crate::routes::{SubmissionRow, SUBMISSION_COLUMNS};
+use crate::state::{leaderboard_from_db, AppState, Storage};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -51,6 +52,8 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/health", get(health_summary))
         .route("/admin/boxes", get(boxes_detail))
         .route("/admin/participants/status", get(participants_status))
+        .route("/admin/participants/:id/submissions", get(student_submissions))
+        .route("/admin/submissions/:id", get(submission_detail))
         .with_state(state)
 }
 
@@ -64,6 +67,8 @@ pub fn op_router(state: AppState) -> Router {
         .route("/op/health", get(health_summary))
         .route("/op/boxes", get(boxes_detail))
         .route("/op/participants/status", get(participants_status))
+        .route("/op/participants/:id/submissions", get(student_submissions))
+        .route("/op/submissions/:id", get(submission_detail))
         .route("/op/participants/:id/deploy", post(deploy_box))
         .route("/op/participants/:id/redeploy", post(redeploy_box))
         .route("/op/participants/:id/terminate", post(terminate_box))
@@ -258,6 +263,53 @@ async fn participants_status(State(st): State<AppState>) -> R {
             })
         }).collect::<Vec<_>>(),
     })))
+}
+
+// -------------------------------------------------- student monitoring
+
+/// Every submission a student has made, newest first — the operator's
+/// drill-down list. The same SubmissionRow the participant view returns, minus
+/// the owner filter, because the operator sees everyone.
+async fn student_submissions(State(st): State<AppState>, Path(id): Path<i32>) -> R {
+    let rows: Vec<SubmissionRow> = sqlx::query_as(&format!(
+        "SELECT {SUBMISSION_COLUMNS} FROM submissions WHERE participant_id = $1 \
+         ORDER BY created_at DESC, id DESC"
+    ))
+    .bind(id)
+    .fetch_all(&st.db)
+    .await
+    .map_err(oops)?;
+    let handle: Option<(String,)> = sqlx::query_as("SELECT handle FROM participants WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&st.db)
+        .await
+        .map_err(oops)?;
+    Ok(Json(json!({
+        "participant_id": id,
+        "handle": handle.map(|h| h.0),
+        "submissions": rows,
+    })))
+}
+
+/// One submission in full — every phase blob plus the source the worker only
+/// ever saw as a hash, fetched back from S3 for the operator's benchmark view.
+async fn submission_detail(State(st): State<AppState>, Path(id): Path<i64>) -> R {
+    let row: Option<SubmissionRow> =
+        sqlx::query_as(&format!("SELECT {SUBMISSION_COLUMNS} FROM submissions WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&st.db)
+            .await
+            .map_err(oops)?;
+    let Some(row) = row else {
+        return Err((axum::http::StatusCode::NOT_FOUND, "no such submission".to_string()));
+    };
+    // Source is best-effort: a missing blob must not 500 the whole view — the
+    // analytics still render, with the code area simply empty.
+    let source = match st.s3.get(&Storage::source_key(&row.source_hash)).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => String::new(),
+    };
+    Ok(Json(json!({ "submission": row, "source": source })))
 }
 
 // -------------------------------------------------- box lifecycle (M8)

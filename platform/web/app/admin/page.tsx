@@ -8,7 +8,8 @@
 // lane from participant sessions by construction.
 
 import { useCallback, useEffect, useState } from 'react';
-import { op, type OpHealth, type OpParticipantRow, type RejudgeStatus } from '@/lib/api';
+import { op, stateLabel, type OpHealth, type OpParticipantRow, type RejudgeStatus, type Submission } from '@/lib/api';
+import SubmissionAnalytics from '@/components/SubmissionAnalytics';
 
 const field: React.CSSProperties = {
   width: '100%',
@@ -101,6 +102,170 @@ function ActionButton({
   );
 }
 
+// Student monitoring: a modal that drills from a student to all their
+// submissions, and from one submission to its full benchmark analytics +
+// source. Two views in one overlay — the list, then a chosen submission.
+function StudentInspector({
+  pid,
+  handle,
+  onClose,
+}: {
+  pid: number;
+  handle: string;
+  onClose: () => void;
+}) {
+  const [subs, setSubs] = useState<Submission[] | null>(null);
+  const [sel, setSel] = useState<number | null>(null);
+  const [detail, setDetail] = useState<{ submission: Submission; source: string } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let stop = false;
+    op.studentSubmissions(pid)
+      .then((r) => { if (!stop) setSubs(r.submissions); })
+      .catch((e) => { if (!stop) setErr(String((e as Error).message ?? e)); });
+    return () => { stop = true; };
+  }, [pid]);
+
+  useEffect(() => {
+    if (sel == null) { setDetail(null); return; }
+    let stop = false;
+    setDetail(null);
+    setErr(null);
+    op.submissionDetail(sel)
+      .then((r) => { if (!stop) setDetail(r); })
+      .catch((e) => { if (!stop) setErr(String((e as Error).message ?? e)); });
+    return () => { stop = true; };
+  }, [sel]);
+
+  const chip = (s: Submission) => {
+    const good = s.state === 'done';
+    const bad = s.state.endsWith('_failed') || s.state === 'error' || s.state === 'verify_timeout';
+    return good ? 'var(--s-pass)' : bad ? 'var(--s-fail)' : 'var(--s-bench)';
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 50,
+        background: 'rgba(0,0,0,0.55)',
+        display: 'flex', justifyContent: 'center', alignItems: 'flex-start',
+        padding: '5vh 16px', overflow: 'auto',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: 'var(--app-bg)', border: '1px solid var(--app-rule)',
+          width: 'min(940px, 100%)', maxHeight: '90vh', overflow: 'auto',
+          boxShadow: '0 24px 70px rgba(0,0,0,0.45)',
+        }}
+      >
+        <div
+          style={{
+            position: 'sticky', top: 0, zIndex: 1,
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+            padding: '12px 16px', background: 'var(--app-panel)',
+            borderBottom: '2px solid var(--app-rule)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, minWidth: 0 }}>
+            {sel != null && (
+              <button
+                onClick={() => setSel(null)}
+                className="mono"
+                style={{ appearance: 'none', border: '1px solid var(--app-rule)', background: 'transparent', color: 'var(--app-ink)', font: 'inherit', fontSize: 11, fontWeight: 700, padding: '4px 9px', cursor: 'pointer' }}
+              >
+                ← submissions
+              </button>
+            )}
+            <span style={{ fontWeight: 800, fontSize: 16 }}>{handle}</span>
+            <span className="mono" style={{ fontSize: 12, color: 'var(--app-ink-3)' }}>
+              {sel != null ? `submission #${sel}` : `participant ${pid}`}
+            </span>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            style={{ appearance: 'none', border: 0, background: 'transparent', color: 'var(--app-ink-3)', font: 'inherit', fontSize: 20, lineHeight: 1, cursor: 'pointer', padding: '0 4px' }}
+          >
+            ×
+          </button>
+        </div>
+
+        <div style={{ padding: '4px 16px 20px' }}>
+          {err && (
+            <div className="mono" style={{ color: 'var(--s-fail)', fontSize: 12, padding: '12px 0' }}>{err}</div>
+          )}
+
+          {/* View 1 — the submission list */}
+          {sel == null && (
+            <>
+              {subs == null && !err && (
+                <div style={{ padding: '16px 0', color: 'var(--app-ink-3)' }}>Loading…</div>
+              )}
+              {subs != null && subs.length === 0 && (
+                <div style={{ padding: '16px 0', color: 'var(--app-ink-3)', fontSize: 13 }}>
+                  No submissions yet.
+                </div>
+              )}
+              {subs != null && subs.length > 0 && (
+                <div style={{ border: '1px solid var(--app-line)', marginTop: 14 }}>
+                  <div
+                    className="kicker"
+                    style={{ display: 'grid', gridTemplateColumns: '58px 1fr 120px 52px 110px', padding: '8px 12px', borderBottom: '1px solid var(--app-line)' }}
+                  >
+                    <span>#</span><span>State</span><span>When</span>
+                    <span style={{ textAlign: 'right' }}>Lvl</span>
+                    <span style={{ textAlign: 'right' }}>p95 ns</span>
+                  </div>
+                  {subs.map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => setSel(s.id)}
+                      className="mono"
+                      style={{
+                        display: 'grid', gridTemplateColumns: '58px 1fr 120px 52px 110px',
+                        alignItems: 'center', width: '100%', textAlign: 'left',
+                        appearance: 'none', border: 0, borderBottom: '1px solid var(--app-line)',
+                        background: 'transparent', color: 'var(--app-ink)', font: 'inherit',
+                        fontSize: 12, padding: '9px 12px', cursor: 'pointer',
+                      }}
+                    >
+                      <span style={{ color: 'var(--app-ink-3)' }}>{s.id}</span>
+                      <span style={{ color: chip(s), fontWeight: 700 }}>{stateLabel(s.state)}</span>
+                      <span style={{ color: 'var(--app-ink-3)' }}>
+                        {s.created_at ? new Date(s.created_at).toLocaleString() : '—'}
+                      </span>
+                      <span style={{ textAlign: 'right', fontWeight: 700 }}>
+                        {s.max_level != null ? s.max_level : '—'}
+                      </span>
+                      <span style={{ textAlign: 'right' }}>
+                        {s.top_p95_ns != null ? Math.round(s.top_p95_ns).toLocaleString()
+                          : s.phase1?.p95_ns != null ? Math.round(s.phase1.p95_ns).toLocaleString() : '—'}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* View 2 — one submission's analytics + source */}
+          {sel != null && (
+            detail == null && !err ? (
+              <div style={{ padding: '16px 0', color: 'var(--app-ink-3)' }}>Loading…</div>
+            ) : detail != null ? (
+              <SubmissionAnalytics sub={detail.submission} source={detail.source} />
+            ) : null
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AdminPage() {
   const [operator, setOperator] = useState<boolean | null>(null);
   const [email, setEmail] = useState('');
@@ -116,6 +281,7 @@ export default function AdminPage() {
   const [confirmAction, setConfirmAction] = useState<string | null>(null);
 
   const [rejudge, setRejudge] = useState<RejudgeStatus | null>(null);
+  const [inspect, setInspect] = useState<{ pid: number; handle: string } | null>(null);
   const refresh = useCallback(() => {
     op.health().then(setHealth).catch(() => {});
     op.participants().then((r) => setParticipants(r.participants)).catch(() => {});
@@ -414,7 +580,19 @@ export default function AdminPage() {
               }}
             >
               <span style={{ color: 'var(--app-ink-3)' }}>{p.participant_id}</span>
-              <span style={{ fontFamily: 'var(--font-body)', fontWeight: 600, fontSize: 13 }}>{p.handle}</span>
+              <button
+                onClick={() => setInspect({ pid: p.participant_id, handle: p.handle })}
+                title="View this student's submissions and benchmarks"
+                style={{
+                  appearance: 'none', border: 0, background: 'transparent', padding: 0,
+                  font: 'inherit', fontFamily: 'var(--font-body)', fontWeight: 600, fontSize: 13,
+                  color: 'var(--app-ink)', textAlign: 'left', cursor: 'pointer',
+                  textDecoration: 'underline', textDecorationColor: 'var(--app-line)',
+                  textUnderlineOffset: 3,
+                }}
+              >
+                {p.handle}
+              </button>
               <span
                 style={{
                   color: tone,
@@ -635,6 +813,14 @@ export default function AdminPage() {
           </div>
         ))}
       </Panel>
+
+      {inspect && (
+        <StudentInspector
+          pid={inspect.pid}
+          handle={inspect.handle}
+          onClose={() => setInspect(null)}
+        />
+      )}
     </div>
   );
 }

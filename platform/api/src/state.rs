@@ -35,6 +35,20 @@ impl Storage {
         Ok(())
     }
 
+    /// Fetch a blob back — the operator's submission view reads the source the
+    /// worker only ever saw as a hash.
+    pub async fn get(&self, key: &str) -> Result<Vec<u8>> {
+        let out = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await?;
+        let data = out.body.collect().await?.into_bytes().to_vec();
+        Ok(data)
+    }
+
     pub fn source_key(hash: &str) -> String {
         format!("source/{hash}.cpp")
     }

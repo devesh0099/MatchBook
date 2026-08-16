@@ -295,6 +295,14 @@ export const op = {
   terminateBox: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/terminate`, { method: 'POST' }),
   removeParticipant: (id: number) => call<Record<string, unknown>>(`/op/participants/${id}/remove`, { method: 'POST' }),
   rejudgeStatus: () => call<RejudgeStatus>('/op/rejudge/status'),
+  // Student monitoring: drill into a participant's submissions, then one
+  // submission's full analytics + source.
+  studentSubmissions: (id: number) =>
+    call<{ participant_id: number; handle: string | null; submissions: Submission[] }>(
+      `/op/participants/${id}/submissions`,
+    ),
+  submissionDetail: (id: number) =>
+    call<{ submission: Submission; source: string }>(`/op/submissions/${id}`),
 };
 
 export interface RejudgeStatus {

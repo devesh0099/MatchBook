@@ -292,7 +292,7 @@ pub struct SubmissionRow {
     pub top_p99_ns: Option<f64>,
 }
 
-const SUBMISSION_COLUMNS: &str = "id, participant_id, source_hash, state, created_at, updated_at, \
+pub(crate) const SUBMISSION_COLUMNS: &str = "id, participant_id, source_hash, state, created_at, updated_at, \
      phase0, phase1, phase2, max_level, top_p50_ns, top_p95_ns, top_p99_ns";
 
 /// Owner-only; a foreign id reads as NOT FOUND, leaking neither content nor
