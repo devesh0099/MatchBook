@@ -65,3 +65,30 @@ output "admin_tunnel" {
   description = "The operator API has no authentication. Reaching it IS SSH access to the web node."
   value       = "ssh -i ${local.identity} -N -L 8081:127.0.0.1:8081 ubuntu@${aws_instance.web.public_ip}"
 }
+
+# ---- consumed by ops/aws/provision-web-m8.sh to write /opt/flashmatch/
+# provisioner.env, so the on-demand box daemon's launch parameters are derived
+# from Terraform rather than hand-typed onto the web node.
+output "subnet_id" {
+  value = var.subnet_id
+}
+
+output "agent_security_group_id" {
+  value = aws_security_group.worker.id
+}
+
+output "instance_profile" {
+  value = local.instance_profile
+}
+
+output "key_name" {
+  value = aws_key_pair.this.key_name
+}
+
+output "agent_instance_type" {
+  value = var.agent_instance_type
+}
+
+output "agent_core_count" {
+  value = var.agent_core_count
+}
