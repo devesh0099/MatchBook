@@ -490,7 +490,7 @@ export default function EditorPage() {
                 textTransform: 'none',
               }}
             >
-              41 visible tests · ⌘↵
+              visible tests · ⌘↵
             </span>
           </button>
 
@@ -681,7 +681,7 @@ function LastRun({
   }, []);
 
   const tests = result?.tests;
-  const total = tests?.total ?? 41;
+  const total = tests?.total ?? 46;
   const passed = tests?.passed ?? 0;
   const failing = tests ? total - passed : 0;
 
@@ -704,7 +704,7 @@ function LastRun({
       {!result ? (
         <div style={{ fontSize: 12, color: 'var(--app-ink-3)' }}>
           {running
-            ? 'Compiling and running the 41 visible tests.'
+            ? 'Compiling and running the visible tests.'
             : 'Press Run. It is unlimited and takes a couple of seconds.'}
         </div>
       ) : !result.compiled ? (
