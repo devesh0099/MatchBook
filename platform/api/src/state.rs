@@ -88,3 +88,57 @@ pub async fn leaderboard_from_db(db: &PgPool) -> Result<Vec<LeaderboardEntry>> {
     .await?;
     Ok(rows)
 }
+
+/// A row of the public PROGRESS board: every active contestant, whether or not
+/// they have ranked. Ranked contestants carry their level + chain; everyone
+/// carries their best visible-test result (correctness), taken across their
+/// submissions and their runs. Hidden/removed participants are excluded.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ProgressEntry {
+    pub handle: String,
+    pub submission_id: Option<i64>,
+    pub max_level: Option<i32>,
+    pub chain_p95_ns: Option<f64>,
+    pub chain_p50_ns: Option<f64>,
+    pub chain_p99_ns: Option<f64>,
+    /// Best visible-test pass count (0 if they have never compiled).
+    pub tests_passed: i32,
+    /// The visible-test total (NULL until they have run the tests at all).
+    pub tests_total: Option<i32>,
+}
+
+/// The full board: ranked contestants first (level, then the p95/p50/p99 chain,
+/// then earliest submission), then everyone still on correctness ordered by how
+/// many tests they pass. One row per contestant.
+pub async fn progress_board_from_db(db: &PgPool) -> Result<Vec<ProgressEntry>> {
+    let rows: Vec<ProgressEntry> = sqlx::query_as(
+        "SELECT p.handle, \
+                lb.submission_id, lb.max_level, \
+                lb.chain_p95_ns, lb.chain_p50_ns, lb.chain_p99_ns, \
+                GREATEST( \
+                  COALESCE((SELECT MAX((s.phase0->'tests'->>'passed')::int) FROM submissions s \
+                            WHERE s.participant_id = p.id AND s.phase0->'tests' IS NOT NULL), 0), \
+                  COALESCE((SELECT MAX((r.result->'tests'->>'passed')::int) FROM run_jobs r \
+                            WHERE r.participant_id = p.id AND r.result->'tests' IS NOT NULL), 0) \
+                )::int AS tests_passed, \
+                NULLIF(GREATEST( \
+                  COALESCE((SELECT MAX((s.phase0->'tests'->>'total')::int) FROM submissions s \
+                            WHERE s.participant_id = p.id), 0), \
+                  COALESCE((SELECT MAX((r.result->'tests'->>'total')::int) FROM run_jobs r \
+                            WHERE r.participant_id = p.id), 0) \
+                ), 0)::int AS tests_total \
+         FROM participants p \
+         LEFT JOIN leaderboard lb ON lb.participant_id = p.id \
+         WHERE p.removed_at IS NULL AND p.hidden IS NOT TRUE \
+         ORDER BY (lb.max_level IS NULL) ASC, \
+                  lb.max_level DESC NULLS LAST, \
+                  lb.chain_p95_ns ASC NULLS LAST, \
+                  lb.chain_p50_ns ASC NULLS LAST, \
+                  lb.chain_p99_ns ASC NULLS LAST, \
+                  lb.created_at ASC NULLS LAST, \
+                  tests_passed DESC, p.handle ASC",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}

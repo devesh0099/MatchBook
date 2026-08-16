@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use common::SubState;
 use crate::auth::{self, Auth};
-use crate::state::{leaderboard_from_db, AppState, Storage};
+use crate::state::{AppState, Storage};
 
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
 
@@ -358,7 +358,7 @@ async fn leaderboard(State(st): State<AppState>) -> ApiResult<serde_json::Value>
         }
     }
 
-    let entries = leaderboard_from_db(&st.db).await.map_err(internal)?;
+    let entries = crate::state::progress_board_from_db(&st.db).await.map_err(internal)?;
     Ok(Json(json!({ "frozen": is_frozen, "entries": entries })))
 }
 

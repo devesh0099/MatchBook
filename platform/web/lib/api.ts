@@ -121,13 +121,18 @@ export interface SubmitResponse {
 
 export interface LeaderboardEntry {
   handle: string;
-  submission_id: number;
-  /// Highest ladder level cleared; 0 ranks on the Phase I chain.
-  max_level: number;
-  /// The scoring chain at that level: p95, then p50, then p99.
+  submission_id: number | null;
+  /// Highest ladder level cleared; null for a contestant who has not ranked yet
+  /// (still on correctness).
+  max_level: number | null;
+  /// The scoring chain at that level: p95, then p50, then p99. Null until ranked.
   chain_p95_ns: number | null;
   chain_p50_ns: number | null;
   chain_p99_ns: number | null;
+  /// Best visible-test pass count (progress board); 0 if never compiled.
+  tests_passed?: number;
+  /// Visible-test total; null until the tests have been run at all.
+  tests_total?: number | null;
 }
 
 export interface FinalEntry {

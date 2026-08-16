@@ -17,6 +17,9 @@ import { api, type FinalEntry, type LeaderboardEntry } from '@/lib/api';
 import { useIdentity } from '@/lib/identity';
 
 const COLS = '56px minmax(0,1fr) 90px 110px 110px 110px';
+// The live progress board carries a correctness column and lists everyone,
+// ranked or not, so it needs its own template.
+const BOARDCOLS = '48px minmax(0,1fr) 118px 68px 100px 100px 100px';
 
 export default function LeaderboardPage() {
   const { identity } = useIdentity();
@@ -309,7 +312,7 @@ export default function LeaderboardPage() {
           className="kicker"
           style={{
             display: 'grid',
-            gridTemplateColumns: COLS,
+            gridTemplateColumns: BOARDCOLS,
             padding: '10px 16px',
             background: 'var(--app-panel)',
             borderBottom: '2px solid var(--app-rule)',
@@ -319,6 +322,7 @@ export default function LeaderboardPage() {
         >
           <span>Rank</span>
           <span>Participant</span>
+          <span style={{ textAlign: 'right' }}>Correctness</span>
           <span style={{ textAlign: 'right' }}>Level</span>
           <span style={{ textAlign: 'right' }}>p95 ns</span>
           <span style={{ textAlign: 'right' }}>p50 ns</span>
@@ -328,7 +332,7 @@ export default function LeaderboardPage() {
         {!loaded && <div style={{ padding: 16, color: 'var(--app-ink-3)' }}>Loading…</div>}
         {loaded && ranked.length === 0 && (
           <div style={{ padding: 16, color: 'var(--app-ink-3)' }}>
-            Nothing has passed the correctness gate yet.
+            No contestants yet.
           </div>
         )}
 
@@ -340,7 +344,7 @@ export default function LeaderboardPage() {
               className="mono"
               style={{
                 display: 'grid',
-                gridTemplateColumns: COLS,
+                gridTemplateColumns: BOARDCOLS,
                 alignItems: 'center',
                 padding: '9px 16px',
                 borderBottom: '1px solid var(--app-line)',
@@ -371,8 +375,20 @@ export default function LeaderboardPage() {
                 </span>
                 {me && <span style={{ fontSize: 10, color: 'var(--app-ink-3)' }}>you</span>}
               </span>
+              <span
+                style={{
+                  textAlign: 'right',
+                  fontWeight: 700,
+                  color:
+                    e.tests_total != null && e.tests_passed === e.tests_total
+                      ? 'var(--s-pass)'
+                      : 'var(--app-ink-2)',
+                }}
+              >
+                {e.tests_total != null ? `${e.tests_passed ?? 0}/${e.tests_total}` : '—'}
+              </span>
               <span style={{ textAlign: 'right', fontWeight: 700, fontSize: 15 }}>
-                {e.max_level}
+                {e.max_level != null ? e.max_level : '—'}
               </span>
               <span style={{ textAlign: 'right', fontWeight: 700 }}>
                 {e.chain_p95_ns != null ? Math.round(e.chain_p95_ns) : '—'}
