@@ -1,4 +1,4 @@
-// engine.cpp — your starting engine.
+// engine.cpp - your starting engine.
 //
 // This is a COMPLETE, correct matching engine. Submit it unchanged and it
 // passes every correctness check. It is written for clarity, not speed: a
@@ -8,7 +8,7 @@
 // Your job is to make it fast. The benchmark ranks you on p95 latency per
 // event, and the ladder only lets you climb as your engine gets quicker, so
 // every improvement to the hot paths (on_new / on_cancel) and to these data
-// structures earns you levels. Correctness is a gate you have already cleared —
+// structures earns you levels. Correctness is a gate you have already cleared -
 // keep it green while you optimize.
 //
 // You may restructure this file completely. The only fixed points are the
@@ -33,8 +33,8 @@ class Engine final : public IMatchingEngine {
     last_seq_ = o.seq;
     uint32_t remaining = o.qty;
 
-    // A fill-or-kill order must be checked for fillability BEFORE any change to
-    // the book, and before the Ack: an unfillable FOK emits only the Reject.
+    // >>> ANSWER [F1/F2] - FOK fillability: check BEFORE any change to the book
+    // and before the Ack; an unfillable FOK emits only the Reject.
     if (o.tif == TIF::FOK) {
       const uint32_t available =
           o.side == Side::Buy ? fillable_qty(asks_, o) : fillable_qty(bids_, o);
@@ -47,7 +47,8 @@ class Engine final : public IMatchingEngine {
     // Every accepted order acks exactly once, before any other output.
     sink.emit(out::ack(o.seq, o.ref(), o.price, o.side));
 
-    // Match against the opposite side, best price first.
+    // >>> ANSWER [1.1 Core] - match against the opposite side, best price first
+    // (the loop body lives in match() below).
     if (o.side == Side::Buy) {
       match(asks_, o, remaining, sink);
     } else {
@@ -58,14 +59,14 @@ class Engine final : public IMatchingEngine {
 
     switch (o.tif) {
       case TIF::GTC:
-        // A resting order: the remainder waits in the book silently.
+        // >>> ANSWER [A4] - rest the remainder silently.
         if (o.side == Side::Buy) rest(bids_, o, remaining);
         else rest(asks_, o, remaining);
         break;
 
       case TIF::IOC:
       case TIF::Market:
-        // Whatever did not fill expires immediately.
+        // >>> ANSWER [M3/I1] - one Expired carrying whatever did not fill.
         sink.emit(out::expired(o.seq, o.ref(), remaining, o.side));
         break;
 
@@ -78,9 +79,11 @@ class Engine final : public IMatchingEngine {
   void on_cancel(OrderRef ref, uint64_t seq, OutSink& sink) noexcept override {
     last_seq_ = seq;
 
+    // >>> ANSWER [1.4 Cancel] - look up the (session_id, client_order_id) pair;
+    // found: remove it and cancel-ack the REMAINING qty; not found: reject.
     auto it = index_.find(key_of(ref));
     if (it == index_.end()) {
-      // Unknown, or already fully filled — either way it is no longer live.
+      // Unknown, or already fully filled - either way it is no longer live.
       sink.emit(out::reject(seq, ref, RejectReason::UnknownOrder, Side::Buy));
       return;
     }
@@ -105,12 +108,15 @@ class Engine final : public IMatchingEngine {
   void snapshot(BookSnapshot& snap) const override {
     snap = BookSnapshot{};
     snap.at_seq = last_seq_;
+    // >>> ANSWER [snapshot] - occupied level counts and whole-book totals.
     snap.n_bids = static_cast<uint32_t>(bids_.size());
     snap.n_asks = static_cast<uint32_t>(asks_.size());
     snap.resting_qty_total = resting_qty_total_;
     snap.resting_order_count = resting_order_count_;
   }
 
+  // >>> ANSWER [levels] - one (price, total_qty) pair per occupied level, best
+  // price first (bodies in fill_levels below).
   void bid_levels(LevelVec& out) const override { fill_levels(bids_, out); }
   void ask_levels(LevelVec& out) const override { fill_levels(asks_, out); }
 
@@ -140,8 +146,8 @@ class Engine final : public IMatchingEngine {
     return aggressor_side == Side::Buy ? level_price <= aggr_price : level_price >= aggr_price;
   }
 
-  // Read-only walk, best price first, bounded by the limit price, summing only
-  // OTHER firms' resting quantity. Changes nothing.
+  // >>> ANSWER [F1] - read-only walk, best price first, bounded by the limit
+  // price, summing only OTHER firms' resting quantity. Changes nothing.
   template <class Book>
   uint32_t fillable_qty(const Book& book, const Order& o) const {
     uint64_t sum = 0;
@@ -156,8 +162,9 @@ class Engine final : public IMatchingEngine {
     return static_cast<uint32_t>(sum);
   }
 
-  // Walks the opposite book best price first, arrival order within a level,
-  // emitting Trades and self-trade cancellations in the order they happen.
+  // >>> ANSWER [1.1 Core + S1/S2/S5] - walk the opposite book best price first,
+  // arrival order within a level, emitting Trades (at the RESTING price) and
+  // self-trade CancelAcks in book-walk order.
   template <class Book>
   void match(Book& book, const Order& o, uint32_t& remaining, OutSink& sink) noexcept {
     auto lit = book.begin();
@@ -204,6 +211,8 @@ class Engine final : public IMatchingEngine {
     }
   }
 
+  // >>> ANSWER [A4] - push the remainder onto its price level and index it so a
+  // later cancel is O(log n), not a book scan.
   template <class Book>
   void rest(Book& book, const Order& o, uint32_t remaining) noexcept {
     Level& level = book[o.price];
@@ -213,6 +222,8 @@ class Engine final : public IMatchingEngine {
     ++resting_order_count_;
   }
 
+  // >>> ANSWER [1.4 Cancel] - remove a resting order from its level (drops the
+  // level when it empties).
   template <class Book>
   void erase_at(Book& book, int32_t price, Level::iterator it) noexcept {
     auto lit = book.find(price);
@@ -221,6 +232,8 @@ class Engine final : public IMatchingEngine {
     if (lit->second.empty()) book.erase(lit);
   }
 
+  // >>> ANSWER [levels] - one (price, total_qty) pair per occupied level, in the
+  // map's best-first order.
   template <class Book>
   void fill_levels(const Book& book, LevelVec& dst) const {
     dst.clear();
