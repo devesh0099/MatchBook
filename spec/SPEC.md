@@ -138,8 +138,7 @@ The second is correct.
 **F1 is a specification invention, not industry practice.** Real venues offer several STP
 variants under which this corner never arises, so exchange experience will not tell you
 this rule. It is what cancel-resting STP plus FOK atomicity force; the alternatives are
-partial FOK fills or rollback machinery. The hidden stream contains an injected case that
-separates F1 from the naive count.
+partial FOK fills or rollback machinery.
 
 ### 1.7 IOC × STP (I1)
 
@@ -185,8 +184,7 @@ Warm-up is sized from the stream's own profile: the ranked profile builds a book
 roughly **750,000 resting orders across ~14,800 price levels**, and it takes about 9.7M
 events to get there. Those events run through your engine — the digest covers them —
 but they are not measured, so every ranked sample is taken against a book at full
-depth. That book is far larger than any L3, which is the point: a layout that keeps
-per-order footprint small is measurably faster here and was not at shallower depths.
+depth. That book is far larger than any L3.
 
 ```cpp
 for (uint64_t i = 0; i < n; ++i) {

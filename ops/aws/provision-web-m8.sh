@@ -67,19 +67,23 @@ step "sealing event seeds (urandom, on the web node, never printed)"
 # read from here only when a rejudge starts. Generated once and kept 0600 — the
 # whole point is that no one, including this script's output, ever sees them.
 FORCE="${REGEN_SEEDS:-0}"
-node web "bash -s" <<SEEDGEN
-set -e
+# NOTE: node()/ssh use `ssh -n`, which discards stdin — so a heredoc piped to
+# `bash -s` on the far side is silently dropped. Base64 the script and run it as
+# an ARGUMENT instead, which survives that.
+SEEDGEN="$(cat <<SEEDEOF
 SEEDS=/opt/flashmatch/platform/.seeds
 if [ ! -f "\$SEEDS" ] || [ "$FORCE" = 1 ]; then
   s() { printf '%u' "0x\$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' ')"; }
   sudo mkdir -p /opt/flashmatch/platform
   printf 'MEBENCH_SEED1=%s\nMEBENCH_SEED2=%s\nMEBENCH_SEED3=%s\n' "\$(s)" "\$(s)" "\$(s)" | sudo tee "\$SEEDS" >/dev/null
   sudo chmod 600 "\$SEEDS"
-  echo "sealed a fresh .seeds"
+  echo "sealed a fresh .seeds (\$(sudo wc -l "\$SEEDS" | awk '{print \$1}') lines)"
 else
   echo ".seeds already present — kept (pass REGEN_SEEDS=1 to rotate)"
 fi
-SEEDGEN
+SEEDEOF
+)"
+node web "echo $(printf '%s' "$SEEDGEN" | base64 -w0) | base64 -d | bash"
 
 step "writing /opt/flashmatch/provisioner.env (launch config for the daemon)"
 node web "sudo tee /opt/flashmatch/provisioner.env >/dev/null <<ENVEOF
