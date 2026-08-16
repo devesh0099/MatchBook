@@ -265,6 +265,10 @@ export interface OpParticipantRow {
   activity: string;
   latest_submission: number | null;
   best_level: number | null;
+  /// When the in-flight box request was enqueued (ISO), for the elapsed clock
+  /// while a box is deploying/redeploying/removing. Null when nothing's in
+  /// flight.
+  busy_since: string | null;
 }
 
 /// The /admin dashboard's surface: the same operator actions the loopback

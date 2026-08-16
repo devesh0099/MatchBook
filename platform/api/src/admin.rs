@@ -184,9 +184,15 @@ async fn participants_status(State(st): State<AppState>) -> R {
     let rows: Vec<(
         i32, String, Option<String>, String, Option<String>, Option<bool>,
         Option<i64>, Option<String>, Option<serde_json::Value>, Option<i32>,
+        Option<chrono::DateTime<chrono::Utc>>,
     )> = sqlx::query_as(
+        // busy_since: when the in-flight box request was enqueued, so the
+        // dashboard can show an elapsed clock and make a slow-but-fine deploy
+        // distinguishable from a stuck one.
         "SELECT p.id, p.handle, b.id, p.box_state, p.box_detail, b.healthy, \
-                latest.id, latest.state::text, latest.phase2, best.max_level \
+                latest.id, latest.state::text, latest.phase2, best.max_level, \
+                (SELECT min(created_at) FROM box_requests r \
+                 WHERE r.participant_id = p.id AND r.state IN ('pending','running')) \
          FROM participants p \
          LEFT JOIN boxes b ON b.participant_id = p.id \
          LEFT JOIN LATERAL (SELECT id, state, phase2 FROM submissions \
@@ -254,12 +260,13 @@ async fn participants_status(State(st): State<AppState>) -> R {
     }
 
     Ok(Json(json!({
-        "participants": rows.into_iter().map(|(id, handle, box_id, box_state, box_detail, healthy, sub, state, phase2, level)| {
+        "participants": rows.into_iter().map(|(id, handle, box_id, box_state, box_detail, healthy, sub, state, phase2, level, busy_since)| {
             let act = activity(&box_state, box_detail.as_deref(), healthy, state.as_deref(), &phase2);
             json!({
                 "participant_id": id, "handle": handle, "box": box_id,
                 "box_state": box_state, "activity": act,
                 "latest_submission": sub, "best_level": level,
+                "busy_since": busy_since,
             })
         }).collect::<Vec<_>>(),
     })))

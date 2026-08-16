@@ -60,6 +60,16 @@ function boxBtn(confirming: boolean): React.CSSProperties {
   };
 }
 
+// Elapsed since a box request was enqueued, as m:ss, with a "how worried
+// should I be" tone: a deploy is normally 1–2 min and fails by ~9 min, so
+// past ~3 min is amber and past ~8 min is red (likely stuck).
+function elapsedSince(iso: string, now: number): { text: string; tone: string } {
+  const secs = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
+  const text = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+  const tone = secs > 480 ? 'var(--s-fail)' : secs > 180 ? 'var(--s-slow)' : 'var(--app-ink-3)';
+  return { text, tone };
+}
+
 function ActionButton({
   label,
   danger,
@@ -282,6 +292,13 @@ export default function AdminPage() {
 
   const [rejudge, setRejudge] = useState<RejudgeStatus | null>(null);
   const [inspect, setInspect] = useState<{ pid: number; handle: string } | null>(null);
+  // Ticks every second so the elapsed clock on a deploying box advances
+  // smoothly between the 5s status polls.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
   const refresh = useCallback(() => {
     op.health().then(setHealth).catch(() => {});
     op.participants().then((r) => setParticipants(r.participants)).catch(() => {});
@@ -604,6 +621,14 @@ export default function AdminPage() {
                 title={p.box ?? ''}
               >
                 {busy && '⟳ '}{a}
+                {busy && p.busy_since && (() => {
+                  const e = elapsedSince(p.busy_since, now);
+                  return (
+                    <span style={{ color: e.tone, fontWeight: 600, marginLeft: 6 }}>
+                      · {e.text}{e.tone === 'var(--s-fail)' ? ' · likely stuck' : ''}
+                    </span>
+                  );
+                })()}
               </span>
               <span style={{ textAlign: 'right', fontWeight: 700 }}>
                 {p.best_level != null ? `L${p.best_level}` : '—'}
