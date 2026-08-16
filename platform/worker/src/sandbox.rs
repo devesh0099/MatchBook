@@ -74,7 +74,26 @@ impl Sandbox {
 
     /// Each --box-id runs as a different unprivileged UID, so boxes cannot
     /// touch each other's files even if a mount is misconfigured.
+    ///
+    /// Self-healing (I2): a killed predecessor — or, before the B3 lock, a
+    /// second worker — can leave box `id` half-`--init`ed or lock-held, and a
+    /// plain `--cleanup` refuses to clear a slot another session "owns". So a
+    /// first `--init` that fails is not fatal: force the slot clear and retry
+    /// once. Only a second failure bails.
     pub async fn init(&self, id: u32) -> Result<Box_> {
+        match self.try_init(id).await {
+            Ok(b) => Ok(b),
+            Err(first) => {
+                tracing::warn!("isolate --init failed for box {id} ({first}); forcing reset and retrying");
+                self.force_reset(id);
+                self.try_init(id).await.with_context(|| {
+                    format!("isolate --init failed for box {id} even after a forced reset")
+                })
+            }
+        }
+    }
+
+    async fn try_init(&self, id: u32) -> Result<Box_> {
         let out = Command::new(&self.binary)
             .args(["--cg", "--box-id", &id.to_string(), "--init"])
             .output()
@@ -98,6 +117,44 @@ impl Sandbox {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+    }
+
+    /// Forcefully return box `id` to a clean, re-`--init`able state — the I2
+    /// fix. An orderly `--cleanup` is tried first; then anything still alive in
+    /// the box's cgroup is killed (a segfault zombie pinned to the measurement
+    /// core is exactly the accident the sandbox module calls near-certain), and
+    /// the leftover box directory + lock are removed so `--init` can recreate
+    /// the slot. Best-effort throughout: every step is ignorable, because the
+    /// point is that the NEXT `--init` succeeds, and this is measured by that.
+    pub fn force_reset(&self, id: u32) {
+        // 1. Orderly cleanup — reaps the box's control process when it can.
+        self.cleanup_blocking(id);
+        // 2. Kill any process still in the box's cgroup. isolate's cgroup lives
+        //    under a per-box subtree; SIGKILL everything listed, if present.
+        for procs in [
+            format!("/sys/fs/cgroup/isolate/box-{id}/cgroup.procs"),
+            format!("/sys/fs/cgroup/isolate/{id}/cgroup.procs"),
+        ] {
+            if let Ok(pids) = std::fs::read_to_string(&procs) {
+                for pid in pids.split_whitespace().filter_map(|p| p.parse::<i32>().ok()) {
+                    unsafe { libc_kill(pid, 9) };
+                }
+            }
+        }
+        // 3. Remove the leftover box tree so a stale --init lock cannot block
+        //    the next one. isolate's default box root is /var/local/lib/isolate.
+        let root = std::env::var("ISOLATE_BOX_ROOT")
+            .unwrap_or_else(|_| "/var/local/lib/isolate".into());
+        let box_dir = PathBuf::from(root).join(id.to_string());
+        if box_dir.exists() {
+            let _ = std::process::Command::new("rm")
+                .arg("-rf")
+                .arg(&box_dir)
+                .status();
+        }
+        // 4. One more orderly cleanup so isolate's own bookkeeping agrees the
+        //    slot is free.
+        self.cleanup_blocking(id);
     }
 
     pub async fn run(&self, b: &Box_, opts: &RunOpts, argv: &[&str]) -> Result<RunOutcome> {
@@ -222,6 +279,15 @@ fn libc_dup2(old: i32, new: i32) -> i32 {
         fn dup2(oldfd: i32, newfd: i32) -> i32;
     }
     unsafe { dup2(old, new) }
+}
+
+/// SIGKILL a lingering box process during a forced reset. Unsafe by nature:
+/// caller has already decided the pid is a leaked box process.
+unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    kill(pid, sig)
 }
 
 pub struct RunOpts {

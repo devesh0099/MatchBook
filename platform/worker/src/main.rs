@@ -137,6 +137,11 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| "worker".into())
     });
     let box_id: u32 = env_or("BOX_ID", "0").parse().unwrap_or(0);
+    // B3: exactly one worker per box id. One box is one machine, so a second
+    // worker on the same box_id is a second process here — take a machine-local
+    // exclusive lock and refuse to start if another holds it, rather than let
+    // two workers collide on isolate box N and on the heartbeat row.
+    acquire_box_lock(box_id).context("box single-instance guard")?;
     let cfg = Config {
         worker_id: format!("{role}-{hostname}-{box_id}"),
         role: role.clone(),
@@ -173,6 +178,37 @@ async fn main() -> Result<()> {
         "golden" => roles::run_golden(db, cfg).await,
         _ => roles::run_agent(db, cfg).await,
     }
+}
+
+/// B3 single-instance guard. Takes an exclusive, non-blocking `flock` on a
+/// per-box lock file and HOLDS it for the whole process lifetime (the File is
+/// leaked on purpose). If another worker already holds it, this returns an
+/// error and the process exits instead of becoming a second worker on the same
+/// isolate box and heartbeat row.
+fn acquire_box_lock(box_id: u32) -> anyhow::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let open = |p: &std::path::Path| {
+        std::fs::OpenOptions::new().create(true).write(true).open(p)
+    };
+    let primary = std::path::PathBuf::from(format!("/run/mebench-agent-{box_id}.lock"));
+    let file = open(&primary).or_else(|_| {
+        // /run may be unwritable in a dev/container context; fall back to tmp.
+        open(&std::env::temp_dir().join(format!("mebench-agent-{box_id}.lock")))
+    })?;
+    extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+    if rc != 0 {
+        anyhow::bail!(
+            "another worker already holds box {box_id} — refusing to start a second (single-instance guard)"
+        );
+    }
+    // Hold the lock for the life of the process.
+    std::mem::forget(file);
+    Ok(())
 }
 
 /// Any row still claimed by THIS worker id at startup is orphaned by

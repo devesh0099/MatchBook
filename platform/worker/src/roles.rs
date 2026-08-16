@@ -96,9 +96,10 @@ pub async fn run_agent(db: PgPool, cfg: Config) -> Result<()> {
     let sandbox = Sandbox::new();
     // A killed predecessor never ran its BoxGuard, and a stale isolate box
     // wedges every later init for this box id. A fresh agent owns its box id
-    // outright, so an unconditional cleanup at startup is always correct —
-    // the companion of the startup reclaim in main.rs.
-    sandbox.cleanup_blocking(cfg.box_id);
+    // outright (the B3 lock in main.rs guarantees it), so a FORCEFUL reset at
+    // startup is always correct — clears even a box a plain --cleanup refuses.
+    // The companion of the startup reclaim in main.rs.
+    sandbox.force_reset(cfg.box_id);
     loop {
         // Run jobs first, always: Run turnaround IS the iteration loop, and a
         // Submit can wait the extra seconds.
@@ -552,7 +553,7 @@ async fn run_level(
 pub async fn run_golden(db: PgPool, cfg: Config) -> Result<()> {
     let seed3 = cfg.seed3.context("MEBENCH_SEED3 must be set for the golden role")?;
     let sandbox = Sandbox::new();
-    sandbox.cleanup_blocking(cfg.box_id);
+    sandbox.force_reset(cfg.box_id);
     tracing::info!("golden box up; rejudge seed loaded, streams bake on first job");
     loop {
         let row: Option<(i64, i32, i64, String)> = sqlx::query_as(
